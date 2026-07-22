@@ -2,6 +2,11 @@
   "name": "robot-live-ui",
   "version": "1.0.0",
   "description": "Robot Live System Control Panel",
+  "author": "weiyuech",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/weiyuech/phase2_compiler.git"
+  },
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

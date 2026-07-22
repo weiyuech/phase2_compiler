@@ -36,9 +36,10 @@ jobs:
       - name: Build and Package Electron App
         run: |
           cd robot-ui
-          npm run package
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          node scripts/gen-icon.mjs
+          node scripts/prepare-backend.mjs
+          npx electron-vite build
+          npx electron-builder --publish never
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
