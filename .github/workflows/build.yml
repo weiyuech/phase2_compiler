@@ -1,0 +1,47 @@
+name: Build and Release (Windows Only)
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            robot-ui/package-lock.json
+
+      - name: Install Root Dependencies
+        run: npm ci
+
+      - name: Install UI Dependencies
+        run: |
+          cd robot-ui
+          npm ci
+
+      - name: Build and Package Electron App
+        run: |
+          cd robot-ui
+          npm run package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: release/
