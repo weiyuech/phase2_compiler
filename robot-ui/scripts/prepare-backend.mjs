@@ -47,6 +47,22 @@ if (nativeModules.length > 0) {
 }
 console.log('[prepare-backend] done →', destDir)
 
+// Clean up unused platform binaries from onnxruntime-node to save ~123MB in packaged app size
+const ortBinDir = join(destDir, 'node_modules/onnxruntime-node/bin/napi-v6')
+if (existsSync(ortBinDir)) {
+  console.log('[prepare-backend] Cleaning up unused platform binaries from onnxruntime-node...')
+  const platforms = ['darwin', 'linux', 'win32']
+  for (const p of platforms) {
+    if (p !== 'win32') {
+      const pDir = join(ortBinDir, p)
+      if (existsSync(pDir)) {
+        rmSync(pDir, { recursive: true, force: true })
+        console.log(`[prepare-backend] Removed unused platform: ${p}`)
+      }
+    }
+  }
+}
+
 // Windows 专属：下载 Visual C++ 2022 运行库，供 NSIS 安装脚本静默安装
 // @ngrok/ngrok 是 Rust 编译的 native 模块，运行依赖 VCRUNTIME140.dll
 /*
