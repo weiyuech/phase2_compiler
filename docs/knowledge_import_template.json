@@ -1,0 +1,23 @@
+[
+  {
+    "map_name": "map1",
+    "path_name": "path1",
+    "goal_id": 1,
+    "goal_object": "car",
+    "body": "大家现在看到的这款全新车型，采用了星际流体美学设计。车身线条流畅，极具未来感。"
+  },
+  {
+    "map_name": "map1",
+    "path_name": "path1",
+    "goal_id": 2,
+    "goal_object": null,
+    "body": "这里是通用讲解点位，我们将在这里向大家展示我们最新的技术成果。"
+  },
+  {
+    "map_name": "map1",
+    "path_name": "path1",
+    "goal_id": 3,
+    "goal_object": null,
+    "body": null
+  }
+]

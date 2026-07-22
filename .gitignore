@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+robot-ui/node_modules/
+robot-ui/resources/backend/node_modules/
+
+# Sensitive config
+.env
+config/admin.json
+
+# Build outputs
+robot-ui/out/
+robot-ui/dist/
+release/
+直播控制系统.zip
+
+# TTS cache database
+data/tts-cache/
+
+# OS cache
+.DS_Store
+Thumbs.db

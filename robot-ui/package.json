@@ -1,0 +1,95 @@
+{
+  "name": "robot-live-ui",
+  "version": "1.0.0",
+  "description": "Robot Live System Control Panel",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "package": "node scripts/gen-icon.mjs && node scripts/prepare-backend.mjs && electron-vite build && electron-builder"
+  },
+  "dependencies": {
+    "element-plus": "^2.7.0",
+    "onnxruntime-web": "^1.18.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
+    "@vitejs/plugin-vue": "^5.0.4",
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3",
+    "electron-vite": "^2.2.0",
+    "vue": "^3.4.21"
+  },
+  "build": {
+    "appId": "com.robot.live",
+    "productName": "机器人直播控制台",
+    "icon": "build/icon.png",
+    "directories": {
+      "output": "../release"
+    },
+    "files": [
+      "out/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/backend/node_modules",
+        "to": "backend/node_modules"
+      },
+      {
+        "from": "../src",
+        "to": "backend/src",
+        "filter": [
+          "**/*.js"
+        ]
+      },
+      {
+        "from": "../config",
+        "to": "backend/config"
+      },
+      {
+        "from": "../data",
+        "to": "backend/data"
+      },
+      {
+        "from": "../package.json",
+        "to": "backend/package.json"
+      },
+      {
+        "from": "../.env.example",
+        "to": "backend/.env.example"
+      },
+      {
+        "from": "../ffplay.exe",
+        "to": "backend/ffplay.exe"
+      },
+      {
+        "from": "build/tray-icon.png",
+        "to": "tray-icon.png"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico",
+      "executableName": "robot-live-ui"
+    },
+    "nsis": {
+      "oneClick": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "include": "build/installer.nsh"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "build/icon.png",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "需要麦克风权限以检测助播讲解并自动暂停机器人播报"
+      }
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "build/icon.png"
+    }
+  }
+}

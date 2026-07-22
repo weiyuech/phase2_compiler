@@ -1,0 +1,7 @@
+{
+  "mode": "llm-strict",
+  "document_name": "",
+  "priority_mode": false,
+  "random_reply": false,
+  "cooldown": 3
+}
