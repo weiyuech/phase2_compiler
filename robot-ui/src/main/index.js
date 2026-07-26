@@ -3,23 +3,25 @@ import { join, resolve }                        from 'path'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync, appendFileSync } from 'fs'
 import { scryptSync, randomBytes, timingSafeEqual } from 'crypto'
 
-// ─── PATH helper（packaged app 不继承 shell PATH，手动补充 ffplay 常见位置）────
-function buildPath() {
-  const sep  = process.platform === 'win32' ? ';' : ':'
-  const base = process.env.PATH || ''
-  const extra =
-    process.platform === 'darwin' ? ['/opt/homebrew/bin', '/usr/local/bin'] :
-    process.platform === 'win32'  ? ['C:\\ffmpeg\\bin', 'C:\\Program Files\\ffmpeg\\bin'] :
-    /* linux */                     ['/usr/local/bin']
-  return [...extra, base].join(sep)
-}
-
 // ─── PROJECT_ROOT ─────────────────────────────────────────────────────────────
 // dev:      src/main/ → src/ → robot-ui/ → robot-live-system/  (3 levels up)
 // packaged: resources/backend/  (extraResources target)
 const PROJECT_ROOT = app.isPackaged
   ? join(process.resourcesPath, 'backend')
   : resolve(__dirname, '../../../')
+
+// ─── PATH helper（packaged app 不继承 shell PATH，手动补充 ffplay 常见位置）────
+// PROJECT_ROOT 会被放到 PATH 最前面：Windows 下 ffplay.exe 就在这个目录里，
+// 走 PATH 解析也能被 spawn 找到（audio-player 里的解析器是主路径，这里是兜底）
+function buildPath() {
+  const sep  = process.platform === 'win32' ? ';' : ':'
+  const base = process.env.PATH || ''
+  const extra =
+    process.platform === 'darwin' ? ['/opt/homebrew/bin', '/usr/local/bin'] :
+    process.platform === 'win32'  ? [PROJECT_ROOT, 'C:\\ffmpeg\\bin', 'C:\\Program Files\\ffmpeg\\bin'] :
+    /* linux */                     [PROJECT_ROOT, '/usr/local/bin']
+  return [...extra, base].join(sep)
+}
 // ─── USER_DATA_DIR ────────────────────────────────────────────────────────────
 // 运行时可写数据（巡游清单、知识库文件）放此处，避免 Windows 安装目录写权限问题
 const USER_DATA_DIR = app.getPath('userData')
