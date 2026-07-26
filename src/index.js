@@ -232,13 +232,15 @@ uiBridge.on('onSelectMap', async (mapName) => {
   console.log(`[系统] 路径列表: ${paths?.join(', ')}`)
 })
 
-uiBridge.on('onStartTour', async () => {
+uiBridge.on('onStartTour', async (payload) => {
   if (!currentMap) {
     uiBridge.broadcast('ERROR', { message: '请先在点位编辑页选择并切换地图' })
     return
   }
-  if (tour.start()) {
-    uiBridge.broadcast('TOUR_STARTED', {})
+  // Payload is either {repeatCount:N} from new UI, or undefined from legacy clients
+  const repeatCount = (payload && typeof payload === 'object') ? payload.repeatCount : payload
+  if (tour.start(repeatCount)) {
+    uiBridge.broadcast('TOUR_STARTED', { repeatCount: tour.repeatCount })
     await sendNextGoal()
   } else {
     uiBridge.broadcast('ERROR', { message: '巡游清单为空，无法开始' })
@@ -625,8 +627,15 @@ uiBridge.on('onSkipPoint', async () => {
   tts.stop()
   transitAudio.stop()
   tour.resume()   // clear paused state so goal-reached won't be filtered
+  const iterationBefore = tour.currentIteration
   const next = tour.advance()
   if (next) {
+    if (tour.currentIteration !== iterationBefore) {
+      uiBridge.broadcast('TOUR_ITERATION', {
+        currentIteration: tour.currentIteration,
+        repeatCount:      tour.repeatCount
+      })
+    }
     transitAudio.start(tts, llm)  // 跳过后机器人导航期间播过渡音频
     await sendNextGoal()
   } else {
@@ -735,8 +744,16 @@ robot.on('goal-reached', async ({ map_name, path_file, goal_id }) => {
     if (!tour.isRunning || _session !== mySession) return
 
     // Advance to next point
+    const iterationBefore = tour.currentIteration
     const next = tour.advance()
     if (next) {
+      // Rolled over into a new repeat iteration
+      if (tour.currentIteration !== iterationBefore) {
+        uiBridge.broadcast('TOUR_ITERATION', {
+          currentIteration: tour.currentIteration,
+          repeatCount:      tour.repeatCount
+        })
+      }
       // 正确时序：TTS 结束 → 过渡音频开始 → 机器人出发
       transitAudio.start(tts, llm)
       await sendNextGoal()

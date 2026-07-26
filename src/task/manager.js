@@ -20,11 +20,13 @@ import path from 'path'
 export class TaskManager extends EventEmitter {
   constructor({ filePath = './data/tour-list.json' } = {}) {
     super()
-    this._filePath     = filePath
-    this._list         = []
-    this._currentIndex = -1     // -1 = not running
-    this._running      = false
-    this._paused       = false
+    this._filePath         = filePath
+    this._list             = []
+    this._currentIndex     = -1     // -1 = not running
+    this._running          = false
+    this._paused           = false
+    this._repeatCount      = 1      // total number of full passes (1 = play once)
+    this._currentIteration = 0      // 1-based, incremented at start()
     this._load()
   }
 
@@ -45,14 +47,25 @@ export class TaskManager extends EventEmitter {
   get isRunning() { return this._running }
   get isPaused()  { return this._paused  }
 
+  get repeatCount()      { return this._repeatCount }
+  get currentIteration() { return this._currentIteration }
+
   // ── Execution state ────────────────────────────────────────────────────────
 
-  /** Start tour from the beginning. Returns false if list is empty. */
-  start() {
+  /**
+   * Start tour from the beginning.
+   * @param {number} [repeatCount=1] - total full passes through the list.
+   *   1 = play once (default), 2 = play twice, etc. Values <1 are clamped to 1.
+   * @returns {boolean} false if list is empty
+   */
+  start(repeatCount = 1) {
     if (this._list.length === 0) return false
-    this._currentIndex = 0
-    this._running      = true
-    this._paused       = false
+    const n = Math.floor(Number(repeatCount))
+    this._repeatCount      = Number.isFinite(n) && n >= 1 ? n : 1
+    this._currentIteration = 1
+    this._currentIndex     = 0
+    this._running          = true
+    this._paused           = false
     return true
   }
 
@@ -67,19 +80,28 @@ export class TaskManager extends EventEmitter {
   }
 
   stop() {
-    this._currentIndex = -1
-    this._running      = false
-    this._paused       = false
+    this._currentIndex     = -1
+    this._running          = false
+    this._paused           = false
+    this._currentIteration = 0
   }
 
   /**
    * Advance to the next item. Returns the new currentItem, or null if the
-   * tour is finished (advanced past the last item).
+   * tour is finished (all iterations played through).
+   *
+   * When past the last item and iterations remain, jumps back to index 0
+   * and increments _currentIteration.
    */
   advance() {
     if (!this._running) return null
     this._currentIndex++
     if (this._currentIndex >= this._list.length) {
+      if (this._currentIteration < this._repeatCount) {
+        this._currentIteration++
+        this._currentIndex = 0
+        return this.currentItem
+      }
       this.stop()
       return null
     }

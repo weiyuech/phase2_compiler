@@ -7,11 +7,26 @@
         <div class="card-title">巡游控制</div>
         <div class="card-desc">开始巡游后机器人将按清单依次前往各点位，到达后自动播报，播完自动前往下一个。</div>
         <div class="btn-row">
-          <el-button
-            v-if="tourStatus === 'idle' || tourStatus === 'finished'"
-            type="primary" size="large" :disabled="!wsConnected"
-            @click="send('START_TOUR')"
-          >▶  开始巡游</el-button>
+          <template v-if="tourStatus === 'idle' || tourStatus === 'finished'">
+            <el-button
+              type="primary" size="large" :disabled="!wsConnected"
+              @click="startTour"
+            >▶  开始巡游</el-button>
+            <div class="repeat-input">
+              <span class="repeat-label">循环</span>
+              <el-input-number
+                v-model="repeatCount"
+                :min="1"
+                :max="999"
+                :precision="0"
+                :step="1"
+                size="default"
+                controls-position="right"
+                style="width: 100px;"
+              />
+              <span class="repeat-label">次</span>
+            </div>
+          </template>
 
           <el-button
             v-if="tourStatus === 'running'"
@@ -37,7 +52,12 @@
             @click="send('SKIP_POINT')"
           >⏭  跳过点位</el-button>
         </div>
-        <div class="status-pill" :class="tourStatusClass">{{ tourStatusLabel }}</div>
+        <div class="status-pill" :class="tourStatusClass">
+          {{ tourStatusLabel }}
+          <span v-if="(tourStatus === 'running' || tourStatus === 'paused') && repeatCount > 1">
+            · 第 {{ currentIteration }} / {{ repeatCount }} 轮
+          </span>
+        </div>
       </div>
 
       <!-- Pause broadcast card -->
@@ -144,6 +164,8 @@ const barrageEnabled = ref(false)
 const barrageRegion = ref(null)
 const currentCapturedText = ref('')
 const barrageCooldown = ref(0)
+const repeatCount = ref(1)  // How many full passes through the tour list
+const currentIteration = ref(0)
 
 // --- WebSocket ---
 const wsConnected = computed(() => !!props.wsRef && props.wsRef.readyState === 1)
@@ -162,11 +184,19 @@ function handleMessage(raw) {
   try {
     const { type, data } = JSON.parse(raw)
     switch (type) {
-      case 'TOUR_STARTED':  tourStatus.value = 'running';  break
+      case 'TOUR_STARTED':
+        tourStatus.value = 'running'
+        if (data && typeof data.repeatCount === 'number') repeatCount.value = data.repeatCount
+        currentIteration.value = 1
+        break
+      case 'TOUR_ITERATION':
+        if (data && typeof data.currentIteration === 'number') currentIteration.value = data.currentIteration
+        if (data && typeof data.repeatCount === 'number') repeatCount.value = data.repeatCount
+        break
       case 'TOUR_PAUSED':   tourStatus.value = 'paused';   break
       case 'TOUR_RESUMED':  tourStatus.value = 'running';  break
-      case 'TOUR_STOPPED':  tourStatus.value = 'idle';     break
-      case 'TOUR_FINISHED': tourStatus.value = 'finished'; break
+      case 'TOUR_STOPPED':  tourStatus.value = 'idle';     currentIteration.value = 0; break
+      case 'TOUR_FINISHED': tourStatus.value = 'finished'; currentIteration.value = 0; break
       case 'STATUS':
         if (data.paused !== undefined) isPaused.value = data.paused
         break
@@ -232,6 +262,12 @@ async function downloadBarrageLog() {
   } catch (err) {
     ElMessage.error(`下载失败: ${err.message}`)
   }
+}
+
+function startTour() {
+  const n = Math.max(1, Math.floor(Number(repeatCount.value)) || 1)
+  currentIteration.value = 1
+  send('START_TOUR', { repeatCount: n })
 }
 
 function togglePause() {
@@ -310,7 +346,9 @@ const tourStatusClass = computed(() => ({
 .card-title { font-size: 13px; font-weight: 600; color: var(--amber); letter-spacing: .05em; margin-bottom: 8px; }
 .tour-card .card-title { color: var(--green); }
 .card-desc  { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 16px; }
-.btn-row    { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn-row    { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.repeat-input { display: flex; align-items: center; gap: 6px; margin-left: 4px; }
+.repeat-label { font-size: 12px; color: var(--text-dim); }
 .slider-row { padding: 8px 0 4px; }
 .hint       { font-size: 11px; color: var(--text-dim); margin-top: 4px; font-family: var(--font-mono); }
 .status-pill { display: inline-block; margin-top: 14px; font-size: 11px; font-weight: 600; letter-spacing: .08em; padding: 3px 12px; border-radius: 20px; }

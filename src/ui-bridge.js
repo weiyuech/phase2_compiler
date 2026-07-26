@@ -136,7 +136,7 @@ export function start(port = 3001) {
 
           // ── Tour controls ───────────────────────────────────────────────────
           case 'START_TOUR':
-            handlers.onStartTour?.()
+            handlers.onStartTour?.({ repeatCount: msgData.repeatCount })
             break
           case 'PAUSE_TOUR':
             handlers.onPauseTour?.()
