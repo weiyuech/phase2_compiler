@@ -29,7 +29,18 @@ export class TTSEngine {
     )
   }
 
-  async speak(text) {
+  /**
+   * Speak text using streaming TTS (WS → ffplay).
+   * @param {string} text
+   * @param {object} [opts]
+   * @param {() => boolean} [opts.beforePlay] - Sync predicate called RIGHT BEFORE
+   *   audio playback starts (ffplay about to spawn). If it returns false, playback
+   *   is aborted silently: WS call is cancelled, ffplay never spawns, cruising audio
+   *   is never paused. Resolves with { ok: false, aborted: true }.
+   * @param {() => void} [opts.onAudioStart] - Fires at the exact moment ffplay is
+   *   spawned to consume audio. Use this to pause other audio at the handoff point.
+   */
+  async speak(text, opts = {}) {
     if (!text) return
     const cleanedText = filterTtsText(text)
     if (!cleanedText) return
@@ -41,6 +52,7 @@ export class TTSEngine {
 
     this.stop()
 
+    let aborted = false
     try {
       await new Promise((resolve, reject) => {
         const cleanUp = () => {
@@ -71,12 +83,32 @@ export class TTSEngine {
 
           const startPlayback = () => {
             if (isStarted) return
+
+            // Gate: if beforePlay returns false (e.g. host is still speaking at the
+            // moment of play), abort silently without spawning ffplay or pausing cruising.
+            if (opts.beforePlay && !opts.beforePlay()) {
+              isStarted = true            // block any later startPlayback attempt
+              aborted = true
+              if (this.activeWSCall) {
+                try { this.activeWSCall.abort() } catch {}
+                this.activeWSCall = null
+              }
+              safeResolve()
+              return
+            }
+
             isStarted = true
 
             stream = this.player.startStream()
             if (!stream) {
               safeReject(new Error('无法启动音频播放流'))
               return
+            }
+
+            // Fire "audio really starts now" hook — used by barrage to pause
+            // cruising at the exact handoff moment (seamless transition).
+            try { opts.onAudioStart?.() } catch (e) {
+              console.error('[TTS] onAudioStart hook threw:', e.message)
             }
 
             // Write all buffered chunks at once
@@ -128,8 +160,10 @@ export class TTSEngine {
           safeReject(err)
         }
       })
+      if (aborted) return { ok: false, aborted: true }
       return { ok: true }
     } catch (err) {
+      if (aborted) return { ok: false, aborted: true }
       console.error('[TTS] 播报播放失败:', err.message)
       return { ok: false, error: err }
     }

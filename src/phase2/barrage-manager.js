@@ -25,7 +25,8 @@ export class BarrageManager {
     this.onBarrageSpeechStart = onBarrageSpeechStart;
     this.onBarrageSpeechEnd = onBarrageSpeechEnd;
 
-    this.isPlaying = false;
+    this.isPlaying = false;         // A sequence is "in flight" (generating OR playing)
+    this._isActuallyPlaying = false; // Real audio is coming out of the speaker RIGHT NOW
     this.isActive = false;
     this.isSleeping = false;
     this.cooldownTimer = null;
@@ -139,9 +140,17 @@ export class BarrageManager {
 
   async playActionSequence(actions) {
     this.isPlaying = true;
-    try {
+    // Track whether we actually paused cruising, so we only resume once and don't
+    // fire onBarrageSpeechEnd if we never started (e.g., LLM reply was discarded).
+    let startedSpeech = false;
+    const startSpeech = () => {
+      if (startedSpeech) return;
+      startedSpeech = true;
+      this._isActuallyPlaying = true;
       this.onBarrageSpeechStart?.();
+    };
 
+    try {
       for (const action of actions) {
         if (!this.isActive) break;
 
@@ -161,6 +170,8 @@ export class BarrageManager {
             if (!this.isActive) break;
             console.log(`[BarrageManager] Playing MP3: ${mp3Path}`);
 
+            // MP3 mode: file is already on disk. Pause cruising just before playing.
+            startSpeech();
             this.uiBridge.broadcast('SPEECH_START', { mp3_file: mp3Path });
             await this.tts.speakFile(mp3Path);
             this.mp3Count++;
@@ -214,25 +225,57 @@ export class BarrageManager {
           if (!this.isActive) break;
 
           console.log(`[BarrageManager] Calling LLM. System prompt size: ${systemPrompt.length}. User prompt: ${userPrompt.trim()}`);
-          
+
+          // ─── Phase 1: LLM text generation. Cruising audio KEEPS playing during this. ───
+          let replyText;
           try {
             const resultText = await this.llm.rewriteBarrage(systemPrompt, userPrompt);
             if (!this.isActive) break;
-            if (resultText && resultText.trim()) {
-              this.uiBridge.broadcast('SPEECH_START', { text: resultText.trim() });
-              const res = await this.tts.speak(resultText.trim());
-              if (res && res.ok === false) {
-                console.error('[BarrageManager] 对话合成播放失败:', res.error.message);
-              } else {
-                this.llmCount++;
-              }
-            } else {
+            if (!resultText || !resultText.trim()) {
               console.log('[BarrageManager] ⚠️ 大模型调用失败或未返回有效文本，本次播放已跳过。');
+              continue;
+            }
+            replyText = resultText.trim();
+          } catch (err) {
+            console.error('[BarrageManager] LLM 调用出错:', err.message);
+            continue;
+          }
+
+          // ─── Phase 2: Streaming TTS with gated handoff ───
+          // - beforePlay: at the exact moment ffplay is about to spawn, check host
+          //   state. If host is still speaking, abort silently (WS cancelled,
+          //   ffplay never spawns, cruising never paused → "baby killed before sky").
+          // - onAudioStart: at the exact moment ffplay spawns, pause cruising for
+          //   the seamless handoff — no dead air, streaming TTFA preserved.
+          // SPEECH_START/END are gated on didFireStart so a discarded reply doesn't
+          // leave a phantom caption on the UI.
+          let didFireStart = false;
+          try {
+            const res = await this.tts.speak(replyText, {
+              beforePlay: () => {
+                if (this.checkIsSpeaking && this.checkIsSpeaking()) {
+                  console.log('[BarrageManager] 主播仍在说话，此次生成的回复被丢弃（不播放，不打断巡游）。');
+                  return false;
+                }
+                return true;
+              },
+              onAudioStart: () => {
+                startSpeech();
+                this.uiBridge.broadcast('SPEECH_START', { text: replyText });
+                didFireStart = true;
+              },
+            });
+            if (res && res.aborted) {
+              // beforePlay rejected: silent discard, cruising was never paused
+            } else if (res && res.ok === false) {
+              console.error('[BarrageManager] 对话合成播放失败:', res.error?.message ?? res.error);
+            } else {
+              this.llmCount++;
             }
           } catch (err) {
             console.error('[BarrageManager] 对话合成播放出错:', err.message);
           } finally {
-            this.uiBridge.broadcast('SPEECH_END', {});
+            if (didFireStart) this.uiBridge.broadcast('SPEECH_END', {});
           }
         }
       }
@@ -241,7 +284,10 @@ export class BarrageManager {
     } finally {
       // 1. Mark speech playback as done and release cruising immediately!
       this.isPlaying = false;
-      this.onBarrageSpeechEnd?.();
+      this._isActuallyPlaying = false;
+      if (startedSpeech) {
+        this.onBarrageSpeechEnd?.();
+      }
 
       // 2. Finished the current sequence. Check if we need to enter a cooldown sleep period.
       if (this.isActive) {
@@ -285,6 +331,7 @@ export class BarrageManager {
   stop() {
     this.isActive = false;
     this.isPlaying = false;
+    this._isActuallyPlaying = false;
     this.latestBarrageEvent = null;
     if (this.cooldownTimer) {
       clearTimeout(this.cooldownTimer);
@@ -297,8 +344,15 @@ export class BarrageManager {
   }
 
   stopSpeech() {
+    // 只有真正在出声的时候才打断；生成阶段（LLM/TTS still running）不打断，
+    // 让"还没出生的宝宝"继续生成——生成完成后再由 phase-3 门禁决定是否播放。
+    if (!this._isActuallyPlaying) {
+      console.log('[BarrageManager] stopSpeech() ignored — barrage is only generating, not playing.');
+      return;
+    }
     console.log('[BarrageManager] stopSpeech() called. Stopping current barrage speech only.');
     this.isPlaying = false;
+    this._isActuallyPlaying = false;
     this.latestBarrageEvent = null;
     if (this.cooldownTimer) {
       clearTimeout(this.cooldownTimer);
