@@ -84,11 +84,20 @@ jobs:
           $proc = Start-Process $exe -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
           Write-Host "started pid=$($proc.Id)"
 
-          $log = Join-Path $env:APPDATA "机器人直播控制台\backend.log"
+          # userData 目录名来自 package.json 的 name（robot-live-ui），
+          # 不是 productName（机器人直播控制台）——第一版就是写错了这个路径，
+          # 导致"应用其实跑得好好的"被误判成"后端起不来"。
+          # 这里不写死名字，直接在 APPDATA 下找，改名字也不会失效。
+          $log = $null
           $deadline = (Get-Date).AddSeconds(120)
           $ok = $false
           while ((Get-Date) -lt $deadline) {
-            if (Test-Path $log) {
+            if (-not $log) {
+              $found = Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 2 -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+              if ($found) { $log = $found.FullName; Write-Host "backend.log: $log" }
+            }
+            if ($log -and (Test-Path $log)) {
               if (Select-String -Path $log -Pattern '控制台通道已就绪' -Quiet -ErrorAction SilentlyContinue) { $ok = $true; break }
               if (Select-String -Path $log -Pattern 'ERR_MODULE_NOT_FOUND|FATAL|process exited with code' -Quiet -ErrorAction SilentlyContinue) { break }
             }
