@@ -43,9 +43,8 @@ jobs:
 
       # 打包产物里少了 native 模块或资源时，安装包依然会"构建成功"，
       # 用户装上之后才发现后端起不来。这两步就是在 CI 里替用户先装一次、跑一次。
-      # 先设成不阻塞（continue-on-error），确认稳定后再改成硬失败。
+      # 已在 run #30 验证可稳定通过，因此设为硬失败：起不来的包不允许发布。
       - name: Verify packaged tree contains required files
-        continue-on-error: true
         shell: pwsh
         run: |
           $root = "release/win-unpacked/resources/backend"
@@ -71,7 +70,6 @@ jobs:
       # 这一行只有在整个模块图（含 onnxruntime-node / sharp 两个 native 模块）
       # 都加载成功时才会出现，所以它能挡住"能装但一起动就崩"的包。
       - name: Smoke test — packaged app must start its backend
-        continue-on-error: true
         shell: pwsh
         run: |
           $exe = (Resolve-Path "release/win-unpacked/robot-live-ui.exe").Path
