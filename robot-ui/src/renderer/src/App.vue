@@ -8,7 +8,14 @@
       </div>
       <div class="topbar-center">
         <span class="ws-dot" :class="wsStatus" />
-        <span class="ws-label">{{ wsLabel }}</span>
+        <span class="ws-label" :title="wsDetail">{{ wsLabel }}</span>
+        <!-- 连接失败过就一直显示：用户报障时我们让他点这个按钮 -->
+        <button
+          v-if="wsEverFailed && wsStatus !== 'connected'"
+          class="ws-log-btn"
+          title="把排障需要的信息导出成一个文件，发给技术支持"
+          @click="exportDiagnostics"
+        >导出诊断日志</button>
       </div>
       <div class="topbar-right">
         <span class="clock">{{ clock }}</span>
@@ -44,6 +51,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import LiveMonitor     from './components/LiveMonitor.vue'
 import Controls        from './components/Controls.vue'
 import PointEditor     from './components/PointEditor.vue'
@@ -71,11 +79,42 @@ function updateClock() {
 }
 
 // WebSocket — connect to your existing Node.js backend
-const WS_URL = 'ws://localhost:3001'
+// 用 127.0.0.1 而不是 localhost：后端现在只监听回环 IPv4，
+// 而 localhost 在部分 Windows 机器上会先解析成 ::1（IPv6），
+// 那样首次连接会失败、只能靠浏览器回退。写死 IPv4 就没有这个不确定性。
+const WS_URL = 'ws://127.0.0.1:3001'
 const ws = ref(null)
 const wsStatus = ref('disconnected') // 'connected' | 'disconnected' | 'error'
 const wsLabel = ref('未连接')
+const wsDetail = ref('')             // 后端崩溃时的 stderr 摘要，鼠标悬停可见
+const wsEverFailed = ref(false)      // 连过一次失败才显示"导出诊断日志"，正常启动时不闪
 let wsTimer
+
+async function exportDiagnostics() {
+  const res = await window.api?.exportDiagnostics?.()
+  if (res?.ok) {
+    ElMessage.success({
+      message: `诊断日志已保存到桌面，请把这个文件发给技术支持：\n${res.path}`,
+      duration: 8000
+    })
+  } else if (res?.error && res.error !== '已取消') {
+    ElMessage.error(`导出失败: ${res.error}`)
+  }
+}
+
+function showBackendFailure({ code, stderr }) {
+  console.error('[Backend] exited with code', code, '\n', stderr)
+  wsStatus.value     = 'error'
+  wsEverFailed.value = true
+  // 端口占用是最常见的一种，后端会以退出码 3 结束，这里给出可操作的提示。
+  // code 为空 = 进程根本没起来（fork 就失败了），不能显示成 "code undefined"
+  wsLabel.value = code == null
+    ? '后端未能启动'
+    : code === 3
+      ? '后端启动失败：端口 3001 被占用'
+      : `后端进程已退出 (code ${code})`
+  wsDetail.value = stderr || '（无错误输出，详见 backend.log）'
+}
 
 function connectWS() {
   try {
@@ -85,6 +124,8 @@ function connectWS() {
       ws.value = socket
       wsStatus.value = 'connected'
       wsLabel.value = '已连接到后端'
+      wsDetail.value = ''
+      wsEverFailed.value = false
     }
     
     socket.addEventListener('message', (e) => {
@@ -92,17 +133,26 @@ function connectWS() {
     })
 
     socket.onclose = () => {
-      wsStatus.value = 'disconnected'
-      wsLabel.value = '未连接 — 5s后重试'
+      wsEverFailed.value = true
+      // 后端崩溃的具体原因优先保留：重连每 5s 触发一次 onclose，
+      // 不加这个判断的话"端口被占用"几秒钟就被通用文案覆盖掉了
+      if (!wsDetail.value) {
+        wsStatus.value = 'disconnected'
+        wsLabel.value = '未连接 — 5s后重试'
+      }
       ws.value = null
       wsTimer = setTimeout(connectWS, 5000)
     }
     socket.onerror = () => {
-      wsStatus.value = 'error'
-      wsLabel.value = '连接错误'
+      wsEverFailed.value = true
+      if (!wsDetail.value) {
+        wsStatus.value = 'error'
+        wsLabel.value = '连接错误'
+      }
     }
   } catch {
-    wsStatus.value = 'error'
+    wsEverFailed.value = true
+    if (!wsDetail.value) wsStatus.value = 'error'
     wsTimer = setTimeout(connectWS, 5000)
   }
 }
@@ -111,6 +161,14 @@ onMounted(() => {
   updateClock()
   clockTimer = setInterval(updateClock, 1000)
   connectWS()
+
+  // 后端进程退出 → 直接把原因显示出来，而不是让用户对着"未连接"猜
+  window.api?.onBackendExit?.(showBackendFailure)
+
+  // 后端可能在窗口出现之前就崩溃了（比如端口被占用），那条消息发不到这里，主动补问一次
+  window.api?.getBackendStatus?.().then(status => {
+    if (status && !status.running) showBackendFailure(status)
+  })
 })
 
 onUnmounted(() => {
@@ -187,6 +245,13 @@ html, body, #app { height: 100%; background: var(--bg); color: var(--text); font
 .ws-dot.disconnected { background: var(--text-dim); }
 .ws-dot.error        { background: var(--red); box-shadow: 0 0 6px var(--red); }
 .ws-label { font-size: 12px; color: var(--text-dim); font-family: var(--font-mono); }
+.ws-log-btn {
+  margin-left: 8px; padding: 1px 6px;
+  font-size: 11px; font-family: var(--font-mono);
+  color: var(--amber); background: transparent;
+  border: 1px solid var(--amber-dim); border-radius: 3px; cursor: pointer;
+}
+.ws-log-btn:hover { background: var(--bg3); }
 .clock { font-family: var(--font-mono); font-size: 13px; color: var(--amber); letter-spacing: .1em; }
 
 .tab-nav {

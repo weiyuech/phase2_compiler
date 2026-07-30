@@ -1,3 +1,4 @@
+import './crash-guard.js'
 import 'dotenv/config'
 import { join } from 'node:path'
 import fs from 'fs/promises'
@@ -27,6 +28,7 @@ import * as uiBridge                   from './ui-bridge.js'
 import { startTunnel, stopTunnel }     from './tunnel.js'
 import { initPhase2 }                  from './phase2/index.js'
 import { barrageProvider }             from './knowledge/barrage-provider.js'
+import { safeJoin }                    from './safe-path.js'
 
 // ── Initialise modules ────────────────────────────────────────────────────────
 
@@ -347,8 +349,8 @@ uiBridge.on('onImportKb', async ({ filePath }) => {
       }
 
       const filename = entry.goal_object ? `${entry.goal_id}-${entry.goal_object}.json` : `${entry.goal_id}.json`
-      const dir = join(DATA_DIR, 'flatfiles', entry.map_name, entry.path_name)
-      const targetPath = join(dir, filename)
+      const dir = safeJoin(DATA_DIR, 'flatfiles', entry.map_name, entry.path_name)
+      const targetPath = safeJoin(dir, filename)
 
       const exists = await fs.access(targetPath).then(() => true).catch(() => false)
       if (!exists) {
@@ -434,7 +436,7 @@ uiBridge.on('onDeleteBarrageConcept', async ({ name }) => {
     uiBridge.broadcast('BARRAGE_CONCEPT_DELETED', { name })
     
     // Also clean up its audio folder if it exists
-    const dirPath = join(DATA_DIR, 'barrage-audio', name)
+    const dirPath = safeJoin(DATA_DIR, 'barrage-audio', name)
     await fs.rm(dirPath, { recursive: true, force: true }).catch(() => {})
   } catch (err) {
     uiBridge.broadcast('ERROR', { message: `弹幕回复删除失败: ${err.message}` })
@@ -442,8 +444,10 @@ uiBridge.on('onDeleteBarrageConcept', async ({ name }) => {
 })
 
 async function getBarrageAudioFiles(conceptName) {
-  const dirPath = join(DATA_DIR, 'barrage-audio', conceptName)
   try {
+    // safeJoin 放在 try 内：名字非法时和读目录失败一样返回空列表，
+    // 不让异常冒到没有 try/catch 的 onGetBarrageAudioFiles 里
+    const dirPath = safeJoin(DATA_DIR, 'barrage-audio', conceptName)
     await fs.mkdir(dirPath, { recursive: true })
     const files = await fs.readdir(dirPath)
     return files.filter(f => f.toLowerCase().endsWith('.mp3'))
@@ -459,11 +463,11 @@ uiBridge.on('onGetBarrageAudioFiles', async ({ conceptName }, reply) => {
 
 uiBridge.on('onUploadBarrageAudio', async ({ conceptName, filePaths }) => {
   try {
-    const dirPath = join(DATA_DIR, 'barrage-audio', conceptName)
+    const dirPath = safeJoin(DATA_DIR, 'barrage-audio', conceptName)
     await fs.mkdir(dirPath, { recursive: true })
     for (const filePath of filePaths) {
       const fileName = filePath.replace(/\\/g, '/').split('/').pop()
-      const destPath = join(dirPath, fileName)
+      const destPath = safeJoin(dirPath, fileName)
       await fs.copyFile(filePath, destPath)
     }
     const files = await getBarrageAudioFiles(conceptName)
@@ -475,7 +479,7 @@ uiBridge.on('onUploadBarrageAudio', async ({ conceptName, filePaths }) => {
 
 uiBridge.on('onDeleteBarrageAudio', async ({ conceptName, filename }) => {
   try {
-    const filePath = join(DATA_DIR, 'barrage-audio', conceptName, filename)
+    const filePath = safeJoin(DATA_DIR, 'barrage-audio', conceptName, filename)
     await fs.unlink(filePath).catch(() => {})
     const files = await getBarrageAudioFiles(conceptName)
     uiBridge.broadcast('BARRAGE_AUDIO_FILES_UPDATED', { conceptName, files })
@@ -486,8 +490,8 @@ uiBridge.on('onDeleteBarrageAudio', async ({ conceptName, filename }) => {
 
 // --- Cruising Audio Files (Phase 3 Extension) ---
 async function getCruisingAudioFiles(mapName, pathName, goalId) {
-  const dirPath = join(DATA_DIR, 'cruising-audio', mapName, pathName, String(goalId))
   try {
+    const dirPath = safeJoin(DATA_DIR, 'cruising-audio', mapName, pathName, String(goalId))
     await fs.mkdir(dirPath, { recursive: true })
     const files = await fs.readdir(dirPath)
     return files.filter(f => f.toLowerCase().endsWith('.mp3'))
@@ -503,11 +507,11 @@ uiBridge.on('onGetCruisingAudioFiles', async ({ map_name, path_name, goal_id }, 
 
 uiBridge.on('onUploadCruisingAudio', async ({ map_name, path_name, goal_id, filePaths }) => {
   try {
-    const dirPath = join(DATA_DIR, 'cruising-audio', map_name, path_name, String(goal_id))
+    const dirPath = safeJoin(DATA_DIR, 'cruising-audio', map_name, path_name, String(goal_id))
     await fs.mkdir(dirPath, { recursive: true })
     for (const filePath of filePaths) {
       const fileName = filePath.replace(/\\/g, '/').split('/').pop()
-      const destPath = join(dirPath, fileName)
+      const destPath = safeJoin(dirPath, fileName)
       await fs.copyFile(filePath, destPath)
     }
     const files = await getCruisingAudioFiles(map_name, path_name, goal_id)
@@ -519,7 +523,7 @@ uiBridge.on('onUploadCruisingAudio', async ({ map_name, path_name, goal_id, file
 
 uiBridge.on('onDeleteCruisingAudio', async ({ map_name, path_name, goal_id, filename }) => {
   try {
-    const filePath = join(DATA_DIR, 'cruising-audio', map_name, path_name, String(goal_id), filename)
+    const filePath = safeJoin(DATA_DIR, 'cruising-audio', map_name, path_name, String(goal_id), filename)
     await fs.unlink(filePath).catch(() => {})
     const files = await getCruisingAudioFiles(map_name, path_name, goal_id)
     uiBridge.broadcast('CRUISING_AUDIO_FILES_UPDATED', { map_name, path_name, goal_id, files })
@@ -585,7 +589,7 @@ uiBridge.on('onGetTtsCacheList', async (reply) => {
 uiBridge.on('onPreviewTtsCache', async ({ hash }, reply) => {
   try {
     const cacheDir = join(DATA_DIR, 'tts-cache')
-    const mp3Path = join(cacheDir, `${hash}.mp3`)
+    const mp3Path = safeJoin(cacheDir, `${hash}.mp3`)
     const buffer = await fs.readFile(mp3Path)
     reply('TTS_CACHE_PREVIEW', { hash, base64: buffer.toString('base64') })
   } catch (err) {
@@ -596,8 +600,8 @@ uiBridge.on('onPreviewTtsCache', async ({ hash }, reply) => {
 uiBridge.on('onDeleteTtsCacheEntry', async ({ hash }) => {
   try {
     const cacheDir = join(DATA_DIR, 'tts-cache')
-    const mp3Path = join(cacheDir, `${hash}.mp3`)
-    const txtPath = join(cacheDir, `${hash}.txt`)
+    const mp3Path = safeJoin(cacheDir, `${hash}.mp3`)
+    const txtPath = safeJoin(cacheDir, `${hash}.txt`)
     await fs.unlink(mp3Path).catch(() => {})
     await fs.unlink(txtPath).catch(() => {})
     uiBridge.broadcast('TTS_CACHE_DELETED', { ok: true, hash })

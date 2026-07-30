@@ -1,5 +1,6 @@
 import fs from 'fs/promises'
 import path from 'path'
+import { safeJoin } from '../safe-path.js'
 
 export class BarrageProvider {
   constructor({ dir = './data/barrage' } = {}) {
@@ -103,7 +104,7 @@ export class BarrageProvider {
   }
 
   async getConcept(conceptName) {
-    const filePath = path.join(this.conceptsDir, `${conceptName}.json`)
+    const filePath = safeJoin(this.conceptsDir, `${conceptName}.json`)
     try {
       const raw = await fs.readFile(filePath, 'utf8')
       return JSON.parse(raw)
@@ -116,7 +117,7 @@ export class BarrageProvider {
   }
 
   async saveConcept(conceptName, { keywords = [], priority = false }) {
-    const filePath = path.join(this.conceptsDir, `${conceptName}.json`)
+    const filePath = safeJoin(this.conceptsDir, `${conceptName}.json`)
     const data = {
       keywords: Array.isArray(keywords) ? keywords : keywords.split(',').map(k => k.trim()).filter(Boolean),
       priority
@@ -132,7 +133,7 @@ export class BarrageProvider {
   }
 
   async deleteConcept(conceptName) {
-    const filePath = path.join(this.conceptsDir, `${conceptName}.json`)
+    const filePath = safeJoin(this.conceptsDir, `${conceptName}.json`)
     try {
       await fs.unlink(filePath)
     } catch (err) {

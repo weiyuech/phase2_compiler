@@ -1,5 +1,6 @@
 import fs   from 'fs/promises'
 import path from 'path'
+import { safeJoin } from '../safe-path.js'
 
 export class FlatFileProvider {
   constructor({ dir }) {
@@ -24,8 +25,12 @@ export class FlatFileProvider {
    */
   async getContent(mapName, pathName, goalId, goalObject = null) {
     const candidates = []
-    if (goalObject) candidates.push(path.join(this.dir, mapName, pathName, `${goalId}-${goalObject}.json`))
-    candidates.push(path.join(this.dir, mapName, pathName, `${goalId}.json`))
+    try {
+      if (goalObject) candidates.push(safeJoin(this.dir, mapName, pathName, `${goalId}-${goalObject}.json`))
+      candidates.push(safeJoin(this.dir, mapName, pathName, `${goalId}.json`))
+    } catch {
+      return null   // 名字非法 → 当作查不到，读取路径不该因此抛错
+    }
 
     for (const filePath of candidates) {
       try {
@@ -89,9 +94,11 @@ export class FlatFileProvider {
    * goal_object absent  → saves to {goalId}.json (generic)
    */
   async saveEntry(mapName, pathName, goalId, { goal_object, body }) {
-    const dir      = path.join(this.dir, mapName, pathName)
+    // 地图名/路径名来自控制台消息，必须做包含性校验，否则 ".." 可以写到
+    // 数据目录之外（曾经可以覆盖 config/admin.json）
+    const dir      = safeJoin(this.dir, mapName, pathName)
     const filename = this._filename(goalId, goal_object || null)
-    const filePath = path.join(dir, filename)
+    const filePath = safeJoin(dir, filename)
     await fs.mkdir(dir, { recursive: true })
     const content = {}
     if (goal_object) content.goal_object = goal_object
@@ -101,7 +108,7 @@ export class FlatFileProvider {
 
   async deleteEntry(mapName, pathName, goalId, goalObject = null) {
     const filename = this._filename(goalId, goalObject)
-    const filePath = path.join(this.dir, mapName, pathName, filename)
+    const filePath = safeJoin(this.dir, mapName, pathName, filename)
     try { await fs.unlink(filePath) }
     catch (err) { if (err.code !== 'ENOENT') throw err }
   }

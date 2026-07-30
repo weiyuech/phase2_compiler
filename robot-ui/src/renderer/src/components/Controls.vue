@@ -141,7 +141,13 @@
       </div>
 
       <div v-if="!wsConnected" class="no-ws-banner">
-        ⚠ 未连接到后端，应用启动后稍等片刻将自动连接
+        <div>⚠ 未连接到后端，应用启动后稍等片刻将自动连接</div>
+        <div style="margin-top: 8px; font-weight: normal;">
+          如果一直连不上，请点下面的按钮导出诊断日志，并把生成的文件发给技术支持
+        </div>
+        <el-button size="small" plain style="margin-top: 8px;" @click="exportDiagnostics">
+          导出诊断日志 (.txt)
+        </el-button>
       </div>
     </div>
   </div>
@@ -247,6 +253,15 @@ function onBarrageToggle(val) {
     currentCapturedText.value = ''
     send('BARRAGE_STOP')
     ElMessage.info('弹幕识别已关闭')
+  }
+}
+
+async function exportDiagnostics() {
+  const res = await window.api?.exportDiagnostics?.()
+  if (res?.ok) {
+    ElMessage.success({ message: `已保存到桌面，请发给技术支持：\n${res.path}`, duration: 8000 })
+  } else if (res?.error && res.error !== '已取消') {
+    ElMessage.error(`导出失败: ${res.error}`)
   }
 }
 

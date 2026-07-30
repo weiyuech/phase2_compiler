@@ -41,6 +41,57 @@ jobs:
           npx electron-vite build
           npx electron-builder --publish never
 
+      # 打包产物里少了 native 模块或资源时，安装包依然会"构建成功"，
+      # 用户装上之后才发现后端起不来。这两步就是在 CI 里替用户先装一次、跑一次。
+      # 先设成不阻塞（continue-on-error），确认稳定后再改成硬失败。
+      - name: Verify packaged tree contains required files
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $root = "release/win-unpacked/resources/backend"
+          $required = @(
+            "$root/src/index.js",
+            "$root/data/models/PP-OCRv6_medium_det.onnx",
+            "$root/data/models/PP-OCRv6_medium_rec.onnx",
+            "$root/data/models/ppocrv6_dict.txt",
+            "$root/ffplay.exe",
+            "$root/node_modules/ws",
+            "$root/node_modules/onnxruntime-node/bin/napi-v6/win32/x64",
+            "$root/node_modules/sharp"
+          )
+          $missing = @()
+          foreach ($p in $required) { if (-not (Test-Path $p)) { $missing += $p } }
+          if ($missing.Count -gt 0) {
+            Write-Host "缺少以下打包内容:"; $missing | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
+          Write-Host "打包内容检查通过"
+
+      # 真正的验证：启动打包好的应用，等后端把"就绪"写进 backend.log。
+      # 这一行只有在整个模块图（含 onnxruntime-node / sharp 两个 native 模块）
+      # 都加载成功时才会出现，所以它能挡住"能装但一起动就崩"的包。
+      - name: Smoke test — packaged app must start its backend
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $exe = "release/win-unpacked/robot-live-ui.exe"
+          if (-not (Test-Path $exe)) { Write-Host "找不到 $exe"; exit 1 }
+          Start-Process $exe
+          $log = Join-Path $env:APPDATA "机器人直播控制台\backend.log"
+          $deadline = (Get-Date).AddSeconds(120)
+          $ok = $false
+          while ((Get-Date) -lt $deadline) {
+            if (Test-Path $log) {
+              if (Select-String -Path $log -Pattern '控制台通道已就绪' -Quiet -ErrorAction SilentlyContinue) { $ok = $true; break }
+              if (Select-String -Path $log -Pattern 'ERR_MODULE_NOT_FOUND|FATAL|process exited with code' -Quiet -ErrorAction SilentlyContinue) { break }
+            }
+            Start-Sleep -Seconds 3
+          }
+          if (Test-Path $log) { Write-Host "----- backend.log -----"; Get-Content $log }
+          Get-Process robot-live-ui -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not $ok) { Write-Host "后端未能在 120 秒内就绪"; exit 1 }
+          Write-Host "后端启动成功"
+
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:

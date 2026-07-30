@@ -39,6 +39,16 @@ export class RobotListener extends EventEmitter {
         console.log(`[机器人] 等待连接，端口 ${this.port}`)
       })
 
+      // 服务端级别的 'error' 没人监听会变成未捕获异常，把整个后端一起带走。
+      // 机器人端口占用只应该让机器人连接失效，播报 / 巡游 / 控制台通道要照常工作。
+      this.wss.on('error', (err) => {
+        console.error(
+          err.code === 'EADDRINUSE'
+            ? `[机器人] 端口 ${this.port} 已被占用，机器人监听未启动（其余功能不受影响）`
+            : `[机器人] 监听服务错误: ${err.message}`
+        )
+      })
+
       this.wss.on('connection', (socket) => {
         console.log('[机器人] 已连接')
         this._socket         = socket

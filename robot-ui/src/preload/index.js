@@ -37,6 +37,11 @@ contextBridge.exposeInMainWorld('api', {
   // Restart backend (picks up new .env without quitting the app)
   restartBackend: () => ipcRenderer.invoke('restart-backend'),
 
+  // Backend health — fired when the backend process dies, so the UI can show why
+  onBackendExit: (callback) => ipcRenderer.on('backend-exit', (_event, info) => callback(info)),
+  getBackendStatus: () => ipcRenderer.invoke('get-backend-status'),
+  exportDiagnostics: () => ipcRenderer.invoke('export-diagnostics'),
+
   // Barrage Overlay
   openBarrageOverlay: () => ipcRenderer.invoke('open-barrage-overlay'),
   closeBarrageOverlay: (rect) => ipcRenderer.invoke('close-barrage-overlay', rect),

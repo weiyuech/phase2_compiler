@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, utilityProcess, systemPreferences, Tray, Menu, nativeImage } from 'electron'
 import { join, resolve }                        from 'path'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync, appendFileSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync, appendFileSync, statSync, renameSync, openSync, readSync, closeSync } from 'fs'
 import { scryptSync, randomBytes, timingSafeEqual } from 'crypto'
 
 // ─── PROJECT_ROOT ─────────────────────────────────────────────────────────────
@@ -95,13 +95,27 @@ function parseEnv(raw) {
     const eq = t.indexOf('=')
     if (eq === -1) continue
     const key = t.slice(0, eq).trim()
-    const val = t.slice(eq + 1).trim().replace(/^['"]|['"]$/g, '')
-    result[key] = val
+    // 和 dotenv 的行为保持一致：带引号的值取引号内内容，未加引号的值要去掉行尾注释。
+    // .env.example 里几乎每行都带 `# 说明`，不处理的话设置界面会把注释当成值显示
+    // （TTS_VOICE_TYPE 会显示成 "# built-in voice ..."，看着像已配置其实是空的），
+    // 用户点一次保存就把注释原样写回 .env 了。
+    const rest   = t.slice(eq + 1)
+    const quoted = rest.trim().match(/^(['"])([\s\S]*?)\1/)
+    result[key]  = quoted ? quoted[2] : rest.replace(/\s+#.*$/, '').trim()
   }
   return result
 }
 
 function writeEnvFields(raw, changes) {
+  // 值里如果混进换行，写回去就变成了新的一行 KEY=VALUE。
+  // 那样 write-public-env（不需要密码）就能写入 SENSITIVE 的密钥，
+  // 甚至写入 FFPLAY_PATH 让后端去启动任意程序。这里直接挡掉。
+  for (const [key, val] of Object.entries(changes)) {
+    if (/[\r\n]/.test(String(val))) {
+      throw new Error(`配置项 ${key} 的值不能包含换行`)
+    }
+  }
+
   const lines   = raw.split('\n')
   const written = new Set()
 
@@ -150,12 +164,25 @@ function verifyPassword(pwd, hash, salt) {
 let _backendProcess = null
 let _tray = null
 let _win  = null
+// 后端在 createWindow() 之前就启动，端口占用之类的问题会让它在窗口存在前就退出，
+// 这时 webContents.send 无处可发——所以把最后一次退出信息留下来，等渲染进程主动来取
+let _lastBackendExit = null
 
 function startBackend() {
   if (!app.isPackaged) return   // dev: use `npm start` in a separate terminal
 
+  _lastBackendExit = null
+
   const entry   = join(PROJECT_ROOT, 'src/index.js')
   const logPath = join(USER_DATA_DIR, 'backend.log')
+
+  // 日志是一直追加的，跑几个月会长到几十 MB，用户根本发不出来。
+  // 超过 5MB 就轮转一次，只保留一份历史（诊断导出时会把两份都带上）
+  try {
+    if (existsSync(logPath) && statSync(logPath).size > 5 * 1024 * 1024) {
+      renameSync(logPath, logPath + '.1')
+    }
+  } catch {}
 
   // appendFileSync 是同步系统调用，写完立刻落盘，进程崩溃也不会丢数据
   // createWriteStream / writeFileSync 都有内存缓冲，崩溃前来不及 flush 就截断
@@ -178,25 +205,60 @@ function startBackend() {
     cwd: PROJECT_ROOT,
     stdio: 'pipe',
   })
+  // StringDecoder 而不是逐块 toString('utf8')：中文有可能正好被切在两个 chunk 之间，
+  // 分别 toString 会在接缝处留下一个乱码字（日志是给人看的，别自己制造噪音）
+  const { StringDecoder } = require('string_decoder')
+  const outDecoder = new StringDecoder('utf8')
   _backendProcess.stdout?.on('data', d => {
-    log('[out] ' + d.toString('utf8'))
+    log('[out] ' + outDecoder.write(Buffer.isBuffer(d) ? d : Buffer.from(d)))
   })
 
-  // stderr 全部缓冲，等流真正关闭后再一次性写入
-  // 原因：进程崩溃时真正的报错往往在 Electron 初始化输出之后的下一个 chunk，
-  // 那个 chunk 还没触发 data 事件进程就退了——缓冲+close 事件才能保证写全
-  const stderrChunks = []
+  // stderr 逐块直接落盘（和 stdout 一样）。原先是全部缓冲到流 close 再一次性写，
+  // 理由是"怕最后一个 chunk 来不及写"——但 data 事件没触发的 chunk 同样不在缓冲里，
+  // 而 appendFileSync 是同步写、落盘即安全，反而更抗崩；主进程被杀时缓冲会全丢。
+  // 缓冲还会随运行时间无上限增长（后端每秒都可能往 stderr 写东西）。
+  // 这里只额外保留一小段尾巴，给界面上的失败提示用。
+  const STDERR_TAIL_MAX = 64 * 1024
+  const errDecoder = new StringDecoder('utf8')
+  let stderrTail = ''
   _backendProcess.stderr?.on('data', d => {
-    stderrChunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d))
-  })
-  _backendProcess.stderr?.on('close', () => {
-    if (stderrChunks.length) log('[err] ' + Buffer.concat(stderrChunks).toString('utf8') + '\n')
+    const s = errDecoder.write(Buffer.isBuffer(d) ? d : Buffer.from(d))
+    if (!s) return
+    log('[err] ' + s)
+    stderrTail = (stderrTail + s).slice(-STDERR_TAIL_MAX)
   })
 
   _backendProcess.on('exit', (code) => {
     log(`[backend] process exited with code ${code}\n`)
     _backendProcess = null
+    // 后端崩溃时界面原本只会显示"未连接"，用户无从判断是配置问题还是程序问题。
+    // 把退出码和 stderr 末尾几行送到渲染进程，直接显示在标题栏上。
+    const tail = stderrTail.trim().split('\n').slice(-8).join('\n')
+    _lastBackendExit = { code, stderr: tail, logPath }
+    // 退出可能发生在窗口已销毁之后（比如 before-quit 里 kill 后端），
+    // 对已销毁的窗口 send 会抛异常，反过来把这个 exit 处理器搞崩
+    try {
+      if (_win && !_win.isDestroyed()) _win.webContents.send('backend-exit', _lastBackendExit)
+    } catch {}
   })
+}
+
+// utilityProcess.fork 抛异常（入口文件缺失等）不能把主进程一起带走：
+// 在 whenReady 里会连托盘和窗口都起不来，在 setTimeout 里更是直接崩主进程。
+// 统一走这个包装：记下失败原因，界面照常显示。
+function startBackendSafe() {
+  try {
+    startBackend()
+  } catch (err) {
+    _lastBackendExit = {
+      code: null,
+      stderr: `启动后端进程失败: ${err?.stack || err}`,
+      logPath: join(USER_DATA_DIR, 'backend.log'),
+    }
+    try {
+      if (_win && !_win.isDestroyed()) _win.webContents.send('backend-exit', _lastBackendExit)
+    } catch {}
+  }
 }
 
 // ─── System Tray ──────────────────────────────────────────────────────────────
@@ -236,6 +298,40 @@ function createTray() {
   _tray.on('click', showMainWindow)
 }
 
+// ─── 生产环境加固 ─────────────────────────────────────────────────────────────
+// 打包后默认菜单里带着「切换开发者工具」，任何操作员按 Ctrl+Shift+I 就能拿到
+// 一个 window.api 完全可用的控制台——管理员密码、密钥读写全都在那后面。
+// 需要现场排障时可以用环境变量 ROBOT_DEVTOOLS=1 临时打开。
+const DEVTOOLS_ENABLED = !app.isPackaged || process.env.ROBOT_DEVTOOLS === '1'
+
+function applyProductionMenu() {
+  if (DEVTOOLS_ENABLED) return   // 开发模式保留完整默认菜单
+
+  if (process.platform === 'darwin') {
+    // macOS 的复制/粘贴快捷键依赖菜单项，不能直接设成 null，
+    // 否则中文输入法用户连粘贴都用不了
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'appMenu' },
+      {
+        label: '编辑',
+        submenu: [
+          { role: 'undo', label: '撤销' },
+          { role: 'redo', label: '重做' },
+          { type: 'separator' },
+          { role: 'cut',  label: '剪切' },
+          { role: 'copy', label: '复制' },
+          { role: 'paste', label: '粘贴' },
+          { role: 'selectAll', label: '全选' },
+        ],
+      },
+    ]))
+  } else {
+    // Windows / Linux：直接去掉菜单栏。Chromium 自己处理输入框里的
+    // Ctrl+C / Ctrl+V，不依赖菜单项
+    Menu.setApplicationMenu(null)
+  }
+}
+
 // ─── Window ───────────────────────────────────────────────────────────────────
 
 function createWindow() {
@@ -250,6 +346,7 @@ function createWindow() {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      devTools: DEVTOOLS_ENABLED,
       allowLoadingUnsignedLibraries: true
     }
   })
@@ -285,7 +382,8 @@ app.whenReady().then(async () => {
     await systemPreferences.askForMediaAccess('microphone')
   }
   seedUserData()
-  startBackend()
+  applyProductionMenu()
+  startBackendSafe()
   createTray()
   createWindow()
   app.on('activate', () => {
@@ -308,15 +406,135 @@ app.on('before-quit', () => {
 // ─── IPC: Restart backend ─────────────────────────────────────────────────────
 // 保存密钥/运行参数后调用，让后端重新读取 .env 使配置立即生效
 
+// ─── IPC: 诊断日志导出 ────────────────────────────────────────────────────────
+// 目的：让非技术用户能一键把排障需要的信息存成一个文件发给开发者，
+// 而不是让对方去 %APPDATA% 里翻目录。后端崩了也能用（全在主进程里跑）。
+
+const LOG_TAIL_BYTES = 300 * 1024   // 只取日志末尾，保证文件小到能直接发出去
+
+// 只把文件末尾那一段读进内存。轮转只在后端启动时发生，长期不重启的机器
+// 日志可能远超 5MB，整份 readFileSync 进来就太吓人了
+function readLogTail(p) {
+  if (!existsSync(p)) return '(日志文件不存在)'
+  let fd
+  try {
+    const size    = statSync(p).size
+    const len     = Math.min(size, LOG_TAIL_BYTES)
+    const skipped = size - len
+    const buf     = Buffer.allocUnsafe(len)
+    fd = openSync(p, 'r')
+    readSync(fd, buf, 0, len, skipped)
+    return (skipped > 0 ? `…（已省略前 ${Math.round(skipped / 1024)} KB）\n` : '') + buf.toString('utf8')
+  } catch (e) {
+    return `(读取失败: ${e.message})`
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd) } catch {} }
+  }
+}
+
+function buildDiagnosticsReport() {
+  const os      = require('os')
+  const logPath = join(USER_DATA_DIR, 'backend.log')
+  const entry   = join(PROJECT_ROOT, 'src/index.js')
+  const L       = []
+
+  L.push('===== 机器人直播控制台 · 诊断信息 =====')
+  L.push(`生成时间   : ${new Date().toLocaleString('zh-CN', { hour12: false })}`)
+  L.push(`应用版本   : ${app.getVersion()}`)
+  L.push(`系统       : ${process.platform} ${os.release()} ${process.arch}`)
+  L.push(`Electron   : ${process.versions.electron}  Node: ${process.versions.node}`)
+  L.push(`打包模式   : ${app.isPackaged}`)
+  L.push('')
+  L.push('----- 路径检查 -----')
+  L.push(`PROJECT_ROOT  : ${PROJECT_ROOT}`)
+  L.push(`USER_DATA_DIR : ${USER_DATA_DIR}`)
+  L.push(`后端入口      : ${entry}  存在: ${existsSync(entry)}`)
+  L.push(`.env          : ${ENV_PATH}  存在: ${existsSync(ENV_PATH)}`)
+  L.push(`data 目录     : ${join(USER_DATA_DIR, 'data')}  存在: ${existsSync(join(USER_DATA_DIR, 'data'))}`)
+  for (const f of ['PP-OCRv6_medium_det.onnx', 'PP-OCRv6_medium_rec.onnx', 'ppocrv6_dict.txt']) {
+    L.push(`OCR 模型      : ${f}  存在: ${existsSync(join(PROJECT_ROOT, 'data/models', f))}`)
+  }
+  L.push(`ffplay.exe    : 存在: ${existsSync(join(PROJECT_ROOT, 'ffplay.exe'))}`)
+  L.push(`backend 依赖  : ${existsSync(join(PROJECT_ROOT, 'node_modules'))}`)
+  L.push('')
+  L.push('----- 后端进程状态 -----')
+  if (!app.isPackaged) {
+    L.push('开发模式：后端由开发者用 npm start 手动运行，本应用不托管它')
+  } else if (_backendProcess) {
+    L.push('后端进程：运行中')
+  } else if (_lastBackendExit) {
+    L.push(_lastBackendExit.code == null
+      ? '后端进程：没能启动起来'
+      : `后端进程：已退出，退出码 ${_lastBackendExit.code}`)
+    if (_lastBackendExit.code === 3) L.push('→ 退出码 3 = 端口 3001 被占用')
+    L.push('最后的错误输出:')
+    L.push(_lastBackendExit.stderr || '(无)')
+  } else {
+    L.push('后端进程：未运行（没有捕获到退出事件）')
+  }
+  L.push('')
+  L.push('----- 配置检查（.env 里的密钥值已屏蔽，只显示是否填写）-----')
+  try {
+    const all = existsSync(ENV_PATH) ? parseEnv(readFileSync(ENV_PATH, 'utf-8')) : {}
+    for (const k of PUBLIC_ENV_KEYS)    L.push(`${k} = ${all[k] ?? ''}`)
+    for (const k of SENSITIVE_ENV_KEYS) L.push(`${k} = ${all[k] ? '已填写' : '【未填写】'}`)
+  } catch (e) {
+    L.push(`读取 .env 失败: ${e.message}`)
+  }
+  L.push('')
+  L.push(`----- backend.log（${logPath}）-----`)
+  L.push('（以下为后端原始输出，未做过滤；发送前如有顾虑请自行检查）')
+  L.push(readLogTail(logPath))
+  const rotated = logPath + '.1'
+  if (existsSync(rotated)) {
+    L.push('')
+    L.push(`----- 上一轮日志 backend.log.1 -----`)
+    L.push(readLogTail(rotated))
+  }
+
+  return L.join('\n')
+}
+
+ipcMain.handle('export-diagnostics', async () => {
+  try {
+    const now  = new Date()
+    const pad  = (n) => String(n).padStart(2, '0')
+    const name = `诊断日志-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.txt`
+
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: '导出诊断日志（请把这个文件发给技术支持）',
+      defaultPath: join(app.getPath('desktop'), name),
+      filters: [{ name: 'Text Files', extensions: ['txt'] }]
+    })
+    if (canceled || !filePath) return { ok: false, error: '已取消' }
+
+    // \r\n + BOM：用户大概率直接用 Windows 记事本打开。
+    // 旧版记事本（Win10 1903 之前 / Win7）不加 BOM 会把中文显示成乱码
+    writeFileSync(filePath, '﻿' + buildDiagnosticsReport().replace(/\r?\n/g, '\r\n'), 'utf-8')
+    const { shell } = require('electron')
+    shell.showItemInFolder(filePath)        // 直接在资源管理器里高亮这个文件
+    return { ok: true, path: filePath }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+// 渲染进程启动时来问一次：后端是不是已经挂了（窗口出现之前就崩溃的情况）
+ipcMain.handle('get-backend-status', () => {
+  if (!app.isPackaged) return { running: true, dev: true }
+  if (_backendProcess)  return { running: true }
+  return { running: false, ..._lastBackendExit }
+})
+
 ipcMain.handle('restart-backend', () => {
   if (_backendProcess) {
     // 监听 exit 事件，确保旧进程彻底退出后再等待 2000ms 重启，彻底规避 Windows 端口延迟释放(EADDRINUSE)问题
     _backendProcess.once('exit', () => {
-      setTimeout(startBackend, 2000)
+      setTimeout(startBackendSafe, 2000)
     })
     _backendProcess.kill()
   } else {
-    startBackend()
+    startBackendSafe()
   }
   return { ok: true }
 })
@@ -411,6 +629,7 @@ _overlayWin = new BrowserWindow({
     preload: join(__dirname, '../preload/index.js'),
     contextIsolation: true,
     nodeIntegration: false,
+    devTools: DEVTOOLS_ENABLED,
     allowLoadingUnsignedLibraries: true
   }
 })
@@ -595,8 +814,21 @@ ipcMain.handle('admin-has-password', () => {
   return existsSync(ADMIN_PATH)
 })
 
+const MIN_PASSWORD_LEN = 4
+
 ipcMain.handle('admin-set-password', (_, newPwd) => {
   try {
+    // 只能用于"首次设置"。以前这里不检查密码是否已存在，界面也只是把设置表单
+    // 藏起来而已——于是任何能执行渲染进程代码的人（打开 DevTools 就行）
+    // 都可以先重置密码，再用新密码把所有 API 密钥读出来。
+    // 修改密码必须走 admin-change-password（它会校验旧密码）。
+    if (existsSync(ADMIN_PATH)) {
+      return { ok: false, error: '已设置过密码，请使用「修改密码」' }
+    }
+    // 长度校验放在主进程：渲染进程里的校验只是 UX，绕得过去
+    if (typeof newPwd !== 'string' || newPwd.length < MIN_PASSWORD_LEN) {
+      return { ok: false, error: `密码至少 ${MIN_PASSWORD_LEN} 位` }
+    }
     const creds = hashPassword(newPwd)
     writeFileSync(ADMIN_PATH, JSON.stringify(creds), 'utf-8')
     return { ok: true }
@@ -608,6 +840,9 @@ ipcMain.handle('admin-change-password', (_, oldPwd, newPwd) => {
     if (!existsSync(ADMIN_PATH)) return { ok: false, error: '未设置密码' }
     const { hash, salt } = JSON.parse(readFileSync(ADMIN_PATH, 'utf-8'))
     if (!verifyPassword(oldPwd, hash, salt)) return { ok: false, error: '旧密码错误' }
+    if (typeof newPwd !== 'string' || newPwd.length < MIN_PASSWORD_LEN) {
+      return { ok: false, error: `密码至少 ${MIN_PASSWORD_LEN} 位` }
+    }
     writeFileSync(ADMIN_PATH, JSON.stringify(hashPassword(newPwd)), 'utf-8')
     return { ok: true }
   } catch (e) { return { ok: false, error: e.message } }

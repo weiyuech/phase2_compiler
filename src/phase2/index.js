@@ -6,10 +6,26 @@
  */
 
 import { Phase2Monitor } from './monitor.js';
-import { initOcr, recognizeText } from './ocr/index.js';
 import { BarrageManager } from './barrage-manager.js';
 import fs from 'fs';
 import path from 'path';
+
+// OCR 依赖 onnxruntime-node / sharp 两个 native 模块。静态 import 时，
+// 只要目标机器上加载失败（缺 VC++ 运行库、打包遗漏平台二进制…），
+// 整个模块图求值就会失败——后端在 uiBridge.start() 之前就死了，界面永远连不上。
+// 改成惰性加载：加载失败只让弹幕 OCR 失效，其余功能照常。
+// （tunnel.js 里的 @ngrok/ngrok 用的也是同一套写法。）
+let _ocrModule      = null;
+let _ocrUnavailable = false;   // 加载失败是永久性的（缺 native 模块），不要每帧重试
+function loadOcr() {
+  if (!_ocrModule) {
+    _ocrModule = import('./ocr/index.js').catch(err => {
+      _ocrUnavailable = true;
+      throw err;
+    });
+  }
+  return _ocrModule;
+}
 
 function extractNewContent(prev, next) {
   if (!prev) return next;
@@ -64,7 +80,11 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
   const barrageManager = new BarrageManager({ tts, llm, tour, uiBridge, checkGoalHandling, checkIsSpeaking, onBarrageSpeechStart, onBarrageSpeechEnd });
 
   // Initialize the Node.js OCR engine
-  initOcr();
+  loadOcr()
+    .then(ocr => ocr.initOcr())
+    .catch(err => {
+      console.error('[Phase 2] [OCR] 引擎加载失败，弹幕识别不可用（其余功能不受影响）:', err.message);
+    });
 
   const USER_DATA = process.env.USER_DATA_DIR;
   const DATA_DIR = USER_DATA ? path.join(USER_DATA, 'data') : './data';
@@ -135,6 +155,7 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
 
   uiBridge.on('onBarrageImage', async (data) => {
     if (!barrageManager.isActive) return;
+    if (_ocrUnavailable) return;     // OCR 引擎加载失败过：直接丢帧，别每秒重试+刷日志
     if (isProcessingBarrage) return; // Drop frame instead of piling up
     isProcessingBarrage = true;
 
@@ -151,6 +172,7 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
       }
 
       // 2. Process image with Node.js OCR engine
+      const { recognizeText } = await loadOcr();
       const result = await recognizeText(buffer);
       framesProcessed++;
 

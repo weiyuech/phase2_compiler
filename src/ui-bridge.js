@@ -1,4 +1,5 @@
 import { WebSocketServer } from 'ws'
+import { writeSync }       from 'node:fs'
 
 let wss        = null
 let paused     = false
@@ -63,13 +64,46 @@ const handlers = {
 }
 
 export function start(port = 3001) {
-  wss = new WebSocketServer({ port })
+  // 只监听回环地址：这个通道服务的是同一台机器上的 Electron 界面，
+  // 机器人走的是另一个端口（8765），不受影响。
+  // 之前监听全部网卡且没有任何鉴权，同一个 Wi-Fi 下的任何设备都能发指令。
+  wss = new WebSocketServer({ port, host: '127.0.0.1' })
+
+  let listening = false
+  wss.on('listening', () => {
+    listening = true
+    console.log(`[UI] 控制台通道已就绪，端口 ${port}`)
+  })
+
+  // 没有这个监听器时，listen 失败会以未捕获异常直接杀掉整个后端进程，
+  // 界面上只剩一个"未连接"，日志里也只有一段看不懂的堆栈。
+  // 最常见的是 EADDRINUSE：端口被别的程序（或残留的旧后端进程）占着。
+  wss.on('error', (err) => {
+    if (!listening) {
+      // writeSync 而不是 console.error：管道 stderr 在 macOS 上是异步写，
+      // 紧跟 process.exit() 会把这条唯一的线索截掉
+      try {
+        writeSync(2, (err.code === 'EADDRINUSE'
+          ? `[UI] 端口 ${port} 已被占用，后端无法启动。请关闭占用该端口的程序，或结束残留的旧进程后重试。`
+          : `[UI] 控制台通道启动失败: ${err.message}`) + '\n')
+      } catch {}
+      process.exit(3)
+    }
+    // 已经在监听之后出现的错误不致命，记录即可
+    console.error('[UI] 控制台通道错误:', err.message)
+  })
 
   wss.on('connection', (ws) => {
     const sendTo = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
     sendTo('STATUS', { paused, duckVolume, fadeMs })
     if (tunnelUrl) sendTo('TUNNEL_URL', { url: tunnelUrl })
     handlers.onNewClient?.(sendTo)
+
+    // 单个连接上的协议错误如果没人监听，EventEmitter 会把它抛成未捕获异常，
+    // 整个后端就没了。一个客户端出问题不应该影响其它客户端。
+    ws.on('error', (err) => {
+      console.error('[UI] 客户端连接错误:', err.message)
+    })
 
     ws.on('message', (data, isBinary) => {
       const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -98,14 +132,25 @@ export function start(port = 3001) {
 
       function handleJson(str) {
         let msg
-        try { 
-          msg = JSON.parse(str) 
+        try {
+          msg = JSON.parse(str)
         } catch (err) {
-          return 
+          return
         }
-        
-        const { type, data: msgData } = msg
-        
+
+        // 解析成功之后仍然可能炸：msg 可能是 null，msgData 可能缺字段
+        // （{"type":"SELECT_MAP"} 就够了），handler 自己也可能抛。
+        // 这里不兜住的话，一条畸形消息就能让整个后端退出。
+        try {
+          dispatch(msg)
+        } catch (err) {
+          console.error('[UI] 处理消息失败:', err?.stack || err)
+        }
+      }
+
+      function dispatch(msg) {
+        const { type, data: msgData } = msg ?? {}
+
         if (type !== 'BARRAGE_IMAGE') {
           console.log('[DEBUG] [WS Incoming]:', type, JSON.stringify(msgData))
         }

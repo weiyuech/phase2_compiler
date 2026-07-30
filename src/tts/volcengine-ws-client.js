@@ -33,6 +33,26 @@ export class VolcengineTTSWSClient {
       }
     })
 
+    // 原来这里只挂了 open / message / error 三个事件。
+    // 如果服务端把连接干净地关掉却没发最终音频帧（空闲断开、代理掐断、半开连接），
+    // onFinished 和 onError 都不会被调用 —— 上层 await 的 Promise 永远悬着，
+    // playPoint 不返回，_goalHandling 一直为 true，之后每次"到点"都被丢弃。
+    // 现场表现就是：机器人到了点位不说话、也不再往下走，而且没有任何报错。
+    let settled = false
+    const TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '30000')
+    const timer = setTimeout(() => {
+      settle(() => onError(new Error(`TTS 合成超时（${TIMEOUT_MS}ms 内未完成）`)))
+      try { ws.terminate() } catch {}
+    }, TIMEOUT_MS)
+
+    // 保证 onFinished / onError 恰好被调用一次，并清掉超时定时器
+    const settle = (fn) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fn()
+    }
+
     ws.on('open', () => {
       const payload = {
         app: {
@@ -91,22 +111,28 @@ export class VolcengineTTSWSClient {
         if (payload.length > 0) {
           onAudioChunk(payload)
         }
+        settle(onFinished)
         ws.close()
-        onFinished()
       } else if (msgType === 0xf0 || msgType === 0x1f) {
         // JSON Error response
         try {
           const err = JSON.parse(payload.toString('utf8'))
-          onError(new Error(`TTS Error ${err.code || 3099}: ${err.message || 'unknown error'}`))
+          settle(() => onError(new Error(`TTS Error ${err.code || 3099}: ${err.message || 'unknown error'}`)))
         } catch {
-          onError(new Error('TTS Error response received'))
+          settle(() => onError(new Error('TTS Error response received')))
         }
         ws.close()
       }
     })
 
     ws.on('error', (err) => {
-      onError(err)
+      settle(() => onError(err))
+    })
+
+    // 连接关闭时如果还没有结果，就是"没收到完整音频就断了"，必须报错，
+    // 否则调用方会一直等下去
+    ws.on('close', (code) => {
+      settle(() => onError(new Error(`TTS 连接已关闭但未收到完整音频 (code ${code})`)))
     })
 
     return {
