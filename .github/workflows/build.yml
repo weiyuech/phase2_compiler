@@ -74,9 +74,16 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          $exe = "release/win-unpacked/robot-live-ui.exe"
-          if (-not (Test-Path $exe)) { Write-Host "找不到 $exe"; exit 1 }
-          Start-Process $exe
+          $exe = (Resolve-Path "release/win-unpacked/robot-live-ui.exe").Path
+          Write-Host "exe: $exe"
+
+          # 捕获 Electron 自己的输出：应用如果在 whenReady 之前就崩了，
+          # backend.log 根本不会被创建，只有这里能看到原因
+          $out = Join-Path $env:RUNNER_TEMP "app-stdout.txt"
+          $err = Join-Path $env:RUNNER_TEMP "app-stderr.txt"
+          $proc = Start-Process $exe -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          Write-Host "started pid=$($proc.Id)"
+
           $log = Join-Path $env:APPDATA "机器人直播控制台\backend.log"
           $deadline = (Get-Date).AddSeconds(120)
           $ok = $false
@@ -85,9 +92,28 @@ jobs:
               if (Select-String -Path $log -Pattern '控制台通道已就绪' -Quiet -ErrorAction SilentlyContinue) { $ok = $true; break }
               if (Select-String -Path $log -Pattern 'ERR_MODULE_NOT_FOUND|FATAL|process exited with code' -Quiet -ErrorAction SilentlyContinue) { break }
             }
+            if ($proc.HasExited) { Write-Host "应用进程已退出，退出码 $($proc.ExitCode)"; break }
             Start-Sleep -Seconds 3
           }
-          if (Test-Path $log) { Write-Host "----- backend.log -----"; Get-Content $log }
+
+          Write-Host "----- 进程状态 -----"
+          Write-Host "HasExited: $($proc.HasExited)"
+          if ($proc.HasExited) { Write-Host "ExitCode: $($proc.ExitCode)" }
+
+          Write-Host "----- APPDATA 下实际创建的目录 -----"
+          Get-ChildItem $env:APPDATA -Directory -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Name | ForEach-Object { Write-Host "  $_" }
+
+          Write-Host "----- 任意位置的 backend.log -----"
+          Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 3 -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "found: $($_.FullName)"; Get-Content $_.FullName }
+
+          foreach ($f in @($out, $err)) {
+            if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+              Write-Host "----- $(Split-Path $f -Leaf) -----"; Get-Content $f
+            }
+          }
+
           Get-Process robot-live-ui -ErrorAction SilentlyContinue | Stop-Process -Force
           if (-not $ok) { Write-Host "后端未能在 120 秒内就绪"; exit 1 }
           Write-Host "后端启动成功"
