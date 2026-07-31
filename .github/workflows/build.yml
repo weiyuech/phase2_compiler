@@ -145,6 +145,13 @@ jobs:
       - name: Smoke test — backend survives a taken port 3001
         shell: pwsh
         run: |
+          # backend.log 是一直追加的，上一步的内容还在里面。
+          # 不先清掉的话，下面查"已就绪"会立刻命中上一次运行留下的那行，
+          # 于是还没等新实例启动就误判为成功（run #33 就是这么挂的）。
+          $log = (Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 2 -ErrorAction SilentlyContinue |
+                  Select-Object -First 1).FullName
+          if ($log) { Remove-Item $log -Force; Write-Host "已清空上一轮日志: $log" }
+
           $squatter = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), 3001)
           $squatter.Start()
           Write-Host "已占用 127.0.0.1:3001"
@@ -152,9 +159,9 @@ jobs:
           $exe = (Resolve-Path "release/win-unpacked/robot-live-ui.exe").Path
           $proc = Start-Process $exe -PassThru
           $deadline = (Get-Date).AddSeconds(120)
-          $log = $null; $ok = $false
+          $ok = $false
           while ((Get-Date) -lt $deadline) {
-            if (-not $log) {
+            if (-not $log -or -not (Test-Path $log)) {
               $found = Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 2 -ErrorAction SilentlyContinue |
                        Select-Object -First 1
               if ($found) { $log = $found.FullName }
