@@ -121,9 +121,23 @@ jobs:
             }
           }
 
+          # 后端就绪之后，界面还需要一点时间才会连上来，
+          # 所以这里再等一轮，别把"还没连"误判成"连不上"
+          $uiConnected = $false
+          if ($ok) {
+            $uiDeadline = (Get-Date).AddSeconds(60)
+            while ((Get-Date) -lt $uiDeadline) {
+              if (Select-String -Path $log -Pattern 'WS Incoming' -Quiet -ErrorAction SilentlyContinue) { $uiConnected = $true; break }
+              Start-Sleep -Seconds 3
+            }
+          }
+
           Get-Process robot-live-ui -ErrorAction SilentlyContinue | Stop-Process -Force
           if (-not $ok) { Write-Host "后端未能在 120 秒内就绪"; exit 1 }
-          Write-Host "后端启动成功"
+          # 后端起来了还不够：界面也得真的连上。[WS Incoming] 只可能来自渲染进程
+          # （Vue 组件挂载时请求数据），所以它能证明窗口渲染成功并和后端通上了话。
+          if (-not $uiConnected) { Write-Host "后端起来了，但界面没有连上来"; exit 1 }
+          Write-Host "后端启动成功，界面已连接"
 
       # 端口冲突的兜底分支平时不会跑到（3001 通常是空闲的），
       # 所以这里主动占住 3001，逼它走一次自动换端口的路径，
@@ -150,6 +164,15 @@ jobs:
             Start-Sleep -Seconds 3
           }
 
+          # 后端就绪后再等界面连上来（换端口的场景下这一步才是真正的验证）
+          if ($ok) {
+            $uiDeadline = (Get-Date).AddSeconds(60)
+            while ((Get-Date) -lt $uiDeadline) {
+              if (Select-String -Path $log -Pattern 'WS Incoming' -Quiet -ErrorAction SilentlyContinue) { break }
+              Start-Sleep -Seconds 3
+            }
+          }
+
           if ($log) { Write-Host "----- backend.log -----"; Get-Content $log }
           Get-Process robot-live-ui -ErrorAction SilentlyContinue | Stop-Process -Force
           $squatter.Stop()
@@ -158,7 +181,13 @@ jobs:
           # 必须确认它真的换了端口，而不是"碰巧 3001 又空了"
           $moved = Select-String -Path $log -Pattern '改用系统自动分配的空闲端口' -Quiet -ErrorAction SilentlyContinue
           if (-not $moved) { Write-Host "后端就绪了，但没有走到换端口分支——本次未真正验证兜底逻辑"; exit 1 }
-          Write-Host "端口冲突兜底验证通过"
+          # 最关键的一条：界面必须也连上了新端口。
+          # [WS Incoming] 只可能来自渲染进程（Vue 组件挂载时会请求数据），
+          # 出现它就说明整条链路在 Windows 上打通了：
+          # 后端选端口 → parentPort → 主进程 → IPC → 渲染进程 → 连上并发指令。
+          $uiConnected = Select-String -Path $log -Pattern 'WS Incoming' -Quiet -ErrorAction SilentlyContinue
+          if (-not $uiConnected) { Write-Host "后端换了端口，但界面没有连上来——端口传递链路有问题"; exit 1 }
+          Write-Host "端口冲突兜底验证通过（界面已连接到新端口）"
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
