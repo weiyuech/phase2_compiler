@@ -86,13 +86,23 @@ function updateClock() {
 // 端口不写死：后端首选 3001，被占用时会改用系统分配的空闲端口，
 // 并把真实端口交给主进程。每次连接前都重新问一次（重启后端可能会换端口）。
 const DEFAULT_PORT = 3001
+let _isDev = null      // 只问一次：开发模式下后端是手动 npm start 起的
+
 async function resolveWsUrl() {
-  let port = DEFAULT_PORT
   try {
     const p = await window.api?.getUiPort?.()
-    if (Number.isInteger(p) && p > 0) port = p
-  } catch { /* 拿不到就用默认端口（开发模式） */ }
-  return `ws://127.0.0.1:${port}`
+    if (Number.isInteger(p) && p > 0) return `ws://127.0.0.1:${p}`
+  } catch { /* 忽略，下面按未知端口处理 */ }
+
+  // 端口还不知道。开发模式固定 3001；打包模式下端口由后端自己选，
+  // 这时候贸然去连 3001 很危险：占用它的可能是别的程序，
+  // 那种程序会接受 TCP 连接却不说 WebSocket，握手就一直卡着不返回。
+  if (_isDev === null) {
+    try { _isDev = (await window.api?.getBackendStatus?.())?.dev === true }
+    catch { _isDev = true }
+  }
+  if (_isDev || !window.api?.getUiPort) return `ws://127.0.0.1:${DEFAULT_PORT}`
+  return null      // 打包模式：等后端把端口报上来再连
 }
 const ws = ref(null)
 const wsStatus = ref('disconnected') // 'connected' | 'disconnected' | 'error'
@@ -128,10 +138,41 @@ function showBackendFailure({ code, stderr }) {
   wsDetail.value = stderr || '（无错误输出，详见 backend.log）'
 }
 
+function scheduleReconnect(delay = 5000) {
+  clearTimeout(wsTimer)
+  wsTimer = setTimeout(connectWS, delay)
+}
+
 async function connectWS() {
+  clearTimeout(wsTimer)
   try {
-    const socket = new WebSocket(await resolveWsUrl())
+    const url = await resolveWsUrl()
+    if (!url) {          // 端口还没报上来，稍后再试（不去猜 3001）
+      scheduleReconnect(1000)
+      return
+    }
+
+    const socket = new WebSocket(url)
+    let settled = false
+
+    // 握手超时。连到一个"只接 TCP、不说 WebSocket"的程序时，
+    // onopen / onclose / onerror 一个都不会触发，socket 就永远停在 CONNECTING，
+    // 重连定时器也永远排不上——界面会一直停在"未连接"。
+    const handshakeTimer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try { socket.close() } catch {}
+      wsEverFailed.value = true
+      if (!wsDetail.value) {
+        wsStatus.value = 'error'
+        wsLabel.value = '连接超时 — 重试中'
+      }
+      scheduleReconnect(2000)
+    }, 6000)
+
     socket.onopen = () => {
+      settled = true
+      clearTimeout(handshakeTimer)
       console.log('[WebSocket] Connected')
       ws.value = socket
       wsStatus.value = 'connected'
@@ -139,12 +180,15 @@ async function connectWS() {
       wsDetail.value = ''
       wsEverFailed.value = false
     }
-    
+
     socket.addEventListener('message', (e) => {
       // Logic handled in child components via props/events
     })
 
     socket.onclose = () => {
+      clearTimeout(handshakeTimer)
+      if (settled && !ws.value) return     // 超时分支已经安排过重连了
+      settled = true
       wsEverFailed.value = true
       // 后端崩溃的具体原因优先保留：重连每 5s 触发一次 onclose，
       // 不加这个判断的话"端口被占用"几秒钟就被通用文案覆盖掉了
@@ -153,7 +197,7 @@ async function connectWS() {
         wsLabel.value = '未连接 — 5s后重试'
       }
       ws.value = null
-      wsTimer = setTimeout(connectWS, 5000)
+      scheduleReconnect(5000)
     }
     socket.onerror = () => {
       wsEverFailed.value = true
@@ -165,7 +209,7 @@ async function connectWS() {
   } catch {
     wsEverFailed.value = true
     if (!wsDetail.value) wsStatus.value = 'error'
-    wsTimer = setTimeout(connectWS, 5000)
+    scheduleReconnect(5000)
   }
 }
 
@@ -173,6 +217,14 @@ onMounted(() => {
   updateClock()
   clockTimer = setInterval(updateClock, 1000)
   connectWS()
+
+  // 后端一报出真实端口就立刻（重）连，不用等 5 秒的重试节奏。
+  // 后端重启换端口时也是靠这条消息把界面带过去。
+  window.api?.onUiPort?.((port) => {
+    console.log('[WebSocket] backend reported port', port)
+    if (ws.value) { try { ws.value.close() } catch {} }
+    connectWS()
+  })
 
   // 后端进程退出 → 直接把原因显示出来，而不是让用户对着"未连接"猜
   window.api?.onBackendExit?.(showBackendFailure)
