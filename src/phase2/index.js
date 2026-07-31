@@ -80,10 +80,18 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
   const barrageManager = new BarrageManager({ tts, llm, tour, uiBridge, checkGoalHandling, checkIsSpeaking, onBarrageSpeechStart, onBarrageSpeechEnd });
 
   // Initialize the Node.js OCR engine
+  let ocrLoadError = null;
   loadOcr()
     .then(ocr => ocr.initOcr())
     .catch(err => {
+      ocrLoadError = err.message;
       console.error('[Phase 2] [OCR] 引擎加载失败，弹幕识别不可用（其余功能不受影响）:', err.message);
+      // 也要告诉界面。只写日志的话，用户会看到"识别已开启"却永远没有反应，
+      // 而这正是我们在别处刚消灭掉的那种"静悄悄地坏掉"。
+      // 启动时界面可能还没连上，所以下面开启识别时会再报一次。
+      uiBridge.broadcast('ERROR', {
+        message: `弹幕识别不可用：OCR 引擎加载失败（${err.message}）。其余功能不受影响。`
+      });
     });
 
   const USER_DATA = process.env.USER_DATA_DIR;
@@ -112,6 +120,15 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
 
   // -- Hook into Phase 2 Barrage UI Commands --
   uiBridge.on('onBarrageStart', (rect) => {
+    // OCR 引擎没加载起来就直说，别让用户对着一个"已开启"却毫无反应的界面等
+    if (_ocrUnavailable) {
+      const msg = `弹幕识别无法启动：OCR 引擎不可用（${ocrLoadError || '加载失败'}）。请导出诊断日志发给技术支持。`;
+      console.error(`[Phase 2] ${msg}`);
+      uiBridge.broadcast('ERROR', { message: msg });
+      uiBridge.broadcast('BARRAGE_LOG', { text: msg });
+      uiBridge.broadcast('BARRAGE_STOP', {});   // 让界面的开关回到关闭状态
+      return;
+    }
     console.log(`[Phase 2] Barrage OCR tracking STARTED on region:`, rect);
     lastLoggedText = null;
     lastFullOcrText = null;
