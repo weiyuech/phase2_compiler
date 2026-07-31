@@ -110,6 +110,7 @@ const wsLabel = ref('未连接')
 const wsDetail = ref('')             // 后端崩溃时的 stderr 摘要，鼠标悬停可见
 const wsEverFailed = ref(false)      // 连过一次失败才显示"导出诊断日志"，正常启动时不闪
 let wsTimer
+let connectedPort = null             // 当前连着的端口，用来避免重复重连
 
 async function exportDiagnostics() {
   const res = await window.api?.exportDiagnostics?.()
@@ -153,6 +154,7 @@ async function connectWS() {
     }
 
     const socket = new WebSocket(url)
+    const thisPort = Number(new URL(url).port)
     let settled = false
 
     // 握手超时。连到一个"只接 TCP、不说 WebSocket"的程序时，
@@ -173,7 +175,8 @@ async function connectWS() {
     socket.onopen = () => {
       settled = true
       clearTimeout(handshakeTimer)
-      console.log('[WebSocket] Connected')
+      console.log('[WebSocket] Connected on port', thisPort)
+      connectedPort = thisPort
       ws.value = socket
       wsStatus.value = 'connected'
       wsLabel.value = '已连接到后端'
@@ -197,6 +200,7 @@ async function connectWS() {
         wsLabel.value = '未连接 — 5s后重试'
       }
       ws.value = null
+      connectedPort = null
       scheduleReconnect(5000)
     }
     socket.onerror = () => {
@@ -221,6 +225,10 @@ onMounted(() => {
   // 后端一报出真实端口就立刻（重）连，不用等 5 秒的重试节奏。
   // 后端重启换端口时也是靠这条消息把界面带过去。
   window.api?.onUiPort?.((port) => {
+    // 已经连在这个端口上就什么都不用做。
+    // 不判断的话，启动时会先连上、再被这条消息踢下来重连一次，
+    // 界面会无谓地闪一下"未连接"，组件也要重新拉一遍数据。
+    if (ws.value && connectedPort === port) return
     console.log('[WebSocket] backend reported port', port)
     if (ws.value) { try { ws.value.close() } catch {} }
     connectWS()
