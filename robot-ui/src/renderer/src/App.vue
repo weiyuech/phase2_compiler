@@ -110,7 +110,12 @@ const wsLabel = ref('未连接')
 const wsDetail = ref('')             // 后端崩溃时的 stderr 摘要，鼠标悬停可见
 const wsEverFailed = ref(false)      // 连过一次失败才显示"导出诊断日志"，正常启动时不闪
 let wsTimer
-let connectedPort = null             // 当前连着的端口，用来避免重复重连
+// 正在连接中/已连接的那个 socket 及其目标端口。
+// 只用 ws.value 判断是不够的：它要等 onopen 才赋值，
+// 握手期间 ws.value 还是 null，这时收到端口通知就会再开一条，
+// 结果两条都连上了（run #42 的日志里 界面已连接 出现了两次）。
+let activeSocket = null
+let activePort   = null
 
 async function exportDiagnostics() {
   const res = await window.api?.exportDiagnostics?.()
@@ -153,8 +158,13 @@ async function connectWS() {
       return
     }
 
+    // 同一时间只保留一条连接：新建之前先丢掉上一条（可能还在握手中）
+    if (activeSocket) { try { activeSocket.close() } catch {} }
+
     const socket = new WebSocket(url)
     const thisPort = Number(new URL(url).port)
+    activeSocket = socket
+    activePort   = thisPort
     let settled = false
 
     // 握手超时。连到一个"只接 TCP、不说 WebSocket"的程序时，
@@ -164,6 +174,7 @@ async function connectWS() {
       if (settled) return
       settled = true
       try { socket.close() } catch {}
+      if (activeSocket === socket) { activeSocket = null; activePort = null }
       wsEverFailed.value = true
       if (!wsDetail.value) {
         wsStatus.value = 'error'
@@ -176,7 +187,6 @@ async function connectWS() {
       settled = true
       clearTimeout(handshakeTimer)
       console.log('[WebSocket] Connected on port', thisPort)
-      connectedPort = thisPort
       ws.value = socket
       wsStatus.value = 'connected'
       wsLabel.value = '已连接到后端'
@@ -200,7 +210,7 @@ async function connectWS() {
         wsLabel.value = '未连接 — 5s后重试'
       }
       ws.value = null
-      connectedPort = null
+      if (activeSocket === socket) { activeSocket = null; activePort = null }
       scheduleReconnect(5000)
     }
     socket.onerror = () => {
@@ -225,10 +235,9 @@ onMounted(() => {
   // 后端一报出真实端口就立刻（重）连，不用等 5 秒的重试节奏。
   // 后端重启换端口时也是靠这条消息把界面带过去。
   window.api?.onUiPort?.((port) => {
-    // 已经连在这个端口上就什么都不用做。
-    // 不判断的话，启动时会先连上、再被这条消息踢下来重连一次，
-    // 界面会无谓地闪一下"未连接"，组件也要重新拉一遍数据。
-    if (ws.value && connectedPort === port) return
+    // 已经连着（或正在连）这个端口就什么都不用做。
+    // 必须连"正在握手"的情况也算上，否则启动时会开出第二条连接。
+    if (activePort === port) return
     console.log('[WebSocket] backend reported port', port)
     if (ws.value) { try { ws.value.close() } catch {} }
     connectWS()
