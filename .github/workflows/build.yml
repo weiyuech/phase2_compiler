@@ -127,7 +127,7 @@ jobs:
           if ($ok) {
             $uiDeadline = (Get-Date).AddSeconds(60)
             while ((Get-Date) -lt $uiDeadline) {
-              if (Select-String -Path $log -Pattern '界面已连接' -Quiet -ErrorAction SilentlyContinue) { $uiConnected = $true; break }
+              if ((Test-Path $log) -and (Select-String -Path $log -Pattern '界面已连接' -Quiet -ErrorAction SilentlyContinue)) { $uiConnected = $true; break }
               Start-Sleep -Seconds 3
             }
           }
@@ -142,9 +142,10 @@ jobs:
       # 端口冲突的兜底分支平时不会跑到（3001 通常是空闲的），
       # 所以这里主动占住 3001，逼它走一次自动换端口的路径。
       #
-      # 暂时不阻塞构建：在 Windows 上"真正占住一个端口"本身还没弄对
-      # （run #35/#36 里后端依然绑上了 3001），问题出在测试的占位方式，
-      # 不是应用本身。上面两步已经证明包是好的，不该因为这步拿不到安装包。
+      # 暂时不阻塞构建，等这一步稳定通过一次再改成硬失败。
+      # run #35/#36 失败的真正原因是本脚本自身：删掉日志后仍拿旧路径去
+      # Select-String，而 GitHub 的 pwsh 默认 ErrorActionPreference=Stop，
+      # 于是脚本当场中止、应用根本没来得及启动——与应用无关。
       - name: Smoke test — backend survives a taken port 3001
         continue-on-error: true
         shell: pwsh
@@ -152,13 +153,21 @@ jobs:
           # backend.log 是一直追加的，上一步的内容还在里面。
           # 不先清掉的话，下面查"已就绪"会立刻命中上一次运行留下的那行，
           # 于是还没等新实例启动就误判为成功（run #33 就是这么挂的）。
-          $log = (Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 2 -ErrorAction SilentlyContinue |
-                  Select-Object -First 1).FullName
-          if ($log) { Remove-Item $log -Force; Write-Host "已清空上一轮日志: $log" }
+          # GitHub 的 pwsh 默认 $ErrorActionPreference='Stop'：对着一个不存在的文件
+          # 调 Select-String 会直接终止整个脚本。所以统一走这个helper，先查存在性。
+          function Test-LogPattern($path, $pattern) {
+            if (-not $path) { return $false }
+            if (-not (Test-Path $path)) { return $false }
+            return [bool](Select-String -Path $path -Pattern $pattern -Quiet -ErrorAction SilentlyContinue)
+          }
 
-          # ExclusiveAddressUse 必须显式设为 true：.NET 的 TcpListener 默认是 false，
-          # 那样 Windows 允许别的进程再绑同一个端口，后端根本不会收到 EADDRINUSE，
-          # 也就永远走不到兜底分支（run #35 就是被这个假占用骗过去的）。
+          $old = (Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 2 -ErrorAction SilentlyContinue |
+                  Select-Object -First 1).FullName
+          if ($old) { Remove-Item $old -Force; Write-Host "已清空上一轮日志: $old" }
+          $log = $null      # 文件已删除，路径必须一并清空，否则后面会对着不存在的路径查找
+
+          # ExclusiveAddressUse=true：.NET 默认为 false，那样 Windows 允许别的
+          # 进程共享同一端口，占用就不是真的占用。
           $squatter = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), 3001)
           $squatter.ExclusiveAddressUse = $true
           $squatter.Start()
@@ -172,18 +181,19 @@ jobs:
             if (-not $log -or -not (Test-Path $log)) {
               $found = Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 2 -ErrorAction SilentlyContinue |
                        Select-Object -First 1
-              if ($found) { $log = $found.FullName }
+              $log = if ($found) { $found.FullName } else { $null }
             }
-            if ($log -and (Select-String -Path $log -Pattern '控制台通道已就绪' -Quiet -ErrorAction SilentlyContinue)) { $ok = $true; break }
+            if (Test-LogPattern $log '控制台通道已就绪') { $ok = $true; break }
             if ($proc.HasExited) { Write-Host "应用已退出，退出码 $($proc.ExitCode)"; break }
             Start-Sleep -Seconds 3
           }
 
           # 后端就绪后再等界面连上来（换端口的场景下这一步才是真正的验证）
+          $uiConnected = $false
           if ($ok) {
             $uiDeadline = (Get-Date).AddSeconds(60)
             while ((Get-Date) -lt $uiDeadline) {
-              if (Select-String -Path $log -Pattern '界面已连接' -Quiet -ErrorAction SilentlyContinue) { break }
+              if (Test-LogPattern $log '界面已连接') { $uiConnected = $true; break }
               Start-Sleep -Seconds 3
             }
           }
@@ -194,13 +204,13 @@ jobs:
 
           if (-not $ok) { Write-Host "端口被占用时后端未能就绪"; exit 1 }
           # 必须确认它真的换了端口，而不是"碰巧 3001 又空了"
-          $moved = Select-String -Path $log -Pattern '改用系统自动分配的空闲端口' -Quiet -ErrorAction SilentlyContinue
-          if (-not $moved) { Write-Host "后端就绪了，但没有走到换端口分支——本次未真正验证兜底逻辑"; exit 1 }
+          if (-not (Test-LogPattern $log '改用系统自动分配的空闲端口')) {
+            Write-Host "后端就绪了，但没有走到换端口分支——本次未真正验证兜底逻辑"; exit 1
+          }
           # 最关键的一条：界面必须也连上了新端口。
           # "界面已连接" 由后端在收到 UI 连接时打印，
           # 出现它就说明整条链路在 Windows 上打通了：
           # 后端选端口 → parentPort → 主进程 → IPC → 渲染进程 → 连上并发指令。
-          $uiConnected = Select-String -Path $log -Pattern '界面已连接' -Quiet -ErrorAction SilentlyContinue
           if (-not $uiConnected) { Write-Host "后端换了端口，但界面没有连上来——端口传递链路有问题"; exit 1 }
           Write-Host "端口冲突兜底验证通过（界面已连接到新端口）"
 
