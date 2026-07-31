@@ -125,6 +125,41 @@ jobs:
           if (-not $ok) { Write-Host "后端未能在 120 秒内就绪"; exit 1 }
           Write-Host "后端启动成功"
 
+      # 端口冲突的兜底分支平时不会跑到（3001 通常是空闲的），
+      # 所以这里主动占住 3001，逼它走一次自动换端口的路径，
+      # 确保这段代码在 Windows 上真的能用，而不是只在开发机上验过。
+      - name: Smoke test — backend survives a taken port 3001
+        shell: pwsh
+        run: |
+          $squatter = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), 3001)
+          $squatter.Start()
+          Write-Host "已占用 127.0.0.1:3001"
+
+          $exe = (Resolve-Path "release/win-unpacked/robot-live-ui.exe").Path
+          $proc = Start-Process $exe -PassThru
+          $deadline = (Get-Date).AddSeconds(120)
+          $log = $null; $ok = $false
+          while ((Get-Date) -lt $deadline) {
+            if (-not $log) {
+              $found = Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 2 -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+              if ($found) { $log = $found.FullName }
+            }
+            if ($log -and (Select-String -Path $log -Pattern '控制台通道已就绪' -Quiet -ErrorAction SilentlyContinue)) { $ok = $true; break }
+            if ($proc.HasExited) { Write-Host "应用已退出，退出码 $($proc.ExitCode)"; break }
+            Start-Sleep -Seconds 3
+          }
+
+          if ($log) { Write-Host "----- backend.log -----"; Get-Content $log }
+          Get-Process robot-live-ui -ErrorAction SilentlyContinue | Stop-Process -Force
+          $squatter.Stop()
+
+          if (-not $ok) { Write-Host "端口被占用时后端未能就绪"; exit 1 }
+          # 必须确认它真的换了端口，而不是"碰巧 3001 又空了"
+          $moved = Select-String -Path $log -Pattern '改用系统自动分配的空闲端口' -Quiet -ErrorAction SilentlyContinue
+          if (-not $moved) { Write-Host "后端就绪了，但没有走到换端口分支——本次未真正验证兜底逻辑"; exit 1 }
+          Write-Host "端口冲突兜底验证通过"
+
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
