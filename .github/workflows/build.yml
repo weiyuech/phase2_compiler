@@ -127,15 +127,15 @@ jobs:
           if ($ok) {
             $uiDeadline = (Get-Date).AddSeconds(60)
             while ((Get-Date) -lt $uiDeadline) {
-              if (Select-String -Path $log -Pattern 'WS Incoming' -Quiet -ErrorAction SilentlyContinue) { $uiConnected = $true; break }
+              if (Select-String -Path $log -Pattern '界面已连接' -Quiet -ErrorAction SilentlyContinue) { $uiConnected = $true; break }
               Start-Sleep -Seconds 3
             }
           }
 
           Get-Process robot-live-ui -ErrorAction SilentlyContinue | Stop-Process -Force
           if (-not $ok) { Write-Host "后端未能在 120 秒内就绪"; exit 1 }
-          # 后端起来了还不够：界面也得真的连上。[WS Incoming] 只可能来自渲染进程
-          # （Vue 组件挂载时请求数据），所以它能证明窗口渲染成功并和后端通上了话。
+          # 后端起来了还不够：界面也得真的连上。
+          # "界面已连接" 证明窗口渲染成功并和后端通上了话。
           if (-not $uiConnected) { Write-Host "后端起来了，但界面没有连上来"; exit 1 }
           Write-Host "后端启动成功，界面已连接"
 
@@ -152,9 +152,13 @@ jobs:
                   Select-Object -First 1).FullName
           if ($log) { Remove-Item $log -Force; Write-Host "已清空上一轮日志: $log" }
 
+          # ExclusiveAddressUse 必须显式设为 true：.NET 的 TcpListener 默认是 false，
+          # 那样 Windows 允许别的进程再绑同一个端口，后端根本不会收到 EADDRINUSE，
+          # 也就永远走不到兜底分支（run #35 就是被这个假占用骗过去的）。
           $squatter = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), 3001)
+          $squatter.ExclusiveAddressUse = $true
           $squatter.Start()
-          Write-Host "已占用 127.0.0.1:3001"
+          Write-Host "已独占 127.0.0.1:3001"
 
           $exe = (Resolve-Path "release/win-unpacked/robot-live-ui.exe").Path
           $proc = Start-Process $exe -PassThru
@@ -175,7 +179,7 @@ jobs:
           if ($ok) {
             $uiDeadline = (Get-Date).AddSeconds(60)
             while ((Get-Date) -lt $uiDeadline) {
-              if (Select-String -Path $log -Pattern 'WS Incoming' -Quiet -ErrorAction SilentlyContinue) { break }
+              if (Select-String -Path $log -Pattern '界面已连接' -Quiet -ErrorAction SilentlyContinue) { break }
               Start-Sleep -Seconds 3
             }
           }
@@ -189,10 +193,10 @@ jobs:
           $moved = Select-String -Path $log -Pattern '改用系统自动分配的空闲端口' -Quiet -ErrorAction SilentlyContinue
           if (-not $moved) { Write-Host "后端就绪了，但没有走到换端口分支——本次未真正验证兜底逻辑"; exit 1 }
           # 最关键的一条：界面必须也连上了新端口。
-          # [WS Incoming] 只可能来自渲染进程（Vue 组件挂载时会请求数据），
+          # "界面已连接" 由后端在收到 UI 连接时打印，
           # 出现它就说明整条链路在 Windows 上打通了：
           # 后端选端口 → parentPort → 主进程 → IPC → 渲染进程 → 连上并发指令。
-          $uiConnected = Select-String -Path $log -Pattern 'WS Incoming' -Quiet -ErrorAction SilentlyContinue
+          $uiConnected = Select-String -Path $log -Pattern '界面已连接' -Quiet -ErrorAction SilentlyContinue
           if (-not $uiConnected) { Write-Host "后端换了端口，但界面没有连上来——端口传递链路有问题"; exit 1 }
           Write-Host "端口冲突兜底验证通过（界面已连接到新端口）"
 

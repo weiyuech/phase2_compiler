@@ -171,26 +171,42 @@ let _lastBackendExit = null
 // 并通过 parentPort 把真实端口告诉这里，再由渲染进程取走。
 let _uiPort = null
 
+// ─── backend.log 轮转 ─────────────────────────────────────────────────────────
+// 开着弹幕识别时日志约 280KB/小时，连播几天就是几十 MB。
+// 只在启动时检查大小是不够的——直播机器可能连续跑一周不重启，
+// 那样单个文件会一直涨下去。所以改成写入时检查：超过上限就轮转。
+// 用内存里的计数器累加，避免每写一行都去 statSync（1Hz 的系统调用没必要）。
+const LOG_MAX_BYTES = 5 * 1024 * 1024
+let _logBytes = null
+
+function appendLog(logPath, s) {
+  const str = String(s)
+  try {
+    if (_logBytes === null) {
+      _logBytes = existsSync(logPath) ? statSync(logPath).size : 0
+    }
+    if (_logBytes >= LOG_MAX_BYTES) {
+      renameSync(logPath, logPath + '.1')   // 只保留一份历史，诊断导出会把两份都带上
+      _logBytes = 0
+    }
+    // appendFileSync 是同步系统调用，写完立刻落盘，进程崩溃也不会丢数据
+    // createWriteStream / writeFileSync 都有内存缓冲，崩溃前来不及 flush 就截断
+    appendFileSync(logPath, str)
+    _logBytes += Buffer.byteLength(str)
+  } catch {}
+}
+
 function startBackend() {
   if (!app.isPackaged) return   // dev: use `npm start` in a separate terminal
 
   _lastBackendExit = null
   _uiPort = null            // 重启后端会重新分配，先清掉旧值
+  _logBytes = null          // 重新读一次文件大小（外部可能删过日志）
 
   const entry   = join(PROJECT_ROOT, 'src/index.js')
   const logPath = join(USER_DATA_DIR, 'backend.log')
 
-  // 日志是一直追加的，跑几个月会长到几十 MB，用户根本发不出来。
-  // 超过 5MB 就轮转一次，只保留一份历史（诊断导出时会把两份都带上）
-  try {
-    if (existsSync(logPath) && statSync(logPath).size > 5 * 1024 * 1024) {
-      renameSync(logPath, logPath + '.1')
-    }
-  } catch {}
-
-  // appendFileSync 是同步系统调用，写完立刻落盘，进程崩溃也不会丢数据
-  // createWriteStream / writeFileSync 都有内存缓冲，崩溃前来不及 flush 就截断
-  const log = (s) => { try { appendFileSync(logPath, String(s)) } catch {} }
+  const log = (s) => appendLog(logPath, s)
 
   log(`\n=== backend start ${new Date().toISOString()} ===\n`)
   log(`entry: ${entry}\n`)

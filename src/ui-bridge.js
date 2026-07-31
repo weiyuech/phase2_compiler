@@ -1,6 +1,11 @@
 import { WebSocketServer } from 'ws'
 import { writeSync }       from 'node:fs'
 
+// 弹幕识别开着时，每秒都会收到一帧截图和若干条消息。
+// 把这些逐帧日志一直写进 backend.log，一天就是几 MB，排障时还得从里面翻。
+// 默认关掉，需要现场调试时设 DEBUG_WS=1 打开。
+const DEBUG_WS = process.env.DEBUG_WS === '1'
+
 let wss        = null
 let paused     = false
 let duckVolume = 0.3
@@ -112,6 +117,11 @@ function listen(port, isFallback) {
   })
 
   wss.on('connection', (ws) => {
+    // 每次连接记一行（不是每条消息）。排障时这一行能直接回答
+    // "界面到底连上后端没有"，CI 的冒烟测试也用它判断窗口是否真的起来了。
+    console.log('[UI] 界面已连接')
+    ws.on('close', () => console.log('[UI] 界面已断开'))
+
     const sendTo = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
     sendTo('STATUS', { paused, duckVolume, fadeMs })
     if (tunnelUrl) sendTo('TUNNEL_URL', { url: tunnelUrl })
@@ -132,7 +142,7 @@ function listen(port, isFallback) {
                     buffer[2] === 0x4E && buffer[3] === 0x47;
 
       if (isPng) {
-        console.log(`[DEBUG] [WS] Received valid PNG image packet (${buffer.length} bytes)`);
+        if (DEBUG_WS) console.log(`[DEBUG] [WS] Received valid PNG image packet (${buffer.length} bytes)`);
         handlers.onBarrageImage?.(buffer)
         return
       }
@@ -169,7 +179,7 @@ function listen(port, isFallback) {
       function dispatch(msg) {
         const { type, data: msgData } = msg ?? {}
 
-        if (type !== 'BARRAGE_IMAGE') {
+        if (DEBUG_WS && type !== 'BARRAGE_IMAGE') {
           console.log('[DEBUG] [WS Incoming]:', type, JSON.stringify(msgData))
         }
 
