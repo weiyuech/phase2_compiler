@@ -117,12 +117,13 @@ function showBackendFailure({ code, stderr }) {
   console.error('[Backend] exited with code', code, '\n', stderr)
   wsStatus.value     = 'error'
   wsEverFailed.value = true
-  // 端口占用是最常见的一种，后端会以退出码 3 结束，这里给出可操作的提示。
-  // code 为空 = 进程根本没起来（fork 就失败了），不能显示成 "code undefined"
+  // code 为空 = 进程根本没起来（fork 就失败了），不能显示成 "code undefined"。
+  // 注意：端口被占用现在会自动换端口，不再以退出码 3 结束；
+  // 3 只剩下"通道启动失败"这一类（权限、地址不可用等），别再写成端口占用。
   wsLabel.value = code == null
     ? '后端未能启动'
     : code === 3
-      ? '后端启动失败：端口 3001 被占用'
+      ? '后端启动失败：控制台通道无法监听'
       : `后端进程已退出 (code ${code})`
   wsDetail.value = stderr || '（无错误输出，详见 backend.log）'
 }

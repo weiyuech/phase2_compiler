@@ -71,7 +71,6 @@ const handlers = {
 // 实际监听到的端口。首选 3001；被占用时由系统另分配一个空闲端口，
 // 再把真实端口告诉主进程 → 界面据此连接，所以端口冲突不再是致命问题。
 let actualPort = null
-export function getPort() { return actualPort }
 
 export function start(preferredPort = 3001) {
   listen(preferredPort, /* isFallback */ false)
@@ -100,7 +99,10 @@ function listen(port, isFallback) {
       // 首选端口被占用 → 换一个系统分配的空闲端口重来，而不是让用户
       // 自己去找并关掉占用端口的程序（对方可能根本关不掉）。
       if (err.code === 'EADDRINUSE' && !isFallback) {
-        console.warn(`[UI] 端口 ${port} 已被占用，改用系统自动分配的空闲端口`)
+        // 用 console.log（stdout）而不是 warn（stderr）：这是已经处理掉的正常情况。
+        // 界面在后端退出时展示的是 stderr 末尾几行，把这条写进 stderr 的话，
+        // 以后真的因为别的原因崩溃时，用户会看到"端口被占用"这条陈旧信息。
+        console.log(`[UI] 端口 ${port} 已被占用，改用系统自动分配的空闲端口`)
         try { wss.close() } catch {}
         listen(0, true)
         return

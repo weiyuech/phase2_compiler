@@ -497,7 +497,7 @@ function buildDiagnosticsReport() {
     L.push(_lastBackendExit.code == null
       ? '后端进程：没能启动起来'
       : `后端进程：已退出，退出码 ${_lastBackendExit.code}`)
-    if (_lastBackendExit.code === 3) L.push('→ 退出码 3 = 端口 3001 被占用')
+    if (_lastBackendExit.code === 3) L.push('→ 退出码 3 = 控制台通道无法监听（端口占用会自动换端口，不属于这一类）')
     L.push('最后的错误输出:')
     L.push(_lastBackendExit.stderr || '(无)')
   } else {
