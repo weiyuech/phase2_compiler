@@ -142,12 +142,9 @@ jobs:
       # 端口冲突的兜底分支平时不会跑到（3001 通常是空闲的），
       # 所以这里主动占住 3001，逼它走一次自动换端口的路径。
       #
-      # 暂时不阻塞构建，等这一步稳定通过一次再改成硬失败。
-      # run #35/#36 失败的真正原因是本脚本自身：删掉日志后仍拿旧路径去
-      # Select-String，而 GitHub 的 pwsh 默认 ErrorActionPreference=Stop，
-      # 于是脚本当场中止、应用根本没来得及启动——与应用无关。
+      # run #38 已在 Windows 上完整验证通过：占住 3001 -> 后端换到 60846 ->
+      # 主进程收到新端口 -> 界面连上。因此设为硬失败。
       - name: Smoke test — backend survives a taken port 3001
-        continue-on-error: true
         shell: pwsh
         run: |
           # backend.log 是一直追加的，上一步的内容还在里面。
