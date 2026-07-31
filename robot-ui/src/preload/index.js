@@ -40,6 +40,8 @@ contextBridge.exposeInMainWorld('api', {
   // Backend health — fired when the backend process dies, so the UI can show why
   onBackendExit: (callback) => ipcRenderer.on('backend-exit', (_event, info) => callback(info)),
   getBackendStatus: () => ipcRenderer.invoke('get-backend-status'),
+  getUiPort: () => ipcRenderer.invoke('get-ui-port'),
+  onUiPort: (callback) => ipcRenderer.on('ui-port', (_event, port) => callback(port)),
   exportDiagnostics: () => ipcRenderer.invoke('export-diagnostics'),
 
   // Barrage Overlay

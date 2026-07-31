@@ -167,11 +167,15 @@ let _win  = null
 // 后端在 createWindow() 之前就启动，端口占用之类的问题会让它在窗口存在前就退出，
 // 这时 webContents.send 无处可发——所以把最后一次退出信息留下来，等渲染进程主动来取
 let _lastBackendExit = null
+// 后端实际监听的端口。首选 3001，被占用时后端会改用系统分配的空闲端口，
+// 并通过 parentPort 把真实端口告诉这里，再由渲染进程取走。
+let _uiPort = null
 
 function startBackend() {
   if (!app.isPackaged) return   // dev: use `npm start` in a separate terminal
 
   _lastBackendExit = null
+  _uiPort = null            // 重启后端会重新分配，先清掉旧值
 
   const entry   = join(PROJECT_ROOT, 'src/index.js')
   const logPath = join(USER_DATA_DIR, 'backend.log')
@@ -226,6 +230,17 @@ function startBackend() {
     if (!s) return
     log('[err] ' + s)
     stderrTail = (stderrTail + s).slice(-STDERR_TAIL_MAX)
+  })
+
+  // 后端启动后会把真实监听端口发过来
+  _backendProcess.on('message', (msg) => {
+    if (msg?.type === 'UI_PORT' && Number.isInteger(msg.port)) {
+      _uiPort = msg.port
+      log(`[backend] UI 通道端口: ${_uiPort}\n`)
+      try {
+        if (_win && !_win.isDestroyed()) _win.webContents.send('ui-port', _uiPort)
+      } catch {}
+    }
   })
 
   _backendProcess.on('exit', (code) => {
@@ -521,10 +536,14 @@ ipcMain.handle('export-diagnostics', async () => {
 
 // 渲染进程启动时来问一次：后端是不是已经挂了（窗口出现之前就崩溃的情况）
 ipcMain.handle('get-backend-status', () => {
-  if (!app.isPackaged) return { running: true, dev: true }
-  if (_backendProcess)  return { running: true }
-  return { running: false, ..._lastBackendExit }
+  if (!app.isPackaged) return { running: true, dev: true, port: _uiPort }
+  if (_backendProcess)  return { running: true, port: _uiPort }
+  return { running: false, port: _uiPort, ..._lastBackendExit }
 })
+
+// 渲染进程连接前先问一次端口。dev 模式后端是手动起的、拿不到端口，返回 null，
+// 界面回退到默认的 3001。
+ipcMain.handle('get-ui-port', () => _uiPort)
 
 ipcMain.handle('restart-backend', () => {
   if (_backendProcess) {

@@ -79,10 +79,21 @@ function updateClock() {
 }
 
 // WebSocket — connect to your existing Node.js backend
-// 用 127.0.0.1 而不是 localhost：后端现在只监听回环 IPv4，
+// 用 127.0.0.1 而不是 localhost：后端只监听回环 IPv4，
 // 而 localhost 在部分 Windows 机器上会先解析成 ::1（IPv6），
 // 那样首次连接会失败、只能靠浏览器回退。写死 IPv4 就没有这个不确定性。
-const WS_URL = 'ws://127.0.0.1:3001'
+//
+// 端口不写死：后端首选 3001，被占用时会改用系统分配的空闲端口，
+// 并把真实端口交给主进程。每次连接前都重新问一次（重启后端可能会换端口）。
+const DEFAULT_PORT = 3001
+async function resolveWsUrl() {
+  let port = DEFAULT_PORT
+  try {
+    const p = await window.api?.getUiPort?.()
+    if (Number.isInteger(p) && p > 0) port = p
+  } catch { /* 拿不到就用默认端口（开发模式） */ }
+  return `ws://127.0.0.1:${port}`
+}
 const ws = ref(null)
 const wsStatus = ref('disconnected') // 'connected' | 'disconnected' | 'error'
 const wsLabel = ref('未连接')
@@ -116,9 +127,9 @@ function showBackendFailure({ code, stderr }) {
   wsDetail.value = stderr || '（无错误输出，详见 backend.log）'
 }
 
-function connectWS() {
+async function connectWS() {
   try {
-    const socket = new WebSocket(WS_URL)
+    const socket = new WebSocket(await resolveWsUrl())
     socket.onopen = () => {
       console.log('[WebSocket] Connected')
       ws.value = socket

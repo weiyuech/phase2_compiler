@@ -63,29 +63,47 @@ const handlers = {
   onNewClient:          null,
 }
 
-export function start(port = 3001) {
-  // 只监听回环地址：这个通道服务的是同一台机器上的 Electron 界面，
-  // 机器人走的是另一个端口（8765），不受影响。
+// 实际监听到的端口。首选 3001；被占用时由系统另分配一个空闲端口，
+// 再把真实端口告诉主进程 → 界面据此连接，所以端口冲突不再是致命问题。
+let actualPort = null
+export function getPort() { return actualPort }
+
+export function start(preferredPort = 3001) {
+  listen(preferredPort, /* isFallback */ false)
+}
+
+function listen(port, isFallback) {
+  // 只监听回环地址：这个通道服务的是同一台机器上的 Electron 界面。
+  // 机器人不走这个端口（ROBOT_URL 是往外拨号的），不受影响。
   // 之前监听全部网卡且没有任何鉴权，同一个 Wi-Fi 下的任何设备都能发指令。
   wss = new WebSocketServer({ port, host: '127.0.0.1' })
 
   let listening = false
   wss.on('listening', () => {
     listening = true
-    console.log(`[UI] 控制台通道已就绪，端口 ${port}`)
+    actualPort = wss.address().port          // port 为 0 时这里才是系统分配的真实端口
+    console.log(`[UI] 控制台通道已就绪，端口 ${actualPort}`)
+    // 告诉主进程真实端口，由它转给渲染进程。
+    // 开发模式下没有 parentPort（后端是手动 npm start 起的），界面回退到 3001。
+    try { process.parentPort?.postMessage({ type: 'UI_PORT', port: actualPort }) } catch {}
   })
 
   // 没有这个监听器时，listen 失败会以未捕获异常直接杀掉整个后端进程，
   // 界面上只剩一个"未连接"，日志里也只有一段看不懂的堆栈。
-  // 最常见的是 EADDRINUSE：端口被别的程序（或残留的旧后端进程）占着。
   wss.on('error', (err) => {
     if (!listening) {
+      // 首选端口被占用 → 换一个系统分配的空闲端口重来，而不是让用户
+      // 自己去找并关掉占用端口的程序（对方可能根本关不掉）。
+      if (err.code === 'EADDRINUSE' && !isFallback) {
+        console.warn(`[UI] 端口 ${port} 已被占用，改用系统自动分配的空闲端口`)
+        try { wss.close() } catch {}
+        listen(0, true)
+        return
+      }
       // writeSync 而不是 console.error：管道 stderr 在 macOS 上是异步写，
       // 紧跟 process.exit() 会把这条唯一的线索截掉
       try {
-        writeSync(2, (err.code === 'EADDRINUSE'
-          ? `[UI] 端口 ${port} 已被占用，后端无法启动。请关闭占用该端口的程序，或结束残留的旧进程后重试。`
-          : `[UI] 控制台通道启动失败: ${err.message}`) + '\n')
+        writeSync(2, `[UI] 控制台通道启动失败: ${err.message}\n`)
       } catch {}
       process.exit(3)
     }
