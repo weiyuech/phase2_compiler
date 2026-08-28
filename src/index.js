@@ -21,6 +21,7 @@ import { reloadPrompt }               from './llm/prompt.js'
 import { createKnowledgeBaseProvider } from './knowledge/index.js'
 import { LLMRewriter }                 from './llm/index.js'
 import { TTSEngine }                   from './tts/index.js'
+import { AudioOutputRouter }           from './tts/audio-output-router.js'
 import { TransitAudioManager }         from './transit/manager.js'
 import { RobotListener }               from './robot/listener.js'
 import { TaskManager }                 from './task/manager.js'
@@ -51,7 +52,18 @@ if (!healthy) process.exit(1)
 const llm = new LLMRewriter()
 await llm.init()
 
-const tts = new TTSEngine()
+const robot = new RobotListener(
+  process.env.ROBOT_URL
+    ? { url: process.env.ROBOT_URL }
+    : { port: parseInt(process.env.ROBOT_PORT || '8765') }
+)
+
+const audioOutput = new AudioOutputRouter({
+  robot,
+  filePath: join(DATA_DIR, 'audio-output.json'),
+})
+
+const tts = new TTSEngine({ audioOutput })
 
 // -- Separate Barrage (弹幕) LLM & TTS Clients --
 const barrageLlm = new LLMRewriter({
@@ -60,18 +72,28 @@ const barrageLlm = new LLMRewriter({
   DEEPSEEK_API_KEY: process.env.BARRAGE_DEEPSEEK_API_KEY,
   DEEPSEEK_MODEL: process.env.BARRAGE_DEEPSEEK_MODEL,
   LLM_TIMEOUT_MS: process.env.BARRAGE_LLM_TIMEOUT_MS,
+  LLM_MAX_TOKENS: process.env.BARRAGE_LLM_MAX_TOKENS,
   BANNED_WORDS_FILE: process.env.BANNED_WORDS_FILE || './config/banned-words.txt'
 })
 await barrageLlm.init()
 
 const barrageTts = new TTSEngine({
+  audioOutput,
   TTS_APP_ID: process.env.BARRAGE_TTS_APP_ID,
   TTS_ACCESS_TOKEN: process.env.BARRAGE_TTS_ACCESS_TOKEN,
+  TTS_API_KEY: process.env.BARRAGE_TTS_API_KEY,
+  TTS_AUTH_MODE: process.env.BARRAGE_TTS_AUTH_MODE,
+  TTS_PROTOCOL: process.env.BARRAGE_TTS_PROTOCOL,
   TTS_VOICE_TYPE: process.env.BARRAGE_TTS_VOICE_TYPE,
-  TTS_CLUSTER: process.env.BARRAGE_TTS_CLUSTER
+  TTS_CLUSTER: process.env.BARRAGE_TTS_CLUSTER,
+  TTS_RESOURCE_ID: process.env.BARRAGE_TTS_RESOURCE_ID,
+  TTS_TIMEOUT_MS: process.env.BARRAGE_TTS_TIMEOUT_MS
 })
 
-const transitAudio = new TransitAudioManager({ filePath: join(DATA_DIR, 'transit-audio.json') })
+const transitAudio = new TransitAudioManager({
+  filePath: join(DATA_DIR, 'transit-audio.json'),
+  audioOutput,
+})
 
 // Speaking state driven by renderer mic detection (via DUCK_START / DUCK_END commands on ws:3001)
 let isSpeaking = false
@@ -90,11 +112,6 @@ function updateCruisingDucking() {
 }
 
 const tour  = new TaskManager({ filePath: join(DATA_DIR, 'tour-list.json') })
-const robot = new RobotListener(
-  process.env.ROBOT_URL
-    ? { url: process.env.ROBOT_URL }
-    : { port: parseInt(process.env.ROBOT_PORT || '8765') }
-)
 
 // -- Phase 2 Sandbox Initialization --
 const phase2 = initPhase2({
@@ -129,6 +146,10 @@ let _session       = 0      // incremented by skip/stop/disconnect to invalidate
 
 uiBridge.on('onNewClient', (sendTo) => {
   sendTo('TRANSIT_CONFIG', transitAudio.getConfig())
+  sendTo('AUDIO_OUTPUT_CONFIG', {
+    ...audioOutput.getConfig(),
+    robotConnected,
+  })
   if (robotConnected) {
     sendTo('ROBOT_CONNECTED', {})
     if (lastMapList)  sendTo('MAP_LIST',  { maps: lastMapList })
@@ -620,6 +641,30 @@ uiBridge.on('onSetTransitConfig', (config) => {
   uiBridge.broadcast('TRANSIT_CONFIG', transitAudio.getConfig())
 })
 
+uiBridge.on('onGetAudioOutputConfig', (reply) => {
+  reply('AUDIO_OUTPUT_CONFIG', {
+    ...audioOutput.getConfig(),
+    robotConnected,
+  })
+})
+
+uiBridge.on('onSetAudioOutputConfig', (config) => {
+  try {
+    // Never leave a previous destination playing after the user switches.
+    tts.stop()
+    barrageTts.stop()
+    transitAudio.stop()
+    const saved = audioOutput.setConfig(config)
+    uiBridge.broadcast('AUDIO_OUTPUT_CONFIG', {
+      ...saved,
+      robotConnected,
+    })
+  } catch (err) {
+    console.error('[音频输出] 保存设置失败:', err.message)
+    uiBridge.broadcast('ERROR', { message: `音频输出设置保存失败: ${err.message}` })
+  }
+})
+
 uiBridge.on('onReloadPrompt', () => {
   reloadPrompt()
   uiBridge.broadcast('PROMPT_RELOADED', {})
@@ -676,6 +721,7 @@ robot.on('connected', () => {
   lastMapList    = null
   lastPaths      = null
   uiBridge.broadcast('ROBOT_CONNECTED', {})
+  uiBridge.broadcast('AUDIO_OUTPUT_STATUS', { robotConnected: true })
   robot.sendGetMapList()
 })
 
@@ -685,6 +731,7 @@ robot.on('disconnected', () => {
   lastMapList    = null
   lastPaths      = null
   uiBridge.broadcast('ROBOT_DISCONNECTED', {})
+  uiBridge.broadcast('AUDIO_OUTPUT_STATUS', { robotConnected: false })
   if (tour.isRunning) {
     _session++    // invalidate any in-flight goal-reached handler
     tour.stop()
@@ -904,6 +951,8 @@ async function playPoint(item, { map_name, path_file, goal_id }) {
 function shutdown() {
   transitAudio.stop()
   tts.destroy()
+  barrageTts.destroy()
+  audioOutput.destroy()
   robot.stop()
   // stopTunnel().finally(() => process.exit(0))
   process.exit(0)

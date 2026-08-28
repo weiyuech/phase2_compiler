@@ -43,6 +43,7 @@ export class LLMRewriter {
       ])
       return { text, provider: provider.name }
     } catch (err) {
+      console.error(`[LLM] Rewrite with ${provider.name} failed:`, err.message)
       return null
     }
   }

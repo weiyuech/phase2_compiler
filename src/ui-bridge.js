@@ -57,6 +57,9 @@ const handlers = {
   // Transit audio config
   onGetTransitConfig:   null,
   onSetTransitConfig:   null,
+  // Playback destination (local computer / robot speaker)
+  onGetAudioOutputConfig: null,
+  onSetAudioOutputConfig: null,
   // Cruising point audio files
   onGetCruisingAudioFiles: null,
   onUploadCruisingAudio:   null,
@@ -304,6 +307,14 @@ function listen(port, isFallback) {
           }
           case 'SET_TRANSIT_CONFIG':
             handlers.onSetTransitConfig?.(msgData)
+            break
+          case 'GET_AUDIO_OUTPUT_CONFIG': {
+            const reply = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
+            handlers.onGetAudioOutputConfig?.(reply)
+            break
+          }
+          case 'SET_AUDIO_OUTPUT_CONFIG':
+            handlers.onSetAudioOutputConfig?.(msgData)
             break
           case 'GET_TTS_CACHE_LIST': {
             const reply = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))

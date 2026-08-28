@@ -17,9 +17,9 @@ const DEFAULT_CONFIG = {
 }
 
 export class TransitAudioManager {
-  constructor({ filePath }) {
+  constructor({ filePath, audioOutput = null }) {
     this._filePath = filePath
-    this._player   = new AudioPlayer()
+    this._player   = new AudioPlayer({ outputRouter: audioOutput })
     this._runId    = null   // unique object per run; null = stopped
     this._config   = this._load()
   }

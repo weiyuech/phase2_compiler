@@ -75,8 +75,10 @@ function hasFfplay() {
 let _instanceCounter = 0
 
 export class AudioPlayer {
-  constructor() {
+  constructor({ outputRouter = null } = {}) {
     this.currentProcess = null
+    this._remoteSession = null
+    this.outputRouter   = outputRouter
     this._paused        = false
     // 每个实例一个独立的临时文件后缀，避免多个 AudioPlayer（如过渡音频 + 主 TTS）
     // 同时写入 data/temp-tts-play.mp3 时在 Windows 上因 ffplay 占用文件而 EBUSY
@@ -86,6 +88,28 @@ export class AudioPlayer {
   startStream() {
     const wasPaused = this._paused
     this.stop()
+
+    if (this.outputRouter?.isRobotDestination()) {
+      let session
+      try {
+        session = this.outputRouter.startMp3Stream(this)
+      } catch (err) {
+        console.error('[AudioPlayer] 无法启动机器人音频流:', err.message)
+        return null
+      }
+      this._remoteSession = session
+      this._paused = wasPaused
+      if (this._paused) session.pause()
+
+      const playPromise = session.promise.finally(() => {
+        if (this._remoteSession === session) this._remoteSession = null
+      })
+      return {
+        write: (buf) => session.write(buf),
+        end:   () => session.end(),
+        promise: playPromise,
+      }
+    }
 
     const ffplayPath = getFfplayPath()
     if (!ffplayPath) {
@@ -145,6 +169,14 @@ export class AudioPlayer {
 
 
   async play(audioBuffer) {
+    if (this.outputRouter?.isRobotDestination()) {
+      const stream = this.startStream()
+      if (!stream) throw new Error('无法启动机器人音频播放流')
+      stream.write(audioBuffer)
+      stream.end()
+      return stream.promise
+    }
+
     const USER_DATA = process.env.USER_DATA_DIR
     const DATA_DIR = USER_DATA ? join(USER_DATA, 'data') : './data'
     const tempFile = join(DATA_DIR, `temp-tts-play-${process.pid}-${this._instanceId}.mp3`)
@@ -163,6 +195,28 @@ export class AudioPlayer {
   }
 
   async playFile(filePath) {
+    if (this.outputRouter?.isRobotDestination()) {
+      const wasPaused = this._paused
+      this.stop()
+      this._paused = wasPaused
+
+      let session
+      try {
+        session = this.outputRouter.playFile(this, filePath)
+      } catch (err) {
+        console.error('[AudioPlayer] 无法启动机器人文件播放:', err.message)
+        throw err
+      }
+      this._remoteSession = session
+      if (this._paused) await session.pause()
+      try {
+        await session.promise
+      } finally {
+        if (this._remoteSession === session) this._remoteSession = null
+      }
+      return
+    }
+
     const ffplayPath = getFfplayPath()
     if (!ffplayPath) {
       const msg = '系统未检测到 ffplay，无法播放声音，请安装 ffmpeg 或将 ffplay.exe 放到应用目录下'
@@ -204,6 +258,9 @@ export class AudioPlayer {
 
   async pause() {
     this._paused = true
+    if (this._remoteSession) {
+      await this._remoteSession.pause()
+    }
     if (this.currentProcess) {
       if (process.platform === 'win32') {
         try {
@@ -224,6 +281,9 @@ export class AudioPlayer {
 
   async resume() {
     this._paused = false
+    if (this._remoteSession) {
+      await this._remoteSession.resume()
+    }
     if (this.currentProcess) {
       if (process.platform === 'win32') {
         try {
@@ -243,6 +303,10 @@ export class AudioPlayer {
   }
 
   stop() {
+    if (this._remoteSession) {
+      this.outputRouter?.stopSession(this._remoteSession)
+      this._remoteSession = null
+    }
     if (this.currentProcess) {
       try {
         this.currentProcess.kill('SIGKILL')
@@ -252,6 +316,6 @@ export class AudioPlayer {
   }
 
   isPlaying() {
-    return this.currentProcess !== null
+    return this.currentProcess !== null || !!this._remoteSession?.isActive()
   }
 }

@@ -1,5 +1,5 @@
-import { VolcengineTTSClient }   from './volcengine-client.js'
 import { VolcengineTTSWSClient } from './volcengine-ws-client.js'
+import { VolcengineTTSV1WSClient } from './volcengine-v1-ws-client.js'
 import { AudioPlayer }           from './audio-player.js'
 import fs                        from 'fs'
 import path                      from 'path'
@@ -18,15 +18,15 @@ export function filterTtsText(text) {
 
 export class TTSEngine {
   constructor(config = {}) {
-    this.client       = new VolcengineTTSClient(config)
-    this.wsClient     = new VolcengineTTSWSClient(config)
-    this.player       = new AudioPlayer(config)
+    this.protocol     = config.TTS_PROTOCOL || process.env.TTS_PROTOCOL || 'v3'
+    this.wsClient     = this.protocol === 'v1'
+      ? new VolcengineTTSV1WSClient(config)
+      : new VolcengineTTSWSClient(config)
+    this.player       = new AudioPlayer({ outputRouter: config.audioOutput })
     this.activeWSCall = null
 
-    this.enabled = !!(
-      (config.TTS_APP_ID       || process.env.TTS_APP_ID) &&
-      (config.TTS_ACCESS_TOKEN || process.env.TTS_ACCESS_TOKEN)
-    )
+    this.enabled = this.wsClient.isConfigured()
+    console.log(`[TTS] 使用火山引擎 ${this.protocol.toUpperCase()} 单向流式接口`)
   }
 
   /**

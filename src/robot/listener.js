@@ -181,6 +181,39 @@ export class RobotListener extends EventEmitter {
   }
 
   /**
+   * Send one real-time PCM frame to the robot speaker.
+   * PCM format is fixed by the robot protocol: 16 kHz, mono, S16_LE.
+   */
+  sendAudioFrame(pcmChunk, seq) {
+    if (!Buffer.isBuffer(pcmChunk) || pcmChunk.length === 0) {
+      throw new TypeError('audio PCM frame must be a non-empty Buffer')
+    }
+    if (!Number.isInteger(seq) || seq < 1) {
+      throw new TypeError('audio sequence number must be a positive integer')
+    }
+    if (!this._socket || this._socket.readyState !== WebSocket.OPEN) {
+      throw new Error('机器人 WebSocket 未连接，无法发送音频')
+    }
+    // Never let network buffering silently turn live audio into a many-second
+    // delayed queue. Normal traffic is only about 46 KB/s including base64/JSON.
+    if (this._socket.bufferedAmount > 256 * 1024) {
+      throw new Error(`机器人音频发送积压过大 (${this._socket.bufferedAmount} bytes)`)
+    }
+    this._socket.send(JSON.stringify({
+      audio: {
+        type:   'pcm',
+        sample: '16',
+        seq,
+        data: pcmChunk.toString('base64'),
+      }
+    }))
+  }
+
+  isConnected() {
+    return !!this._socket && this._socket.readyState === WebSocket.OPEN
+  }
+
+  /**
    * Returns a Promise that resolves when the heartbeat confirms the robot is on
    * the target map AND map.status === 'ready'. Works for both different-map switches
    * (which go through 'preparing') and same-map no-ops (which stay 'ready').
@@ -236,11 +269,12 @@ export class RobotListener extends EventEmitter {
   // ── Internal ───────────────────────────────────────────────────────────────
 
   _send(obj) {
-    if (!this._socket) {
+    if (!this._socket || this._socket.readyState !== WebSocket.OPEN) {
       console.warn('[机器人] 尚未连接，无法发送指令')
-      return
+      return false
     }
     this._socket.send(JSON.stringify(obj))
+    return true
   }
 
   _handleMessage(msg) {

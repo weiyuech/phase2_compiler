@@ -131,7 +131,7 @@
 
       <div class="control-card">
         <div class="card-title">手动播报测试</div>
-        <div class="card-desc">直接发送一段文本让机器人播报，用于测试语音和音频链路</div>
+        <div class="card-desc">直接发送一段文本到当前选择的播放设备，用于测试语音和音频链路</div>
         <el-input v-model="testText" placeholder="输入测试文本..." type="textarea" :rows="3" />
         <div class="btn-row" style="margin-top:10px">
           <el-button type="primary" :disabled="!wsConnected || !testText.trim()" @click="sendTestSpeech">

@@ -252,6 +252,42 @@
         </div>
       </template>
 
+      <!-- ── 音频输出 ─────────────────────────────────────────────────────── -->
+      <template v-else-if="activeSection === 'audio'">
+        <div class="panel-header">音频输出</div>
+        <div class="panel-body">
+          <p class="panel-note" style="margin: 0 0 18px">
+            统一控制巡游讲解、弹幕回复、过渡音频和手动播报测试的播放设备。
+          </p>
+
+          <div class="params-grid" style="max-width: 620px">
+            <span class="param-label">播放设备</span>
+            <el-radio-group v-model="audioOutputConfig.destination" size="small">
+              <el-radio-button value="local">本机扬声器（现有方式）</el-radio-button>
+              <el-radio-button value="robot">机器人扬声器（WebSocket 传输）</el-radio-button>
+            </el-radio-group>
+
+            <span class="param-label">机器人连接</span>
+            <span :class="robotAudioConnected ? 'ok-text' : 'err-text'">
+              {{ robotAudioConnected ? '已连接，可以传输音频' : '未连接；选择机器人扬声器后将暂时无法播放' }}
+            </span>
+          </div>
+
+          <div class="audio-output-help">
+            <p><strong>本机扬声器：</strong>保持当前行为，声音从运行本应用的电脑播放。</p>
+            <p><strong>机器人扬声器：</strong>音频自动转换为 16 kHz、单声道、16 位小端 PCM，通过现有机器人连接实时发送。</p>
+            <p>切换播放设备会停止当前正在播放的声音，新设置从下一次播放开始生效。</p>
+          </div>
+
+          <div class="row-actions" style="margin-top: 20px">
+            <el-button type="primary" :loading="savingAudioOutput" @click="saveAudioOutputConfig">
+              保存并立即切换
+            </el-button>
+            <span v-if="audioOutputSavedOk" class="ok-text">已保存并生效</span>
+          </div>
+        </div>
+      </template>
+
       <!-- ── 过渡音频 ─────────────────────────────────────────────────────── -->
       <template v-else-if="activeSection === 'transit'">
         <div class="panel-header">过渡音频</div>
@@ -320,6 +356,7 @@ const navItems = [
   { key: 'barrage', label: '弹幕设置'  },
   { key: 'prompt',  label: '改写提示词' },
   { key: 'banned',  label: '违禁词管理'   },
+  { key: 'audio',   label: '音频输出'  },
   { key: 'transit', label: '过渡音频'  },
 ]
 const activeSection = ref('cruise')
@@ -524,7 +561,12 @@ const cruisePublicEnvDef = [
   { key: 'DEEPSEEK_MODEL', label: 'DeepSeek 模型',  placeholder: 'deepseek-chat' },
   { key: 'TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'BV001_streaming 或复刻音色 S_xxxxxxxxxx' },
   { key: 'TTS_CLUSTER',   label: 'TTS Cluster', placeholder: 'volcano_tts（内置）/ volcano_icl（复刻）' },
+  { key: 'TTS_PROTOCOL', label: 'TTS 接口版本', options: ['v3', 'v1'] },
+  { key: 'TTS_RESOURCE_ID', label: 'TTS V3 Resource ID', placeholder: 'seed-tts-1.0 / seed-icl-1.0' },
+  { key: 'TTS_AUTH_MODE', label: 'TTS V3 鉴权方式', options: ['api-key', 'legacy'] },
+  { key: 'TTS_TIMEOUT_MS', label: 'TTS 基础超时 (ms)', placeholder: '30000（长文本会自动延长）' },
   { key: 'LLM_TIMEOUT_MS', label: 'LLM 超时 (ms)',  placeholder: '8000' },
+  { key: 'LLM_MAX_TOKENS', label: 'LLM 最大输出 tokens', placeholder: '4096' },
   { key: 'ROBOT_PORT',     label: '机器人监听端口',  placeholder: '8765' },
   { key: 'ROBOT_URL',      label: '机器人 WS 连接地址', placeholder: '空为监听模式 / 填写如 ws://192.168.1.100:8765' },
 ]
@@ -534,7 +576,12 @@ const barragePublicEnvDef = [
   { key: 'BARRAGE_DEEPSEEK_MODEL', label: 'DeepSeek 模型',  placeholder: 'deepseek-chat' },
   { key: 'BARRAGE_TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'BV001_streaming 或复刻音色 S_xxxxxxxxxx' },
   { key: 'BARRAGE_TTS_CLUSTER',   label: 'TTS Cluster', placeholder: 'volcano_tts（内置）/ volcano_icl（复刻）' },
+  { key: 'BARRAGE_TTS_PROTOCOL', label: 'TTS 接口版本', options: ['v3', 'v1'] },
+  { key: 'BARRAGE_TTS_RESOURCE_ID', label: 'TTS V3 Resource ID', placeholder: 'seed-tts-1.0 / seed-icl-1.0' },
+  { key: 'BARRAGE_TTS_AUTH_MODE', label: 'TTS V3 鉴权方式', options: ['api-key', 'legacy'] },
+  { key: 'BARRAGE_TTS_TIMEOUT_MS', label: 'TTS 基础超时 (ms)', placeholder: '30000（长文本会自动延长）' },
   { key: 'BARRAGE_LLM_TIMEOUT_MS', label: 'LLM 超时 (ms)',  placeholder: '8000' },
+  { key: 'BARRAGE_LLM_MAX_TOKENS', label: 'LLM 最大输出 tokens', placeholder: '500' },
 ]
 
 const publicEnv    = reactive({})
@@ -583,13 +630,13 @@ async function triggerRestart() {
 // ── API 密钥 ───────────────────────────────────────────────────────────────────
 const cruiseSensitiveKeys = [
   'DOUBAO_API_KEY', 'DEEPSEEK_API_KEY', 'QWEN_API_KEY',
-  'TTS_APP_ID', 'TTS_ACCESS_TOKEN',
+  'TTS_APP_ID', 'TTS_ACCESS_TOKEN', 'TTS_API_KEY',
   // 'NGROK_AUTHTOKEN',
 ]
 
 const barrageSensitiveKeys = [
   'BARRAGE_DOUBAO_API_KEY', 'BARRAGE_DEEPSEEK_API_KEY', 'BARRAGE_QWEN_API_KEY',
-  'BARRAGE_TTS_APP_ID', 'BARRAGE_TTS_ACCESS_TOKEN'
+  'BARRAGE_TTS_APP_ID', 'BARRAGE_TTS_ACCESS_TOKEN', 'BARRAGE_TTS_API_KEY'
 ]
 
 const hasPassword       = ref(false)
@@ -722,6 +769,78 @@ function lockSensitive() {
   for (const k of barrageSensitiveKeys) sensitiveEnv[k] = ''
 }
 
+// ── 音频输出 ─────────────────────────────────────────────────────────────────
+const audioOutputConfig  = reactive({ destination: 'local' })
+const robotAudioConnected = ref(false)
+const savingAudioOutput  = ref(false)
+const audioOutputSavedOk = ref(false)
+let audioOutputSocket = null
+let audioOutputSaveTimer = null
+
+function handleAudioOutputMessage(event) {
+  try {
+    const msg = JSON.parse(event.data)
+    if (msg.type === 'AUDIO_OUTPUT_CONFIG') {
+      if (msg.data?.destination) audioOutputConfig.destination = msg.data.destination
+      if (typeof msg.data?.robotConnected === 'boolean') {
+        robotAudioConnected.value = msg.data.robotConnected
+      }
+      if (savingAudioOutput.value) {
+        savingAudioOutput.value = false
+        audioOutputSavedOk.value = true
+        clearTimeout(audioOutputSaveTimer)
+        setTimeout(() => { audioOutputSavedOk.value = false }, 3000)
+      }
+    } else if (msg.type === 'AUDIO_OUTPUT_STATUS') {
+      robotAudioConnected.value = !!msg.data?.robotConnected
+    } else if (msg.type === 'ROBOT_CONNECTED') {
+      robotAudioConnected.value = true
+    } else if (msg.type === 'ROBOT_DISCONNECTED') {
+      robotAudioConnected.value = false
+    }
+  } catch { /* ignore */ }
+}
+
+function attachAudioOutputSocket(ws) {
+  if (audioOutputSocket === ws) return
+  if (audioOutputSocket) {
+    audioOutputSocket.removeEventListener('message', handleAudioOutputMessage)
+  }
+  audioOutputSocket = ws || null
+  if (!audioOutputSocket) return
+
+  audioOutputSocket.addEventListener('message', handleAudioOutputMessage)
+  const requestConfig = () => {
+    if (audioOutputSocket?.readyState === WebSocket.OPEN) {
+      audioOutputSocket.send(JSON.stringify({ type: 'GET_AUDIO_OUTPUT_CONFIG' }))
+    }
+  }
+  if (audioOutputSocket.readyState === WebSocket.OPEN) requestConfig()
+  else audioOutputSocket.addEventListener('open', requestConfig, { once: true })
+}
+
+watch(() => props.wsRef, attachAudioOutputSocket, { immediate: true })
+
+function saveAudioOutputConfig() {
+  const ws = props.wsRef
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    ElMessage.error('未连接后端')
+    return
+  }
+  savingAudioOutput.value = true
+  audioOutputSavedOk.value = false
+  ws.send(JSON.stringify({
+    type: 'SET_AUDIO_OUTPUT_CONFIG',
+    data: { destination: audioOutputConfig.destination },
+  }))
+  clearTimeout(audioOutputSaveTimer)
+  audioOutputSaveTimer = setTimeout(() => {
+    if (!savingAudioOutput.value) return
+    savingAudioOutput.value = false
+    ElMessage.error('保存音频输出设置超时，请检查后端连接')
+  }, 5000)
+}
+
 // ── 过渡音频 ─────────────────────────────────────────────────────────────────
 const transitConfig  = reactive({ enabled: false, type: 'tts', text: '', mp3_file: '' })
 const savingTransit  = ref(false)
@@ -776,6 +895,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   lockSensitive()
   clearInterval(cooldownTimer)
+  clearTimeout(audioOutputSaveTimer)
+  audioOutputSocket?.removeEventListener('message', handleAudioOutputMessage)
 })
 </script>
 
@@ -854,6 +975,19 @@ onBeforeUnmount(() => {
   color: var(--text-dim);
 }
 .mp3-row { display: flex; gap: 8px; align-items: center; }
+.audio-output-help {
+  max-width: 680px;
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg3);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.audio-output-help p + p { margin-top: 6px; }
+.audio-output-help strong { color: var(--text); }
 
 /* ── Lock chip ── */
 .lock-chip {
