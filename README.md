@@ -33,6 +33,8 @@ npm install
 npm run package   # 产出项目根目录 release/ 下的 .dmg / .exe / .AppImage
 ```
 
+GitHub Actions 手动运行时，可在构建产物存储配额不可用的情况下，将安装包上传到已存在的 draft/prerelease；运行前需填写对应的 `release_tag`。
+
 ---
 
 ## 项目结构

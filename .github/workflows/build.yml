@@ -1,6 +1,12 @@
 name: Build and Release (Windows Only)
 
 on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Must name an existing draft/prerelease release tag'
+        required: true
+        type: string
   push:
     branches:
       - main
@@ -8,16 +14,19 @@ on:
       - 'v*'
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: 'npm'
@@ -212,7 +221,46 @@ jobs:
           Write-Host "端口冲突兜底验证通过（界面已连接到新端口）"
 
       - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
+        if: github.event_name != 'workflow_dispatch'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
         with:
           name: release-windows
           path: release/*.exe
+
+      - name: Upload installers to existing draft/prerelease
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          $tag = $env:RELEASE_TAG.Trim()
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            throw 'release_tag must not be blank'
+          }
+
+          $installers = @(Get-ChildItem -Path 'release/*.exe' -File -ErrorAction SilentlyContinue |
+                          Sort-Object FullName)
+          if ($installers.Count -eq 0) {
+            throw 'No Windows installer found at release/*.exe'
+          }
+
+          $releaseJson = gh release view $tag --repo "${{ github.repository }}" --json isDraft,isPrerelease
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to read existing release '$tag'"
+          }
+          $release = $releaseJson | ConvertFrom-Json
+          if (-not ($release.isDraft -or $release.isPrerelease)) {
+            throw "Release '$tag' must already be a draft or prerelease"
+          }
+
+          foreach ($installer in $installers) {
+            gh release upload $tag $installer.FullName --clobber --repo "${{ github.repository }}"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to upload '$($installer.FullName)' to release '$tag'"
+            }
+          }
