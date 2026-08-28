@@ -1,4 +1,4 @@
-okay #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Lightweight robot audio transport tester (standard library only).
 

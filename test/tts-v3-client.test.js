@@ -10,6 +10,8 @@ import {
   inferV3ResourceId,
   parseV3Frame,
 } from '../src/tts/volcengine-ws-client.js'
+import { TTSEngine } from '../src/tts/index.js'
+import { TransitAudioManager } from '../src/transit/manager.js'
 
 function buildServerEventFrame(event, payload, { messageType = 0x09, id = 'session-test' } = {}) {
   const idBuffer = Buffer.from(id, 'utf8')
@@ -164,4 +166,124 @@ test('V3 client reports a server error with its code', async (t) => {
 test('V3 resource ID inference preserves built-in and cloned voice compatibility', () => {
   assert.equal(inferV3ResourceId('volcano_tts'), 'seed-tts-1.0')
   assert.equal(inferV3ResourceId('volcano_icl'), 'seed-icl-1.0')
+})
+
+test('TTS engine always constructs the V3 client', () => {
+  const engine = new TTSEngine({
+    TTS_API_KEY: 'api-test',
+    TTS_VOICE_TYPE: 'S_test',
+    TTS_RESOURCE_ID: 'seed-icl-1.0',
+  })
+  assert.ok(engine.wsClient instanceof VolcengineTTSWSClient)
+  assert.equal('protocol' in engine, false)
+  engine.destroy()
+})
+
+test('TTS engine synthesizes a filtered V3 MP3 buffer without playing it', async () => {
+  const engine = new TTSEngine({
+    TTS_API_KEY: 'api-test',
+    TTS_VOICE_TYPE: 'S_test',
+    TTS_RESOURCE_ID: 'seed-icl-1.0',
+  })
+  let requestedText
+  let playbackStarted = false
+  engine.player.startStream = () => {
+    playbackStarted = true
+    throw new Error('buffer synthesis must not start playback')
+  }
+  engine.wsClient.synthesizeStream = (text, onChunk, onFinished) => {
+    requestedText = text
+    queueMicrotask(() => {
+      onChunk(Buffer.from([1, 2]))
+      onChunk(Buffer.from([3, 4]))
+      onFinished()
+    })
+    return { abort() {} }
+  }
+
+  const audio = await engine.synthesizeBuffer('  测试🙂\n文本  ')
+
+  assert.equal(requestedText, '测试 文本')
+  assert.deepEqual(audio, Buffer.from([1, 2, 3, 4]))
+  assert.equal(playbackStarted, false)
+  engine.destroy()
+})
+
+test('TTS buffer synthesis rejects filtered-empty text and missing configuration', async () => {
+  const engine = new TTSEngine({})
+  let synthesisCalls = 0
+  engine.wsClient.synthesizeStream = () => {
+    synthesisCalls += 1
+  }
+
+  await assert.rejects(engine.synthesizeBuffer('🙂'), /TTS 合成文本为空/)
+  await assert.rejects(engine.synthesizeBuffer('配置检查'), /TTS 未配置/)
+  assert.equal(synthesisCalls, 0)
+  engine.destroy()
+})
+
+test('transit TTS uses the public V3 buffer synthesis method', async () => {
+  const manager = new TransitAudioManager({
+    filePath: '/tmp/robot-live-system-nonexistent-transit-test.json',
+  })
+  const runId = {}
+  const expectedAudio = Buffer.from([7, 8, 9])
+  let requestedText
+  let playedAudio
+  manager._runId = runId
+  manager._player.play = async (audio) => {
+    playedAudio = audio
+    manager._runId = null
+  }
+
+  await manager._loopTts(
+    '原始文本',
+    {
+      synthesizeBuffer: async (text) => {
+        requestedText = text
+        return expectedAudio
+      },
+    },
+    { rewrite: async () => ({ text: '改写文本' }) },
+    runId,
+  )
+
+  assert.equal(requestedText, '改写文本')
+  assert.equal(playedAudio, expectedAudio)
+  manager.stop()
+})
+
+test('TTS engine aborts V3 callbacks when the playback stream cannot start', async () => {
+  const engine = new TTSEngine({
+    TTS_API_KEY: 'api-test',
+    TTS_VOICE_TYPE: 'S_test',
+    TTS_RESOURCE_ID: 'seed-icl-1.0',
+  })
+  let aborted = false
+  let callbackError = null
+  engine.player.startStream = () => null
+  engine.wsClient.synthesizeStream = (_text, onChunk, onFinished) => {
+    const call = {
+      abort() {
+        aborted = true
+      },
+    }
+    try {
+      onChunk(Buffer.alloc(4096))
+      onChunk(Buffer.from([1]))
+      onFinished()
+    } catch (err) {
+      callbackError = err
+    }
+    return call
+  }
+
+  const result = await engine.speak('播放失败测试')
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(result.ok, false)
+  assert.match(result.error.message, /无法启动音频播放流/)
+  assert.equal(aborted, true)
+  assert.equal(callbackError, null)
+  engine.destroy()
 })

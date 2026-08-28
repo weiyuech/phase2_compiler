@@ -20,11 +20,12 @@ if (existsSync(join(destDir, 'node_modules'))) {
 }
 mkdirSync(destDir, { recursive: true })
 
-// Copy root package.json so npm knows what to install
+// Copy the root manifest and lockfile so the packaged backend is reproducible
 cpSync(join(rootDir, 'package.json'), join(destDir, 'package.json'))
+cpSync(join(rootDir, 'package-lock.json'), join(destDir, 'package-lock.json'))
 
 console.log('[prepare-backend] installing backend dependencies...')
-execSync('npm install --production --no-package-lock', {
+execSync('npm ci --omit=dev', {
   cwd: destDir,
   stdio: 'inherit',
   env: { ...process.env }
@@ -53,7 +54,7 @@ if (existsSync(ortBinDir)) {
   console.log('[prepare-backend] Cleaning up unused platform binaries from onnxruntime-node...')
   const platforms = ['darwin', 'linux', 'win32']
   for (const p of platforms) {
-    if (p !== 'win32') {
+    if (p !== process.platform) {
       const pDir = join(ortBinDir, p)
       if (existsSync(pDir)) {
         rmSync(pDir, { recursive: true, force: true })

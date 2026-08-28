@@ -125,7 +125,7 @@ export class TransitAudioManager {
     // 合成一次，缓存 buffer
     let buffer
     try {
-      buffer = await tts.client.synthesise(playText)
+      buffer = await tts.synthesizeBuffer(playText)
     } catch (err) {
       console.error('[过渡音频] TTS 合成出错:', err.message)
       if (this._runId === runId) this._runId = null

@@ -2,6 +2,7 @@
 node_modules/
 robot-ui/node_modules/
 robot-ui/resources/backend/node_modules/
+robot-ui/resources/backend/package*.json
 
 # Sensitive config
 .env
@@ -15,6 +16,7 @@ release/
 
 # TTS cache database
 data/tts-cache/
+data/audio-output.json
 
 # OS cache
 .DS_Store

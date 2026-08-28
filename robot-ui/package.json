@@ -1,6 +1,6 @@
 {
   "name": "robot-live-ui",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Robot Live System Control Panel",
   "author": "weiyuech",
   "repository": {
@@ -20,11 +20,12 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.6.0",
+    "@electron/rebuild": "^4.2.0",
     "@vitejs/plugin-vue": "^5.0.4",
-    "electron": "^30.0.0",
-    "electron-builder": "^24.13.3",
-    "electron-vite": "^2.2.0",
+    "electron": "^41.10.3",
+    "electron-builder": "^26.15.7",
+    "electron-vite": "^3.1.0",
+    "vite": "^6.4.3",
     "vue": "^3.4.21"
   },
   "build": {

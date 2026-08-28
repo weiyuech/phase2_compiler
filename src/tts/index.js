@@ -1,5 +1,4 @@
 import { VolcengineTTSWSClient } from './volcengine-ws-client.js'
-import { VolcengineTTSV1WSClient } from './volcengine-v1-ws-client.js'
 import { AudioPlayer }           from './audio-player.js'
 import fs                        from 'fs'
 import path                      from 'path'
@@ -18,15 +17,75 @@ export function filterTtsText(text) {
 
 export class TTSEngine {
   constructor(config = {}) {
-    this.protocol     = config.TTS_PROTOCOL || process.env.TTS_PROTOCOL || 'v3'
-    this.wsClient     = this.protocol === 'v1'
-      ? new VolcengineTTSV1WSClient(config)
-      : new VolcengineTTSWSClient(config)
+    this.wsClient     = new VolcengineTTSWSClient(config)
     this.player       = new AudioPlayer({ outputRouter: config.audioOutput })
     this.activeWSCall = null
 
     this.enabled = this.wsClient.isConfigured()
-    console.log(`[TTS] 使用火山引擎 ${this.protocol.toUpperCase()} 单向流式接口`)
+    console.log('[TTS] 使用火山引擎 V3 单向流式接口')
+  }
+
+  /**
+   * Synthesize filtered text through the V3 streaming API and return one MP3 buffer.
+   * This is used by callers that manage playback themselves (for example, transit
+   * audio that synthesizes once and then loops the same audio).
+   */
+  async synthesizeBuffer(text) {
+    const cleanedText = filterTtsText(text)
+    if (!cleanedText) {
+      throw new Error('TTS 合成文本为空')
+    }
+    if (!this.enabled) {
+      throw new Error('TTS 未配置，无法合成音频')
+    }
+
+    this.stop()
+
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const chunks = []
+
+      const cleanUp = () => {
+        if (this.activeReject === safeReject) {
+          this.activeReject = null
+        }
+      }
+      const safeResolve = (value) => {
+        if (settled) return
+        settled = true
+        cleanUp()
+        resolve(value)
+      }
+      const safeReject = (err) => {
+        if (settled) return
+        settled = true
+        cleanUp()
+        reject(err)
+      }
+
+      this.activeReject = safeReject
+
+      try {
+        const call = this.wsClient.synthesizeStream(
+          cleanedText,
+          (chunk) => {
+            if (!settled) chunks.push(Buffer.from(chunk))
+          },
+          () => {
+            this.activeWSCall = null
+            safeResolve(Buffer.concat(chunks))
+          },
+          (err) => {
+            this.activeWSCall = null
+            safeReject(err)
+          },
+        )
+        if (!settled) this.activeWSCall = call
+      } catch (err) {
+        this.activeWSCall = null
+        safeReject(err)
+      }
+    })
   }
 
   /**
@@ -55,6 +114,7 @@ export class TTSEngine {
     let aborted = false
     try {
       await new Promise((resolve, reject) => {
+        let settled = false
         const cleanUp = () => {
           if (this.activeReject === safeReject) {
             this.activeReject = null
@@ -62,11 +122,15 @@ export class TTSEngine {
         }
 
         const safeResolve = (val) => {
+          if (settled) return
+          settled = true
           cleanUp()
           resolve(val)
         }
 
         const safeReject = (err) => {
+          if (settled) return
+          settled = true
           cleanUp()
           reject(err)
         }
@@ -79,31 +143,53 @@ export class TTSEngine {
           let totalBufferedSize = 0
           const PRE_BUFFER_THRESHOLD = 4096 // 4KB (approx 0.25 seconds of audio, starts playing almost instantly)
           let isStarted = false
+          let terminal = false
           const capturedChunks = []
 
+          const abortActiveCall = () => {
+            const call = this.activeWSCall
+            this.activeWSCall = null
+            if (call) {
+              try { call.abort() } catch {}
+            }
+          }
+
+          const failPlayback = (err) => {
+            if (terminal) return
+            terminal = true
+            isStarted = true
+            bufferedChunks = []
+            abortActiveCall()
+            try { this.player.stop() } catch {}
+            safeReject(err)
+          }
+
           const startPlayback = () => {
-            if (isStarted) return
+            if (isStarted || terminal) return
 
             // Gate: if beforePlay returns false (e.g. host is still speaking at the
             // moment of play), abort silently without spawning ffplay or pausing cruising.
             if (opts.beforePlay && !opts.beforePlay()) {
               isStarted = true            // block any later startPlayback attempt
+              terminal = true
               aborted = true
-              if (this.activeWSCall) {
-                try { this.activeWSCall.abort() } catch {}
-                this.activeWSCall = null
-              }
+              bufferedChunks = []
+              abortActiveCall()
               safeResolve()
               return
             }
 
-            isStarted = true
-
-            stream = this.player.startStream()
-            if (!stream) {
-              safeReject(new Error('无法启动音频播放流'))
+            try {
+              stream = this.player.startStream()
+            } catch (err) {
+              failPlayback(err)
               return
             }
+            if (!stream) {
+              failPlayback(new Error('无法启动音频播放流'))
+              return
+            }
+            isStarted = true
 
             // Fire "audio really starts now" hook — used by barrage to pause
             // cruising at the exact handoff moment (seamless transition).
@@ -112,50 +198,77 @@ export class TTSEngine {
             }
 
             // Write all buffered chunks at once
-            for (const chunk of bufferedChunks) {
-              stream.write(chunk)
+            try {
+              for (const chunk of bufferedChunks) {
+                stream.write(chunk)
+              }
+            } catch (err) {
+              failPlayback(err)
+              return
             }
             bufferedChunks = []
           }
 
-          this.activeWSCall = this.wsClient.synthesizeStream(
+          const call = this.wsClient.synthesizeStream(
             cleanedText,
             (chunk) => {
-              capturedChunks.push(chunk)
+              if (terminal) return
+              capturedChunks.push(Buffer.from(chunk))
               if (!isStarted) {
                 bufferedChunks.push(chunk)
                 totalBufferedSize += chunk.length
                 if (totalBufferedSize >= PRE_BUFFER_THRESHOLD) {
                   startPlayback()
                 }
-              } else {
-                stream.write(chunk)
+              } else if (stream) {
+                try {
+                  stream.write(chunk)
+                } catch (err) {
+                  failPlayback(err)
+                }
               }
             },
             () => {
               this.activeWSCall = null
+              if (terminal) return
               // If download completed before reaching threshold, start playing now
               if (!isStarted) {
                 startPlayback()
               }
+              if (terminal) return
               if (stream) {
-                stream.end()
+                try {
+                  stream.end()
+                } catch (err) {
+                  failPlayback(err)
+                  return
+                }
                 stream.promise.then((val) => {
+                  if (terminal) return
+                  terminal = true
                   saveHarvestedAudio(cleanedText, capturedChunks)
                   safeResolve(val)
-                }).catch(safeReject)
+                }).catch(failPlayback)
               } else {
+                terminal = true
                 safeResolve()
               }
             },
             (err) => {
               this.activeWSCall = null
+              if (terminal) return
+              terminal = true
               if (stream) {
-                stream.end()
+                try { stream.end() } catch {}
               }
               safeReject(err)
             }
           )
+          if (terminal) {
+            try { call?.abort() } catch {}
+          } else {
+            this.activeWSCall = call
+          }
         } catch (err) {
           safeReject(err)
         }

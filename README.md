@@ -18,8 +18,11 @@ cd robot-ui
 npm install
 npm run dev
 
-# 模拟机器人（另开终端，用于测试）
-npm run mock-robot
+# 机器人音频传输测试器（可选，另开终端）
+# macOS / Linux
+python3 robot_audio_transport_test.py
+# Windows
+py robot_audio_transport_test.py
 ```
 
 ### 打包安装包
@@ -27,7 +30,7 @@ npm run mock-robot
 ```bash
 cd robot-ui
 npm install
-npm run package   # 产出 dist/ 下的 .dmg / .exe / .AppImage
+npm run package   # 产出项目根目录 release/ 下的 .dmg / .exe / .AppImage
 ```
 
 ---
@@ -137,14 +140,14 @@ data/flatfiles/{map_name}/{path_name}/{goal_id}.json
 
 ## 音频输出设备
 
-在「系统设置 → 音频输出」选择所有播报声音的最终播放设备：
+在「系统设置 → 音频输出」选择所有播报声音的最终输出位置：
 
 | 选项 | 行为 |
 |---|---|
-| **本机扬声器（现有方式）** | 保持原有行为，通过本机 `ffplay` 播放 |
-| **机器人扬声器（WebSocket 传输）** | 转换为 16 kHz、单声道、S16_LE PCM，通过现有机器人 WebSocket 实时发送 |
+| **本地** | 通过本机 `ffplay` 播放 |
+| **机器人端** | 转换为 16 kHz、单声道、S16_LE PCM，通过现有机器人 WebSocket 实时发送 |
 
-此设置统一覆盖巡游 TTS、点位 MP3、弹幕 TTS/MP3、过渡音频和手动播报测试，并保存到可写数据目录的 `audio-output.json`。默认为本机扬声器，避免升级后意外改变已有现场行为。
+此设置统一覆盖巡游 TTS、点位 MP3、弹幕 TTS/MP3、过渡音频和手动播报测试，并保存到可写数据目录的 `audio-output.json`。默认为本地，避免升级后意外改变已有现场行为。
 
 机器人模式按 20 ms 分片（每片 640 PCM bytes）实时发送，不会一次性预发整段音频，因此暂停、Ducking 和停止操作仍能及时生效。机器人断线、发送积压或转码失败会写入后端诊断日志。
 
@@ -157,9 +160,11 @@ data/flatfiles/{map_name}/{path_name}/{goal_id}.json
 | `DOUBAO_API_KEY` | 火山方舟 LLM Key | 要 LLM 必填 |
 | `DOUBAO_MODEL` | 推理接入点 ID（ep- 开头） | 要 LLM 必填 |
 | `DEEPSEEK_API_KEY` | DeepSeek 备用 Key | 可选 |
-| `TTS_APP_ID` | 火山引擎 TTS App ID | 要语音必填 |
-| `TTS_ACCESS_TOKEN` | 火山引擎 TTS Token | 要语音必填 |
-| `TTS_VOICE_TYPE` | 音色 ID（默认 `BV001_streaming`） | 可选 |
+| `TTS_API_KEY` | 火山引擎 V3 TTS API Key | 要语音必填（或使用 App ID + Access Token） |
+| `TTS_APP_ID` | 火山引擎 TTS App ID | 使用 App ID 鉴权时必填 |
+| `TTS_ACCESS_TOKEN` | 火山引擎 TTS Access Token | 使用 App ID 鉴权时必填 |
+| `TTS_VOICE_TYPE` | V3 兼容音色 ID | 要语音必填 |
+| `TTS_RESOURCE_ID` | TTS 资源 ID；内置音色通常为 `seed-tts-1.0`，复刻音色为 `seed-icl-1.0` | 可选（可按 Cluster 推断） |
 | `KB_PROVIDER` | `flatfile`（默认）或 `sqlite` | 可选 |
 | `ROBOT_PORT` | 机器人 WebSocket 端口（默认 8765） | 可选 |
 | `LLM_TIMEOUT_MS` | 每个 LLM 请求超时（默认 8000 ms） | 可选 |

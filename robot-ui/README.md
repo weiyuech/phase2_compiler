@@ -102,7 +102,7 @@ npm run dev          # 开发模式（热重载）
 打包成 .exe（Windows）：
 ```bash
 npm run package
-# 输出在 ui/dist/ 目录
+# 输出在项目根目录 release/ 目录
 ```
 
 ---

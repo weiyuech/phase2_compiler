@@ -38,7 +38,7 @@ export function inferV3ResourceId(cluster = '') {
 export function buildV3TextFrame(payload) {
   const payloadBuffer = Buffer.from(JSON.stringify(payload), 'utf8')
   const header = Buffer.from([
-    0x11, // protocol v1, 4-byte header
+    0x11, // binary framing version 1, 4-byte header
     0x10, // full-client request, no event number
     0x10, // JSON, no compression
     0x00,
@@ -146,7 +146,7 @@ export class VolcengineTTSWSClient {
     this.appId = config.TTS_APP_ID || process.env.TTS_APP_ID || ''
     this.accessKey = config.TTS_ACCESS_TOKEN || process.env.TTS_ACCESS_TOKEN || ''
     this.authMode = config.TTS_AUTH_MODE || process.env.TTS_AUTH_MODE || 'api-key'
-    this.voiceType = config.TTS_VOICE_TYPE || process.env.TTS_VOICE_TYPE || 'BV001_streaming'
+    this.voiceType = config.TTS_VOICE_TYPE || process.env.TTS_VOICE_TYPE || ''
     this.cluster = config.TTS_CLUSTER || process.env.TTS_CLUSTER || 'volcano_tts'
     this.resourceId = config.TTS_RESOURCE_ID || process.env.TTS_RESOURCE_ID || inferV3ResourceId(this.cluster)
     this.speedRatio = Number.parseFloat(config.TTS_SPEED || process.env.TTS_SPEED || '1.0')
@@ -158,7 +158,8 @@ export class VolcengineTTSWSClient {
   }
 
   isConfigured() {
-    return !!(this.apiKey || (this.appId && this.accessKey) || this.accessKey)
+    const hasCredentials = this.apiKey || (this.appId && this.accessKey) || this.accessKey
+    return !!(this.voiceType && hasCredentials)
   }
 
   _headers(requestId) {
@@ -172,9 +173,8 @@ export class VolcengineTTSWSClient {
       headers['X-Api-App-Id'] = this.appId
       headers['X-Api-Access-Key'] = this.accessKey
     } else {
-      // The previous working V1 client sent TTS_ACCESS_TOKEN as x-api-key.
-      // Keep that behavior by default while also accepting the clearer
-      // TTS_API_KEY name for new installations.
+      // Accept the existing ACCESS_TOKEN field as an API key so installations
+      // can move to this endpoint without rewriting stored credentials.
       headers['X-Api-Key'] = this.apiKey || this.accessKey
     }
 
@@ -190,7 +190,7 @@ export class VolcengineTTSWSClient {
 
   synthesizeStream(text, onAudioChunk, onFinished, onError) {
     if (!this.isConfigured() && !this.url.startsWith('ws://localhost') && !this.url.startsWith('ws://127.0.0.1')) {
-      onError(new Error('火山引擎 V3 TTS 未配置：请填写 TTS_API_KEY，或 TTS_APP_ID + TTS_ACCESS_TOKEN'))
+      onError(new Error('火山引擎 V3 TTS 未配置：请填写 TTS_VOICE_TYPE，以及 TTS_API_KEY 或 TTS_APP_ID + TTS_ACCESS_TOKEN'))
       return { abort: () => {} }
     }
 

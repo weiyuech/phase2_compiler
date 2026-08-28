@@ -257,26 +257,26 @@
         <div class="panel-header">音频输出</div>
         <div class="panel-body">
           <p class="panel-note" style="margin: 0 0 18px">
-            统一控制巡游讲解、弹幕回复、过渡音频和手动播报测试的播放设备。
+            统一控制巡游讲解、弹幕回复、过渡音频和手动播报测试的输出位置。
           </p>
 
           <div class="params-grid" style="max-width: 620px">
-            <span class="param-label">播放设备</span>
+            <span class="param-label">输出位置</span>
             <el-radio-group v-model="audioOutputConfig.destination" size="small">
-              <el-radio-button value="local">本机扬声器（现有方式）</el-radio-button>
-              <el-radio-button value="robot">机器人扬声器（WebSocket 传输）</el-radio-button>
+              <el-radio-button value="local">本地</el-radio-button>
+              <el-radio-button value="robot">机器人端</el-radio-button>
             </el-radio-group>
 
             <span class="param-label">机器人连接</span>
             <span :class="robotAudioConnected ? 'ok-text' : 'err-text'">
-              {{ robotAudioConnected ? '已连接，可以传输音频' : '未连接；选择机器人扬声器后将暂时无法播放' }}
+              {{ robotAudioConnected ? '已连接，可以传输音频' : '未连接；选择机器人端后将暂时无法播放' }}
             </span>
           </div>
 
           <div class="audio-output-help">
-            <p><strong>本机扬声器：</strong>保持当前行为，声音从运行本应用的电脑播放。</p>
-            <p><strong>机器人扬声器：</strong>音频自动转换为 16 kHz、单声道、16 位小端 PCM，通过现有机器人连接实时发送。</p>
-            <p>切换播放设备会停止当前正在播放的声音，新设置从下一次播放开始生效。</p>
+            <p><strong>本地：</strong>声音从运行本应用的电脑播放。</p>
+            <p><strong>机器人端：</strong>音频自动转换为 16 kHz、单声道、16 位小端 PCM，通过现有机器人连接实时发送。</p>
+            <p>切换输出位置会停止当前正在播放的声音，新设置从下一次播放开始生效。</p>
           </div>
 
           <div class="row-actions" style="margin-top: 20px">
@@ -559,11 +559,10 @@ async function savePrompt() {
 const cruisePublicEnvDef = [
   { key: 'DOUBAO_MODEL',   label: '豆包模型 ID',    placeholder: 'ep-xxxxxxxx' },
   { key: 'DEEPSEEK_MODEL', label: 'DeepSeek 模型',  placeholder: 'deepseek-chat' },
-  { key: 'TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'BV001_streaming 或复刻音色 S_xxxxxxxxxx' },
+  { key: 'TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'V3 音色 ID 或复刻音色 S_xxxxxxxxxx' },
   { key: 'TTS_CLUSTER',   label: 'TTS Cluster', placeholder: 'volcano_tts（内置）/ volcano_icl（复刻）' },
-  { key: 'TTS_PROTOCOL', label: 'TTS 接口版本', options: ['v3', 'v1'] },
-  { key: 'TTS_RESOURCE_ID', label: 'TTS V3 Resource ID', placeholder: 'seed-tts-1.0 / seed-icl-1.0' },
-  { key: 'TTS_AUTH_MODE', label: 'TTS V3 鉴权方式', options: ['api-key', 'legacy'] },
+  { key: 'TTS_RESOURCE_ID', label: 'TTS Resource ID', placeholder: 'seed-tts-1.0 / seed-icl-1.0' },
+  { key: 'TTS_AUTH_MODE', label: 'TTS 鉴权方式', options: ['api-key', 'legacy'] },
   { key: 'TTS_TIMEOUT_MS', label: 'TTS 基础超时 (ms)', placeholder: '30000（长文本会自动延长）' },
   { key: 'LLM_TIMEOUT_MS', label: 'LLM 超时 (ms)',  placeholder: '8000' },
   { key: 'LLM_MAX_TOKENS', label: 'LLM 最大输出 tokens', placeholder: '4096' },
@@ -574,11 +573,10 @@ const cruisePublicEnvDef = [
 const barragePublicEnvDef = [
   { key: 'BARRAGE_DOUBAO_MODEL',   label: '豆包模型 ID',    placeholder: 'ep-xxxxxxxx' },
   { key: 'BARRAGE_DEEPSEEK_MODEL', label: 'DeepSeek 模型',  placeholder: 'deepseek-chat' },
-  { key: 'BARRAGE_TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'BV001_streaming 或复刻音色 S_xxxxxxxxxx' },
+  { key: 'BARRAGE_TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'V3 音色 ID 或复刻音色 S_xxxxxxxxxx' },
   { key: 'BARRAGE_TTS_CLUSTER',   label: 'TTS Cluster', placeholder: 'volcano_tts（内置）/ volcano_icl（复刻）' },
-  { key: 'BARRAGE_TTS_PROTOCOL', label: 'TTS 接口版本', options: ['v3', 'v1'] },
-  { key: 'BARRAGE_TTS_RESOURCE_ID', label: 'TTS V3 Resource ID', placeholder: 'seed-tts-1.0 / seed-icl-1.0' },
-  { key: 'BARRAGE_TTS_AUTH_MODE', label: 'TTS V3 鉴权方式', options: ['api-key', 'legacy'] },
+  { key: 'BARRAGE_TTS_RESOURCE_ID', label: 'TTS Resource ID', placeholder: 'seed-tts-1.0 / seed-icl-1.0' },
+  { key: 'BARRAGE_TTS_AUTH_MODE', label: 'TTS 鉴权方式', options: ['api-key', 'legacy'] },
   { key: 'BARRAGE_TTS_TIMEOUT_MS', label: 'TTS 基础超时 (ms)', placeholder: '30000（长文本会自动延长）' },
   { key: 'BARRAGE_LLM_TIMEOUT_MS', label: 'LLM 超时 (ms)',  placeholder: '8000' },
   { key: 'BARRAGE_LLM_MAX_TOKENS', label: 'LLM 最大输出 tokens', placeholder: '500' },
