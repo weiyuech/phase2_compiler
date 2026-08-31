@@ -100,18 +100,18 @@ test('real engine/coordinator/router hand off TTS at sentence boundary and retai
   const cruiseResult = cruise.speak('一。二。', {
     utteranceId: 'cruise-integration', onSentenceStart: value => captions.push(value.index),
   })
-  await until(() => clock.pending() === 1)
+  await until(() => coordinator.active?.role === 'cruise' && clock.pending() === 1)
   clock.advance(0)
   const barrageResult = barrage.speak('回答。', { utteranceId: 'barrage-integration' })
   await until(() => [...coordinator.jobs].some(job => job.role === 'barrage' && job.ready))
   assert.equal(coordinator.active.role, 'cruise')
   assert.equal(h.robot.frames.length, 1)
   clock.advance(80)
-  await until(() => clock.pending() === 1)
+  await until(() => coordinator.active?.role === 'barrage' && clock.pending() === 1)
   assert.deepEqual(h.robot.frames.map(frame => frame.buffer[0]), [1, 1, 1, 1])
   clock.advance(80)
   assert.equal((await barrageResult).ok, true)
-  await until(() => clock.pending() === 1)
+  await until(() => coordinator.active?.role === 'cruise' && clock.pending() === 1)
   clock.advance(80)
   assert.equal((await cruiseResult).ok, true)
   assert.deepEqual(h.robot.frames.map(frame => frame.buffer[0]), [1, 1, 1, 1, 3, 3, 3, 3, 2, 2, 2, 2])
@@ -131,7 +131,7 @@ test('real engine/router preserve MP3 packet cursor through host pause and abort
   const cruise = coordinatedEngine(t, h.router, coordinator, 'cruise')
   const barrage = coordinatedEngine(t, h.router, coordinator, 'barrage')
   const cruiseResult = cruise.speakFile(file)
-  await until(() => clock.pending() === 1)
+  await until(() => coordinator.active?.role === 'cruise' && clock.pending() === 1)
   clock.advance(0)
   coordinator.setPauseReason('host', ['cruise', 'transit', 'barrage'], true)
   clock.advance(1000)
@@ -145,7 +145,7 @@ test('real engine/router preserve MP3 packet cursor through host pause and abort
   assert.deepEqual(h.robot.frames.map(frame => frame.buffer[0]), [5, 6])
   abort.abort()
   assert.equal((await barrageResult).aborted, true)
-  await until(() => clock.pending() === 1)
+  await until(() => coordinator.active?.role === 'cruise' && clock.pending() === 1)
   clock.advance(60)
   assert.equal((await cruiseResult).ok, true)
   assert.deepEqual(h.robot.frames.map(frame => frame.buffer[0]), [5, 6, 5, 5, 5])
@@ -373,48 +373,87 @@ test('cached immutable assets share leases, evict unused only, and count disk/re
 
 test('concurrent duplicate preparation cannot leak untracked RAM or disk reservations', async t => {
   const h = await harness(t, { cacheMemoryBytes: 8192, cacheDiskBytes: 8192 })
-  fakeDecode(h.router, 1280)
-  const prepared = await Promise.all(Array.from({ length: 3 }, () => h.router.prepareBuffer(Buffer.from('same'))))
-  assert.equal(h.router.getCacheStats().entries, 1)
-  assert.equal(h.router.getCacheStats().memoryBytes, 1280)
-  assert.equal(h.router.getCacheStats().diskBytes, 0)
-  for (const handle of prepared) handle.release()
+  const bothWritten = deferred(), finish = deferred()
+  let decodes = 0, written = 0
+  h.router._decode = async (_source, write) => {
+    decodes++
+    await write(Buffer.alloc(1280))
+    if (++written === 2) bothWritten.resolve()
+    await finish.promise
+  }
+  const results = Array.from({ length: 3 }, () => h.router.prepareBuffer(Buffer.from('same')))
+  for (const result of results) result.catch(() => {})
+  try {
+    // Force two real decodes to overlap; three ordinary cache hits would not
+    // exercise duplicate spool cleanup or the reserved decode slot transfer.
+    await bothWritten.promise
+    finish.resolve()
+    await Promise.all(results)
+    assert.equal(decodes, 2)
+    assert.equal(h.router.getCacheStats().entries, 1)
+    assert.equal(h.router.getCacheStats().memoryBytes, 1280)
+    assert.equal(h.router.getCacheStats().diskBytes, 0)
+  } finally {
+    finish.resolve()
+    for (const result of await Promise.allSettled(results)) {
+      if (result.status === 'fulfilled') result.value.release()
+    }
+  }
 })
 
 test('duplicate cleanup failure rolls back the retained winner before rejecting preparation', async t => {
   const h = await harness(t, { cacheMemoryBytes: 2560, cacheDiskBytes: 8192 })
-  const bothStarted = deferred(), finishFirst = deferred(), finishSecond = deferred()
-  let decodes = 0
-  h.router._decode = async (_source, write) => {
-    const index = decodes++
+  const firstWritten = deferred(), secondWritten = deferred()
+  const finishFirst = deferred(), finishSecond = deferred()
+  const firstInput = Buffer.from('same'), secondInput = Buffer.from('same')
+  h.router._decode = async (source, write) => {
+    assert.ok(source.buffer === firstInput || source.buffer === secondInput)
+    const isFirst = source.buffer === firstInput
     await write(Buffer.alloc(2048))
-    if (decodes === 2) bothStarted.resolve()
-    await (index === 0 ? finishFirst.promise : finishSecond.promise)
+    const written = isFirst ? firstWritten : secondWritten
+    written.resolve()
+    await (isFirst ? finishFirst.promise : finishSecond.promise)
   }
-  const firstResult = h.router.prepareBuffer(Buffer.from('same'))
-  const secondResult = h.router.prepareBuffer(Buffer.from('same'))
-  const rejected = assert.rejects(secondResult, { code: 'EPERM' })
-  await bothStarted.promise
-  finishFirst.resolve()
-  const first = await firstResult
-  const cache = h.router._cache
-  const winner = [...cache.entries.values()][0]
-  const unlink = cache._unlink.bind(cache)
-  let denied = false
-  cache._unlink = async path => {
-    if (path !== winner.path && !denied) {
-      denied = true
-      throw Object.assign(new Error('simulated temporary cleanup denial'), { code: 'EPERM' })
+  const results = []
+  try {
+    const firstResult = h.router.prepareBuffer(firstInput)
+    results.push(firstResult)
+    firstResult.catch(() => {})
+    // File-open completion is not FIFO on Windows. Establish which request
+    // owns the first gate before launching another identical preparation.
+    await firstWritten.promise
+    const secondResult = h.router.prepareBuffer(secondInput)
+    results.push(secondResult)
+    secondResult.catch(() => {})
+    await secondWritten.promise
+    finishFirst.resolve()
+    const first = await firstResult
+    const cache = h.router._cache
+    const winner = [...cache.entries.values()][0]
+    const unlink = cache._unlink.bind(cache)
+    let denied = false
+    cache._unlink = async path => {
+      if (path !== winner.path && !denied) {
+        denied = true
+        throw Object.assign(new Error('simulated temporary cleanup denial'), { code: 'EPERM' })
+      }
+      return unlink(path)
     }
-    return unlink(path)
+    finishSecond.resolve()
+    await assert.rejects(secondResult, { code: 'EPERM' })
+    assert.equal(denied, true)
+    assert.equal(winner.refs, 1, 'only the successfully returned handle owns a reference')
+    first.release()
+    assert.equal(winner.refs, 0)
+    assert.equal(cache.stats().diskBytes, 2048)
+  } finally {
+    // A failed assertion must not leave the fake decoder blocking destroy().
+    finishFirst.resolve()
+    finishSecond.resolve()
+    for (const result of await Promise.allSettled(results)) {
+      if (result.status === 'fulfilled') result.value.release()
+    }
   }
-  finishSecond.resolve()
-  await rejected
-  assert.equal(denied, true)
-  assert.equal(winner.refs, 1, 'only the successfully returned handle owns a reference')
-  first.release()
-  assert.equal(winner.refs, 0)
-  assert.equal(cache.stats().diskBytes, 2048)
 })
 
 test('failed initial ownership write closes and removes only its newly-created partial lock', async t => {
@@ -445,7 +484,8 @@ test('cache hit cannot retain a disk entry while eviction is unlinking it', asyn
   const first = await h.router.prepareBuffer(Buffer.from('one'))
   first.release()
   const cache = h.router._cache
-  const oldPath = [...cache.entries.values()][0].path
+  const oldEntry = [...cache.entries.values()][0]
+  const oldPath = oldEntry.path
   const unlinkStarted = deferred(), allowUnlink = deferred()
   const unlink = cache._unlink.bind(cache)
   let delayed = false
@@ -458,19 +498,36 @@ test('cache hit cannot retain a disk entry while eviction is unlinking it', asyn
     return unlink(path)
   }
   const replacement = h.router.prepareBuffer(Buffer.from('two'))
-  await unlinkStarted.promise
-  let settled = false
-  const reacquired = h.router.prepareBuffer(Buffer.from('one')).finally(() => { settled = true })
-  const expectedLimit = assert.rejects(reacquired, { code: 'AUDIO_CACHE_LIMIT' })
-  await nextTurn()
-  assert.equal(settled, false, 'cache lookup waits behind the eviction transaction')
-  allowUnlink.resolve()
-  const second = await replacement
-  await expectedLimit
-  const session = h.router.playPrepared({}, second)
-  assert.equal((await session.promise).ok, true)
-  assert.equal(h.router.getCacheStats().diskBytes, 2048)
-  second.release()
+  const results = [replacement]
+  replacement.catch(() => {})
+  try {
+    await unlinkStarted.promise
+    const lookupStarted = deferred()
+    const cached = cache._cached.bind(cache)
+    cache._cached = key => {
+      const result = cached(key)
+      lookupStarted.resolve()
+      return result
+    }
+    let settled = false
+    const reacquired = h.router.prepareBuffer(Buffer.from('one')).finally(() => { settled = true })
+    results.push(reacquired)
+    reacquired.catch(() => {})
+    await lookupStarted.promise
+    assert.equal(oldEntry.refs, 0, 'lookup cannot retain an entry being evicted')
+    assert.equal(settled, false, 'cache lookup waits behind the eviction transaction')
+    allowUnlink.resolve()
+    const second = await replacement
+    await assert.rejects(reacquired, { code: 'AUDIO_CACHE_LIMIT' })
+    const session = h.router.playPrepared({}, second)
+    assert.equal((await session.promise).ok, true)
+    assert.equal(h.router.getCacheStats().diskBytes, 2048)
+  } finally {
+    allowUnlink.resolve()
+    for (const result of await Promise.allSettled(results)) {
+      if (result.status === 'fulfilled') result.value.release()
+    }
+  }
 })
 
 test('destroy cancels pending decode/queued jobs before removing cache ownership', async t => {
@@ -487,9 +544,17 @@ test('destroy cancels pending decode/queued jobs before removing cache ownership
   const first = h.router.prepareBuffer(Buffer.from('first'))
   const rejectedFirst = assert.rejects(first)
   await started.promise
+  const queued = deferred()
+  const cache = h.router._cache
+  const decodeSlot = cache._decodeSlot.bind(cache)
+  cache._decodeSlot = signal => {
+    const result = decodeSlot(signal)
+    if (cache._decodeWaiters.length === 1) queued.resolve()
+    return result
+  }
   const second = h.router.prepareBuffer(Buffer.from('queued'))
   const rejectedSecond = assert.rejects(second)
-  await nextTurn()
+  await queued.promise
   await h.router.destroy()
   await exited.promise
   await Promise.all([rejectedFirst, rejectedSecond])

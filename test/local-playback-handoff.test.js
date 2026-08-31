@@ -3,6 +3,8 @@ import test, { after } from 'node:test'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import fsPromises from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setImmediate as nextTurn } from 'node:timers/promises'
@@ -200,6 +202,12 @@ test('ungated TTS preserves synchronous 4KB streaming and barrage hook', async t
 
 function fileHarness(t) {
   const children = []
+  const childReady = []
+  const waitForChild = (index = 0) => {
+    childReady[index] ??= deferred()
+    if (children[index]) childReady[index].resolve(children[index])
+    return childReady[index].promise
+  }
   const player = new AudioPlayer({
     resolvePlaybackPath: () => '/mock/ffplay',
     spawnProcess(_exe, args) {
@@ -210,11 +218,33 @@ function fileHarness(t) {
       child.killed = false
       child.kill = () => { child.killed = true; queueMicrotask(() => child.emit('close', null)) }
       children.push(child)
+      childReady[children.length - 1]?.resolve(child)
       return child
     },
   })
   t.after(() => player.stop())
-  return { player, children }
+  return { player, children, waitForChild }
+}
+
+// Hold a real file check at a known point, independently of disk/threadpool
+// speed. Restore both the builtin object and its named ESM bindings afterward.
+function delayFileCheck(t, operation) {
+  const entered = deferred(), release = deferred()
+  const original = fsPromises[operation]
+  const mocked = t.mock.method(fsPromises, operation, async (...args) => {
+    if (args[0] === audioFile) {
+      entered.resolve()
+      await release.promise
+    }
+    return original(...args)
+  })
+  syncBuiltinESMExports()
+  t.after(() => {
+    release.resolve()
+    mocked.mock.restore()
+    syncBuiltinESMExports()
+  })
+  return { entered: entered.promise, release: release.resolve }
 }
 
 test('denied TTS handoff never writes audio bytes', async t => {
@@ -235,39 +265,38 @@ test('denied file handoff never pipes audio bytes', async t => {
     waitForPlayback: async () => true,
     onAudioStart: () => false,
   })
-  const child = await awaitChild(h)
+  const child = await h.waitForChild()
   child.emit('spawn')
   assert.equal((await result).aborted, true)
   assert.equal(child.stdin.readableLength, 0)
   assert.equal(child.killed, true)
 })
 
-async function awaitChild(h) {
-  for (let i = 0; i < 100 && h.children.length === 0; i++) await nextTurn()
-  assert.equal(h.children.length, 1)
-  return h.children[0]
-}
-
 test('local file waits through initial and spawn-time gates; handoff fires once', async t => {
   const h = fileHarness(t)
   const first = deferred(), second = deferred()
+  const firstEntered = deferred(), secondEntered = deferred(), started = deferred()
   let checks = 0, starts = 0
   const result = h.player.playFile(audioFile, {
-    waitForPlayback: () => ++checks === 1 ? first.promise : second.promise,
-    onAudioStart: () => starts++,
+    waitForPlayback: () => {
+      if (++checks === 1) { firstEntered.resolve(); return first.promise }
+      secondEntered.resolve()
+      return second.promise
+    },
+    onAudioStart: () => { starts++; started.resolve() },
   })
-  for (let i = 0; i < 30; i++) await nextTurn()
+  await firstEntered.promise
   assert.equal(h.children.length, 0)
   first.resolve(true)
-  const child = await awaitChild(h)
+  const child = await h.waitForChild()
   assert.equal(starts, 0)
   child.emit('spawn')
-  await nextTurn()
+  await secondEntered.promise
   assert.equal(checks, 2)
   assert.equal(starts, 0)
   assert.equal(child.stdin.readableLength, 0)
   second.resolve(true)
-  await nextTurn()
+  await started.promise
   assert.equal(starts, 1)
   child.emit('spawn')
   assert.equal(starts, 1)
@@ -278,28 +307,100 @@ test('local file waits through initial and spawn-time gates; handoff fires once'
 for (const when of ['before spawn', 'during spawn gate']) {
   test(`local file cancellation ${when} stops pending handoff`, async t => {
     const h = fileHarness(t)
-    const gate = deferred()
+    const gate = deferred(), gateEntered = deferred()
     const external = new AbortController()
     let checks = 0, starts = 0, gateSignal
     const result = h.player.playFile(audioFile, {
       signal: external.signal,
       waitForPlayback: ({ signal }) => {
         gateSignal = signal
-        return when === 'during spawn gate' && ++checks === 1 ? true : gate.promise
+        if (when === 'during spawn gate' && ++checks === 1) return true
+        gateEntered.resolve()
+        return gate.promise
       },
       onAudioStart: () => starts++,
     })
-    if (when === 'during spawn gate') (await awaitChild(h)).emit('spawn')
-    for (let i = 0; i < 30; i++) await nextTurn()
+    if (when === 'during spawn gate') (await h.waitForChild()).emit('spawn')
+    await gateEntered.promise
     external.abort()
     assert.equal((await result).aborted, true)
-    if (gateSignal) assert.equal(gateSignal.aborted, true)
+    assert.equal(gateSignal.aborted, true)
     gate.resolve(true)
     await nextTurn()
     assert.equal(starts, 0)
-    if (h.children[0]) assert.equal(h.children[0].killed, true)
+    if (when === 'during spawn gate') {
+      assert.equal(h.children.length, 1)
+      assert.equal(h.children[0].killed, true)
+      assert.equal(h.children[0].stdin.readableLength, 0)
+    } else assert.equal(h.children.length, 0)
   })
 }
+
+for (const operation of ['access', 'stat']) {
+  test(`local file waits for delayed ${operation} and explicit child spawn before handoff`, async t => {
+    const h = fileHarness(t)
+    const check = delayFileCheck(t, operation)
+    const started = deferred()
+    let starts = 0
+    const result = h.player.playFile(audioFile, {
+      waitForPlayback: () => true,
+      onAudioStart: () => { starts++; started.resolve() },
+    })
+    await check.entered
+    assert.equal(h.children.length, 0)
+    assert.equal(starts, 0)
+    check.release()
+    const child = await h.waitForChild()
+    assert.equal(starts, 0)
+    assert.equal(child.stdin.readableLength, 0)
+    child.emit('spawn')
+    await started.promise
+    assert.equal(starts, 1)
+    child.emit('close', 0)
+    assert.equal(await result, undefined)
+  })
+
+  test(`local file cancellation during delayed ${operation} prevents later spawn`, async t => {
+    const h = fileHarness(t)
+    const check = delayFileCheck(t, operation)
+    const external = new AbortController()
+    let starts = 0, checks = 0
+    const result = h.player.playFile(audioFile, {
+      signal: external.signal,
+      waitForPlayback: () => { checks++; return true },
+      onAudioStart: () => starts++,
+    })
+    await check.entered
+    assert.equal(h.children.length, 0)
+    external.abort()
+    check.release()
+    assert.equal((await result).aborted, true)
+    assert.equal(checks, 0)
+    assert.equal(starts, 0)
+    assert.equal(h.children.length, 0)
+  })
+}
+
+test('local file cancellation before delayed child spawn ignores the late spawn event', async t => {
+  const h = fileHarness(t)
+  const external = new AbortController()
+  let starts = 0
+  const result = h.player.playFile(audioFile, {
+    signal: external.signal,
+    waitForPlayback: () => true,
+    onAudioStart: () => starts++,
+  })
+  const child = await h.waitForChild()
+  assert.equal(starts, 0)
+  external.abort()
+  assert.equal((await result).aborted, true)
+  assert.equal(child.killed, true)
+  child.emit('spawn')
+  await nextTurn()
+  assert.equal(starts, 0)
+  assert.equal(child.stdin.readableLength, 0)
+  assert.equal(h.player.currentProcess, null)
+})
 
 test('missing file and unsuccessful ffplay spawn never fire local handoff', async t => {
   const h = fileHarness(t)
@@ -308,7 +409,7 @@ test('missing file and unsuccessful ffplay spawn never fire local handoff', asyn
   assert.equal(h.children.length, 0)
   const result = h.player.playFile(audioFile, { onAudioStart: () => starts++ })
   const rejection = assert.rejects(result, /ffplay 未找到/)
-  const child = await awaitChild(h)
+  const child = await h.waitForChild()
   child.emit('error', Object.assign(new Error('not found'), { code: 'ENOENT' }))
   await rejection
   child.emit('close', -2)
@@ -318,7 +419,7 @@ test('missing file and unsuccessful ffplay spawn never fire local handoff', asyn
 test('ungated local file retains direct input path', async t => {
   const h = fileHarness(t)
   const result = h.player.playFile(audioFile)
-  const child = await awaitChild(h)
+  const child = await h.waitForChild()
   assert.equal(child.args.at(-1), audioFile)
   child.emit('spawn')
   child.emit('close', 0)
@@ -330,12 +431,17 @@ test('TTSEngine.stop cancels speakFile readiness without a playback process', as
   const engine = new TTSEngine({})
   engine.player = h.player
   t.after(() => engine.destroy())
+  const gateEntered = deferred()
   let signal, starts = 0
   const result = engine.speakFile(audioFile, {
-    waitForPlayback: input => { signal = input.signal; return new Promise(() => {}) },
+    waitForPlayback: input => {
+      signal = input.signal
+      gateEntered.resolve()
+      return new Promise(() => {})
+    },
     onAudioStart: () => starts++,
   })
-  for (let i = 0; i < 100 && !signal; i++) await nextTurn()
+  await gateEntered.promise
   assert.ok(signal)
   engine.stop()
   assert.equal((await result).aborted, true)
@@ -347,13 +453,11 @@ test('TTSEngine.stop cancels speakFile readiness without a playback process', as
 test('late errors/close from replaced local file cannot clear the current player', async t => {
   const h = fileHarness(t)
   const first = h.player.playFile(audioFile)
-  const old = await awaitChild(h)
+  const old = await h.waitForChild()
   old.emit('spawn')
   const second = h.player.playFile(audioFile)
   assert.equal((await first).aborted, true)
-  for (let i = 0; i < 100 && h.children.length < 2; i++) await nextTurn()
-  const current = h.children[1]
-  assert.ok(current)
+  const current = await h.waitForChild(1)
   current.emit('spawn')
   old.emit('error', new Error('late old child error'))
   old.emit('close', 0)
