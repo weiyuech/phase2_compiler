@@ -53,18 +53,25 @@ test('failed staging preserves previous output and removes only its generated wo
   assert.deepEqual(readdirSync(join(root, 'robot-ui/resources')), ['backend-seed'])
 })
 
-test('nonempty credentials or robot destinations in a template fail staging', t => {
-  const root = fixture(t), localTemplates = join(root, 'templates')
-  cpSync(templates, localTemplates, { recursive: true })
-  const environmentPath = join(localTemplates, 'backend.env.example')
-  const environment = readFileSync(environmentPath, 'utf8')
+for (const [lineEndingName, lineEnding] of [['LF', '\n'], ['CRLF', '\r\n']]) {
   for (const replacement of ['TTS_API_KEY=PRIVATE_TEST_KEY', 'ROBOT_URL=ws://192.0.2.1:8765']) {
     const key = replacement.slice(0, replacement.indexOf('='))
-    writeFileSync(environmentPath, environment.replace(`${key}=\n`, `${replacement}\n`))
-    assert.throws(() => preparePackageSeed({ projectRoot: root, templatesRoot: localTemplates }), /must be blank/)
-    assert.equal(existsSync(join(root, 'robot-ui/resources/backend-seed')), false)
+    test(`nonempty ${key} in a ${lineEndingName} template fails staging`, t => {
+      const root = fixture(t), localTemplates = join(root, 'templates')
+      cpSync(templates, localTemplates, { recursive: true })
+      const environmentPath = join(localTemplates, 'backend.env.example')
+      // Checkout line endings must not determine whether the fixture actually
+      // injects a value. Exercise both encodings on every host, before validation.
+      const lines = readFileSync(environmentPath, 'utf8').split(/\r?\n/)
+      assert.equal(lines.filter(line => line === `${key}=`).length, 1, 'fixture has exactly one blank target field')
+      const contaminated = lines.map(line => line === `${key}=` ? replacement : line).join(lineEnding)
+      assert.ok(contaminated.includes(`${replacement}${lineEnding}`), 'fixture contamination was applied')
+      writeFileSync(environmentPath, contaminated)
+      assert.throws(() => preparePackageSeed({ projectRoot: root, templatesRoot: localTemplates }), /must be blank/)
+      assert.equal(existsSync(join(root, 'robot-ui/resources/backend-seed')), false)
+    })
   }
-})
+}
 
 test('final-resource verification rejects extra files, altered defaults and changed model bytes', t => {
   const root = fixture(t), staged = preparePackageSeed({ projectRoot: root })

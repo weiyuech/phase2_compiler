@@ -10,7 +10,7 @@ const bridgeSource = readFileSync(new URL('../src/ui-bridge.js', import.meta.url
 
 // Exercise the actual JSON dispatcher and registered handlers, with an in-memory
 // WebSocket server. No app startup, robot, TTS provider, sockets, or disk writes.
-function fixture() {
+function fixture(source = bridgeSource) {
   let server
   class FakeServer extends EventEmitter {
     constructor() { super(); this.clients = new Set(); server = this }
@@ -20,7 +20,10 @@ function fixture() {
     WebSocketServer: FakeServer, Buffer, console: logger,
     process: { env: {} }, writeSync() {},
   })
-  vm.runInContext(bridgeSource.replace(/^import .+\n/gm, '').replace(/^export /gm, '') +
+  // Git may check out CRLF on Windows. Normalize before stripping the module
+  // declarations: JavaScript's dot does not match the CR before a newline.
+  const script = source.replace(/\r\n?/g, '\n').replace(/^import .+\n/gm, '').replace(/^export /gm, '')
+  vm.runInContext(script +
     '\nthis.bridge = { start, on, broadcast };', context)
   const bridge = context.bridge
   const tour = { isRunning: false, isPaused: false, repeatCount: 1, currentIteration: 0 }
@@ -42,6 +45,22 @@ function fixture() {
       await new Promise(resolve => setImmediate(resolve))
     },
   }
+}
+
+for (const [name, lineEnding] of [['LF', '\n'], ['CRLF', '\r\n']]) {
+  test(`the bridge fixture loads and dispatches ${name} source independently of checkout defaults`, async () => {
+    const source = bridgeSource.replace(/\r\n?/g, '\n').replace(/\n/g, lineEnding)
+    assert.equal(source.includes('\r\n'), name === 'CRLF')
+    const h = fixture(source)
+    Object.assign(h.tour, { isRunning: true, isPaused: true, repeatCount: 3, currentIteration: 2 })
+    await h.send('GET_TOUR_STATE')
+    assert.deepEqual(h.socket.messages.at(-1).data, {
+      running: true, paused: true, repeatCount: 3, currentIteration: 2,
+    })
+    await h.send('TEST_SPEECH', { text: 'Do not interrupt this tour.' })
+    assert.deepEqual(h.calls, [])
+    assert.equal(h.socket.messages.at(-1).data.message, blockedMessage)
+  })
 }
 
 for (const paused of [false, true]) {

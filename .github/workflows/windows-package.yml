@@ -12,6 +12,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 25
 
     steps:
       - name: Checkout Code
@@ -57,12 +58,14 @@ jobs:
         run: node robot-ui/scripts/prepare-package-seed.mjs --verify release/win-unpacked/resources/backend
 
       - name: Verify packaged Electron audio and OCR runtime
+        timeout-minutes: 5
         shell: pwsh
         run: |
           $exe = (Resolve-Path 'release/win-unpacked/robot-live-ui.exe').Path
           $env:ELECTRON_RUN_AS_NODE = '1'
           try {
             & $exe robot-ui/scripts/verify-packaged-runtime.mjs --backend-root release/win-unpacked/resources/backend --report release/packaged-runtime.json
+            if (Test-Path 'release/packaged-runtime.json') { Get-Content 'release/packaged-runtime.json' }
             if ($LASTEXITCODE -ne 0) { throw 'Packaged audio/OCR runtime verification failed' }
           } finally {
             Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
