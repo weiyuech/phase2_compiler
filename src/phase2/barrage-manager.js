@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import mammoth from 'mammoth';
+import { randomUUID } from 'node:crypto';
 import { barrageProvider } from '../knowledge/barrage-provider.js';
 
 async function readDocumentContent(filePath) {
@@ -32,6 +33,12 @@ export class BarrageManager {
     this.cooldownTimer = null;
     this.latestBarrageEvent = null;
     this.lastRecognizedText = null;
+    this._generation = 0;
+    this._eventCounter = 0;
+    this._latestHandledEvent = 0;
+    this._sequence = null;
+    this._replyReady = false;
+    this._captionId = null;
     this.mp3Count = 0;
     this.llmCount = 0;
 
@@ -56,6 +63,9 @@ export class BarrageManager {
       return;
     }
     this.lastRecognizedText = text;
+
+    const generation = this._generation;
+    const eventId = ++this._eventCounter;
 
     // 1. Fetch current global mode
     const config = await barrageProvider.getConfig();
@@ -124,6 +134,10 @@ export class BarrageManager {
 
     if (actions.length === 0) return;
 
+    if (!this.isActive || generation !== this._generation || eventId < this._latestHandledEvent) return;
+    this._latestHandledEvent = eventId;
+    const event = { id: eventId, text, actions };
+
     // 4. Busy Check
     const isPlayerPlaying = this.tts.player.isPlaying();
     const isBusy = isPlayerPlaying || this.isPlaying || this.isSleeping;
@@ -131,28 +145,39 @@ export class BarrageManager {
     if (isBusy) {
       // Zero-latency latest-only buffer: overwrite existing queued actions
       console.log(`[BarrageManager] Robot is busy/sleeping. Buffering latest actions for matched concepts.`);
-      this.latestBarrageEvent = actions;
+      this.latestBarrageEvent = event;
     } else {
       // Play immediately
-      this.playActionSequence(actions);
+      this.playActionSequence(event);
     }
   }
 
-  async playActionSequence(actions) {
+  async playActionSequence(input) {
+    if (this._sequence || !this.isActive) return;
+    const event = Array.isArray(input) ? { actions: input, text: this.lastRecognizedText } : input;
+    const actions = event.actions;
+    const generation = this._generation;
+    const run = { controller: new AbortController() };
+    this._sequence = run;
+    const valid = () => this.isActive && this._sequence === run && !run.controller.signal.aborted;
     this.isPlaying = true;
-    // Track whether we actually paused cruising, so we only resume once and don't
-    // fire onBarrageSpeechEnd if we never started (e.g., LLM reply was discarded).
+    // Preparation owns no speaker. Emit sequence hooks only if audio starts;
+    // the shared coordinator separately arbitrates each prepared utterance.
     let startedSpeech = false;
     const startSpeech = () => {
-      if (startedSpeech) return;
+      if (!valid() || this.checkIsSpeaking?.()) return false;
+      this._replyReady = false;
+      if (startedSpeech) return true;
       startedSpeech = true;
       this._isActuallyPlaying = true;
       this.onBarrageSpeechStart?.();
+      return true;
     };
 
     try {
       for (const action of actions) {
-        if (!this.isActive) break;
+        const utteranceId = randomUUID();
+        if (!valid()) break;
 
         if (action.type === 'mp3') {
           const dirPath = path.join(this.audioDir, action.conceptName);
@@ -167,15 +192,31 @@ export class BarrageManager {
           if (mp3Files.length > 0) {
             const randomFile = mp3Files[Math.floor(Math.random() * mp3Files.length)];
             const mp3Path = path.join(dirPath, randomFile);
-            if (!this.isActive) break;
+            if (!valid()) break;
             console.log(`[BarrageManager] Playing MP3: ${mp3Path}`);
 
-            // MP3 mode: file is already on disk. Pause cruising just before playing.
-            startSpeech();
-            this.uiBridge.broadcast('SPEECH_START', { mp3_file: mp3Path });
-            await this.tts.speakFile(mp3Path);
-            this.mp3Count++;
-            this.uiBridge.broadcast('SPEECH_END', {});
+            let didStart = false;
+            try {
+              const result = await this.tts.speakFile(mp3Path, {
+                signal: run.controller.signal, utteranceId,
+                onPrepared: () => { if (valid()) this._replyReady = true; },
+                beforePlay: () => valid() && !this.checkIsSpeaking?.(),
+                onAudioStart: () => {
+                  if (!startSpeech()) return false;
+                  didStart = true;
+                  this._captionId = utteranceId;
+                  this.uiBridge.broadcast('SPEECH_START', { utteranceId, source: 'barrage', mp3_file: mp3Path });
+                  return true;
+                },
+              });
+              if (valid() && result?.ok !== false) this.mp3Count++;
+              if (valid() && result?.ok === false && !result.aborted) {
+                this.uiBridge.broadcast('ERROR', { message: '弹幕音频播放失败: ' + (result.error?.message || '未知错误') });
+              }
+            } finally {
+              if (valid() && didStart) this.uiBridge.broadcast('SPEECH_END', { utteranceId, source: 'barrage' });
+              if (valid()) { this._replyReady = false; this._captionId = null; }
+            }
           } else {
             console.warn(`[BarrageManager] No MP3 files found in directory: ${dirPath}`);
           }
@@ -191,7 +232,7 @@ export class BarrageManager {
             }
           }
 
-          if (!this.isActive) break;
+          if (!valid()) break;
 
           console.log(`[BarrageManager] Processing OCR text crop via LLM.`);
 
@@ -220,9 +261,9 @@ export class BarrageManager {
           }
 
           // User prompt formatted with XML tags
-          const userPrompt = `<barrage_text>\n${this.lastRecognizedText}\n</barrage_text>\n\n<document>\n${docContent.trim()}\n</document>`;
+          const userPrompt = `<barrage_text>\n${event.text}\n</barrage_text>\n\n<document>\n${docContent.trim()}\n</document>`;
 
-          if (!this.isActive) break;
+          if (!valid()) break;
 
           console.log(`[BarrageManager] Calling LLM. System prompt size: ${systemPrompt.length}. User prompt: ${userPrompt.trim()}`);
 
@@ -230,7 +271,7 @@ export class BarrageManager {
           let replyText;
           try {
             const resultText = await this.llm.rewriteBarrage(systemPrompt, userPrompt);
-            if (!this.isActive) break;
+            if (!valid()) break;
             if (!resultText || !resultText.trim()) {
               console.log('[BarrageManager] ⚠️ 大模型调用失败或未返回有效文本，本次播放已跳过。');
               continue;
@@ -241,18 +282,16 @@ export class BarrageManager {
             continue;
           }
 
-          // ─── Phase 2: Streaming TTS with gated handoff ───
-          // - beforePlay: at the exact moment ffplay is about to spawn, check host
-          //   state. If host is still speaking, abort silently (WS cancelled,
-          //   ffplay never spawns, cruising never paused → "baby killed before sky").
-          // - onAudioStart: at the exact moment ffplay spawns, pause cruising for
-          //   the seamless handoff — no dead air, streaming TTFA preserved.
-          // SPEECH_START/END are gated on didFireStart so a discarded reply doesn't
-          // leave a phantom caption on the UI.
+          // ─── Phase 2: sentence preparation and coordinated handoff ───
+          // A ready reply waits for the current TTS sentence. Host speech remains
+          // an immediate veto; a discarded reply never claims a caption/speaker.
           let didFireStart = false;
           try {
             const res = await this.tts.speak(replyText, {
+              signal: run.controller.signal, utteranceId,
+              onPrepared: () => { if (valid()) this._replyReady = true; },
               beforePlay: () => {
+                if (!valid()) return false;
                 if (this.checkIsSpeaking && this.checkIsSpeaking()) {
                   console.log('[BarrageManager] 主播仍在说话，此次生成的回复被丢弃（不播放，不打断巡游）。');
                   return false;
@@ -260,30 +299,40 @@ export class BarrageManager {
                 return true;
               },
               onAudioStart: () => {
-                startSpeech();
-                this.uiBridge.broadcast('SPEECH_START', { text: replyText });
+                if (!startSpeech()) return false;
+                this._captionId = utteranceId;
+                this.uiBridge.broadcast('SPEECH_START', { text: replyText, utteranceId, source: 'barrage' });
                 didFireStart = true;
+                return true;
+              },
+              onSentenceStart: ({ text, index, resumed = false }) => {
+                if (valid() && didFireStart) this.uiBridge.broadcast('SPEECH_SENTENCE', { utteranceId, source: 'barrage', text, index, resumed });
               },
             });
             if (res && res.aborted) {
               // beforePlay rejected: silent discard, cruising was never paused
             } else if (res && res.ok === false) {
               console.error('[BarrageManager] 对话合成播放失败:', res.error?.message ?? res.error);
-            } else {
+              if (valid()) this.uiBridge.broadcast('ERROR', { message: '弹幕语音准备/播放失败: ' + (res.error?.message || '未知错误') });
+            } else if (valid()) {
               this.llmCount++;
             }
           } catch (err) {
             console.error('[BarrageManager] 对话合成播放出错:', err.message);
+            if (valid()) this.uiBridge.broadcast('ERROR', { message: '弹幕语音准备/播放失败: ' + err.message });
           } finally {
-            if (didFireStart) this.uiBridge.broadcast('SPEECH_END', {});
+            if (valid() && didFireStart) this.uiBridge.broadcast('SPEECH_END', { utteranceId, source: 'barrage' });
+            if (valid()) { this._replyReady = false; this._captionId = null; }
           }
         }
       }
     } catch (err) {
       console.error('[BarrageManager] Error during action playback:', err.message);
     } finally {
-      // 1. Mark speech playback as done and release cruising immediately!
-      this.isPlaying = false;
+      if (this._sequence !== run) return;
+      // Only the owning run may release speech or schedule the next event.
+      // Keep the run busy while loading cooldown settings; otherwise a new OCR
+      // event can start another job before this run has committed its cooldown.
       this._isActuallyPlaying = false;
       if (startedSpeech) {
         this.onBarrageSpeechEnd?.();
@@ -298,7 +347,10 @@ export class BarrageManager {
           console.error('[BarrageManager] Failed to read config in cooldown check:', err.message);
         }
         
+        if (!this.isActive || generation !== this._generation || this._sequence !== run) return;
         const cooldown = typeof globalConfig.cooldown === 'number' ? globalConfig.cooldown : 0;
+        this._sequence = null;
+        this.isPlaying = false;
         
         if (cooldown > 0) {
           console.log(`[BarrageManager] Starting cooldown sleep for ${cooldown} seconds.`);
@@ -308,7 +360,7 @@ export class BarrageManager {
             this.isSleeping = false;
             console.log('[BarrageManager] Cooldown sleep finished.');
             
-            if (this.isActive && this.latestBarrageEvent) {
+            if (this.isActive && generation === this._generation && this.latestBarrageEvent) {
               console.log('[BarrageManager] Playback woke up and found buffered barrage event. Executing...');
               const nextActions = this.latestBarrageEvent;
               this.latestBarrageEvent = null;
@@ -324,55 +376,41 @@ export class BarrageManager {
             this.playActionSequence(nextActions);
           }
         }
+      } else {
+        this._sequence = null;
+        this.isPlaying = false;
       }
     }
   }
 
-  stop() {
-    this.isActive = false;
+  cancelPendingSpeech() {
+    this._generation++;
+    const run = this._sequence;
+    this._sequence = null;
+    run?.controller.abort();
+    const wasSpeaking = this._isActuallyPlaying;
     this.isPlaying = false;
     this._isActuallyPlaying = false;
+    this._replyReady = false;
     this.latestBarrageEvent = null;
-    if (this.cooldownTimer) {
-      clearTimeout(this.cooldownTimer);
-      this.cooldownTimer = null;
-    }
+    if (this.cooldownTimer) clearTimeout(this.cooldownTimer);
+    this.cooldownTimer = null;
     this.isSleeping = false;
     this.tts.stop();
-    this.onBarrageSpeechEnd?.();
-    this.uiBridge.broadcast('SPEECH_END', {});
+    if (wasSpeaking) this.onBarrageSpeechEnd?.();
+    if (this._captionId) this.uiBridge.broadcast('SPEECH_END', { utteranceId: this._captionId, source: 'barrage' });
+    this._captionId = null;
+  }
+
+  stop() {
+    this.isActive = false;
+    this.cancelPendingSpeech();
   }
 
   stopSpeech() {
-    // 只有真正在出声的时候才打断；生成阶段（LLM/TTS still running）不打断，
-    // 让"还没出生的宝宝"继续生成——生成完成后再由 phase-3 门禁决定是否播放。
-    if (!this._isActuallyPlaying) {
-      console.log('[BarrageManager] stopSpeech() ignored — barrage is only generating, not playing.');
-      return;
-    }
-    console.log('[BarrageManager] stopSpeech() called. Stopping current barrage speech only.');
-    this.isPlaying = false;
-    this._isActuallyPlaying = false;
-    this.latestBarrageEvent = null;
-    if (this.cooldownTimer) {
-      clearTimeout(this.cooldownTimer);
-      this.cooldownTimer = null;
-    }
-    this.isSleeping = false;
-    this.tts.stop();
-    this.onBarrageSpeechEnd?.();
-    this.uiBridge.broadcast('SPEECH_END', {});
-  }
-
-  waitUntil(condition, timeoutMs = 10000) {
-    return new Promise((resolve) => {
-      const start = Date.now();
-      const interval = setInterval(() => {
-        if (condition() || Date.now() - start > timeoutMs) {
-          clearInterval(interval);
-          resolve();
-        }
-      }, 200);
-    });
+    // A generating reply may continue; its final gate drops it if host speech
+    // persists. A prepared boundary-waiting reply must not replay after host end.
+    if (!this._isActuallyPlaying && !this._replyReady) return;
+    this.cancelPendingSpeech();
   }
 }

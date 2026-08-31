@@ -1,154 +1,101 @@
 <template>
   <div class="controls-layout">
-    <div class="controls-grid">
-
-      <!-- Tour control card -->
-      <div class="control-card big tour-card">
-        <div class="card-title">巡游控制</div>
-        <div class="card-desc">开始巡游后机器人将按清单依次前往各点位，到达后自动播报，播完自动前往下一个。</div>
+    <div class="controls-toolbar">
+      <section class="tour-control" aria-label="巡游控制">
+        <div class="control-heading">
+          <div class="card-title">巡游控制</div>
+          <div class="status-pill" :class="tourStatusClass">
+            {{ tourStatusLabel }}
+            <span v-if="(tourStatus === 'running' || tourStatus === 'paused') && repeatCount > 1">
+              · 第 {{ currentIteration }} / {{ repeatCount }} 轮
+            </span>
+          </div>
+        </div>
         <div class="btn-row">
           <template v-if="tourStatus === 'idle' || tourStatus === 'finished'">
-            <el-button
-              type="primary" size="large" :disabled="!wsConnected"
-              @click="startTour"
-            >▶  开始巡游</el-button>
+            <el-button type="primary" :disabled="!wsConnected" @click="startTour">▶ 开始巡游</el-button>
             <div class="repeat-input">
               <span class="repeat-label">循环</span>
               <el-input-number
-                v-model="repeatCount"
-                :min="1"
-                :max="999"
-                :precision="0"
-                :step="1"
-                size="default"
-                controls-position="right"
-                style="width: 100px;"
+                v-model="repeatCount" :min="1" :max="999" :precision="0" :step="1"
+                size="default" controls-position="right" aria-label="巡游循环次数"
               />
               <span class="repeat-label">次</span>
             </div>
           </template>
-
-          <el-button
-            v-if="tourStatus === 'running'"
-            type="warning" size="large" :disabled="!wsConnected"
-            @click="send('PAUSE_TOUR')"
-          >⏸  暂停巡游</el-button>
-
-          <el-button
-            v-if="tourStatus === 'paused'"
-            type="primary" size="large" :disabled="!wsConnected"
-            @click="send('RESUME_TOUR')"
-          >▶  继续巡游</el-button>
-
-          <el-button
-            v-if="tourStatus === 'running' || tourStatus === 'paused'"
-            type="danger" size="large" :disabled="!wsConnected"
-            @click="send('STOP_TOUR')"
-          >⏹  停止巡游</el-button>
-
-          <el-button
-            v-if="tourStatus === 'running' || tourStatus === 'paused'"
-            size="large" :disabled="!wsConnected"
-            @click="send('SKIP_POINT')"
-          >⏭  跳过点位</el-button>
+          <el-button v-if="tourStatus === 'running'" type="warning" :disabled="!wsConnected" @click="send('PAUSE_TOUR')">⏸ 暂停巡游</el-button>
+          <el-button v-if="tourStatus === 'paused'" type="primary" :disabled="!wsConnected" @click="send('RESUME_TOUR')">▶ 继续巡游</el-button>
+          <el-button v-if="tourStatus === 'running' || tourStatus === 'paused'" type="danger" :disabled="!wsConnected" @click="send('STOP_TOUR')">⏹ 停止巡游</el-button>
+          <el-button v-if="tourStatus === 'running' || tourStatus === 'paused'" :disabled="!wsConnected" @click="send('SKIP_POINT')">⏭ 跳过点位</el-button>
         </div>
-        <div class="status-pill" :class="tourStatusClass">
-          {{ tourStatusLabel }}
-          <span v-if="(tourStatus === 'running' || tourStatus === 'paused') && repeatCount > 1">
-            · 第 {{ currentIteration }} / {{ repeatCount }} 轮
-          </span>
-        </div>
-      </div>
+      </section>
 
-      <!-- Pause broadcast card -->
-      <div class="control-card">
-        <div class="card-title">播报控制</div>
-        <div class="card-desc">暂停时机器人停止当前队列中的新播报，正在播放的语音会完成后停止。</div>
+      <section class="broadcast-control" aria-label="播报控制">
+        <div class="control-heading">
+          <div class="card-title">播报控制</div>
+        </div>
         <div class="btn-row">
-          <el-button
-            :type="isPaused ? 'primary' : 'danger'"
-            size="large" :disabled="!wsConnected"
-            @click="togglePause"
-          >
-            {{ isPaused ? '▶  恢复播报' : '⏸  暂停播报' }}
+          <el-button :type="isPaused ? 'primary' : 'danger'" :disabled="!wsConnected" @click="togglePause">
+            {{ isPaused ? '▶ 恢复播报' : '⏸ 暂停播报' }}
           </el-button>
         </div>
-        <div class="status-pill" :class="isPaused ? 'paused' : 'running'">
-          {{ isPaused ? '已暂停' : '运行中' }}
-        </div>
-      </div>
+      </section>
+    </div>
 
-      <!-- Barrage OCR card -->
-      <div class="control-card">
-        <div class="card-title">弹幕识别</div>
-        <div class="card-desc">开启弹幕识别，自动截取弹幕区域并进行OCR。开启时会弹出透明遮罩层让你框选区域。</div>
-        
-        <div style="display: flex; align-items: center; justify-content: space-between;">
-          <span style="font-size: 13px; color: var(--text);">启用弹幕识别</span>
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <span v-if="barrageEnabled" :style="{ fontSize: '11px', color: ocrReady ? 'var(--green)' : 'var(--amber)' }">
-              {{ ocrStatusMsg }}
-            </span>
-            <el-switch v-model="barrageEnabled" @change="onBarrageToggle" active-color="#f59e0b" inactive-color="#30363d" />
+    <div class="controls-grid">
+      <section class="control-card transit-card" aria-label="过渡音频">
+        <TransitAudioSettings :ws-ref="props.wsRef" />
+      </section>
+
+      <div class="controls-side">
+        <section class="control-card barrage-card" aria-label="弹幕识别">
+          <div class="control-heading">
+            <div class="card-title">弹幕识别</div>
+            <label class="header-switch">
+              <span>启用</span>
+              <el-switch v-model="barrageEnabled" size="small" aria-label="启用弹幕识别" @change="onBarrageToggle" />
+            </label>
           </div>
-        </div>
+          <p v-if="barrageEnabled" class="ocr-status" :class="{ ready: ocrReady }">{{ ocrStatusMsg }}</p>
+          <div class="control-field">
+            <span>播报冷却</span>
+            <div class="cooldown-input">
+              <el-input-number
+                v-model="barrageCooldown" :min="0" :max="3000" :precision="0" :step="1"
+                size="small" controls-position="right" aria-label="播报冷却时间"
+                @change="onCooldownChange"
+              />
+              <span>秒</span>
+            </div>
+          </div>
+          <div v-if="barrageEnabled && barrageRegion" class="hint">
+            当前截取区域: X:{{ barrageRegion.x }} Y:{{ barrageRegion.y }} W:{{ barrageRegion.width }} H:{{ barrageRegion.height }}
+          </div>
+          <div v-if="barrageEnabled && currentCapturedText" class="hint captured-text">
+            当前截取文本: {{ currentCapturedText }}
+          </div>
+          <div class="card-footer">
+            <el-button text size="small" class="log-download" @click="downloadBarrageLog">下载识别日志 (.txt)</el-button>
+          </div>
+        </section>
 
-        <div v-if="barrageEnabled && barrageRegion" class="hint" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);">
-          当前截取区域: X:{{ barrageRegion.x }} Y:{{ barrageRegion.y }} W:{{ barrageRegion.width }} H:{{ barrageRegion.height }}
-        </div>
-
-        <div v-if="barrageEnabled && currentCapturedText" class="hint" style="margin-top: 8px; color: var(--amber);">
-          当前截取文本: {{ currentCapturedText }}
-        </div>
- 
-        <div style="margin-top: 12px; display: flex; align-items: center; justify-content: space-between;">
-          <span style="font-size: 13px; color: var(--text);">播报冷却时间 (秒)</span>
-          <el-input-number
-            v-model="barrageCooldown"
-            :min="0"
-            :max="3000"
-            :precision="0"
-            :step="1"
-            size="small"
-            controls-position="right"
-            style="width: 100px;"
-            @change="onCooldownChange"
-          />
-        </div>
-
-        <div style="margin-top: 14px;">
-          <el-button 
-            type="primary" 
-            plain 
-            size="small" 
-            style="width: 100%;" 
-            @click="downloadBarrageLog"
-          >
-            下载识别日志 (.txt)
-          </el-button>
-        </div>
+        <section class="control-card test-card" aria-label="手动播报测试">
+          <div class="control-heading"><div class="card-title">手动播报测试</div></div>
+          <el-input v-model="testText" placeholder="输入测试文本..." type="textarea" :rows="3" />
+          <div class="btn-row test-actions">
+            <el-button :disabled="!canTestSpeech" @click="sendTestSpeech">发送播报</el-button>
+          </div>
+          <p v-if="tourIsActive" class="hint">请先停止巡游，再进行手动播报测试</p>
+        </section>
       </div>
+    </div>
 
-      <div class="control-card">
-        <div class="card-title">手动播报测试</div>
-        <div class="card-desc">直接发送一段文本到当前选择的输出位置，用于测试语音和音频链路</div>
-        <el-input v-model="testText" placeholder="输入测试文本..." type="textarea" :rows="3" />
-        <div class="btn-row" style="margin-top:10px">
-          <el-button type="primary" :disabled="!wsConnected || !testText.trim()" @click="sendTestSpeech">
-            发送播报
-          </el-button>
-        </div>
+    <div v-if="!wsConnected" class="no-ws-banner">
+      <div>⚠ 未连接到后端，应用启动后稍等片刻将自动连接</div>
+      <div style="margin-top: 8px; font-weight: normal;">
+        如果一直连不上，请点下面的按钮导出诊断日志，并把生成的文件发给技术支持
       </div>
-
-      <div v-if="!wsConnected" class="no-ws-banner">
-        <div>⚠ 未连接到后端，应用启动后稍等片刻将自动连接</div>
-        <div style="margin-top: 8px; font-weight: normal;">
-          如果一直连不上，请点下面的按钮导出诊断日志，并把生成的文件发给技术支持
-        </div>
-        <el-button size="small" plain style="margin-top: 8px;" @click="exportDiagnostics">
-          导出诊断日志 (.txt)
-        </el-button>
-      </div>
+      <el-button size="small" plain style="margin-top: 8px;" @click="exportDiagnostics">导出诊断日志 (.txt)</el-button>
     </div>
   </div>
 </template>
@@ -156,6 +103,7 @@
 <script setup>
 import { ref, computed, watch, onUnmounted, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
+import TransitAudioSettings from './TransitAudioSettings.vue'
 
 const props = defineProps({ wsRef: Object })
 
@@ -163,6 +111,8 @@ const props = defineProps({ wsRef: Object })
 const isPaused   = ref(false)
 const testText   = ref('')
 const tourStatus = ref('idle')   // idle | running | paused | finished
+const tourStateKnown = ref(false)
+const tourIsActive = computed(() => tourStatus.value === 'running' || tourStatus.value === 'paused')
 
 const ocrReady = ref(true) // Backend handles this now
 const ocrStatusMsg = ref('处理中')
@@ -174,7 +124,8 @@ const repeatCount = ref(1)  // How many full passes through the tour list
 const currentIteration = ref(0)
 
 // --- WebSocket ---
-const wsConnected = computed(() => !!props.wsRef && props.wsRef.readyState === 1)
+const wsConnected = ref(false)
+const canTestSpeech = computed(() => wsConnected.value && tourStateKnown.value && !tourIsActive.value && !!testText.value.trim())
 
 function send(type, data = {}) {
   const socket = props.wsRef?.value || props.wsRef;
@@ -190,6 +141,13 @@ function handleMessage(raw) {
   try {
     const { type, data } = JSON.parse(raw)
     switch (type) {
+      case 'TOUR_STATE':
+        if (typeof data?.running !== 'boolean' || typeof data?.paused !== 'boolean') break
+        tourStatus.value = data.running ? (data.paused ? 'paused' : 'running') : 'idle'
+        if (typeof data.repeatCount === 'number') repeatCount.value = data.repeatCount
+        if (typeof data.currentIteration === 'number') currentIteration.value = data.currentIteration
+        tourStateKnown.value = true
+        break
       case 'TOUR_STARTED':
         tourStatus.value = 'running'
         if (data && typeof data.repeatCount === 'number') repeatCount.value = data.repeatCount
@@ -225,24 +183,36 @@ function handleMessage(raw) {
 }
 
 let currentSocket = null
-watch(() => props.wsRef, (socket) => {
-  if (currentSocket) currentSocket.removeEventListener('message', onMsg)
-  const realSocket = socket?.value || socket
-  if (realSocket) {
-    currentSocket = realSocket
-    realSocket.addEventListener('message', onMsg)
-    if (realSocket.readyState === 1) {
-      send('GET_BARRAGE_CONFIG')
-    } else {
-      realSocket.addEventListener('open', () => {
-        send('GET_BARRAGE_CONFIG')
-      }, { once: true })
-    }
-  }
+function detachSocket() {
+  currentSocket?.removeEventListener('message', onMsg)
+  currentSocket?.removeEventListener('open', onSocketOpen)
+  currentSocket?.removeEventListener('close', onSocketClose)
+}
+function onSocketOpen() {
+  wsConnected.value = currentSocket?.readyState === 1
+  if (!wsConnected.value) return
+  tourStateKnown.value = false
+  send('GET_TOUR_STATE')
+  send('GET_BARRAGE_CONFIG')
+}
+function onSocketClose() {
+  wsConnected.value = false
+  tourStateKnown.value = false
+}
+watch(() => props.wsRef?.value || props.wsRef, (socket) => {
+  detachSocket()
+  currentSocket = socket || null
+  wsConnected.value = false
+  tourStateKnown.value = false
+  if (!currentSocket) return
+  currentSocket.addEventListener('message', onMsg)
+  currentSocket.addEventListener('close', onSocketClose)
+  if (currentSocket.readyState === 1) onSocketOpen()
+  else currentSocket.addEventListener('open', onSocketOpen, { once: true })
 }, { immediate: true })
 
 function onMsg(e) { handleMessage(e.data) }
-onUnmounted(() => { currentSocket?.removeEventListener('message', onMsg) })
+onUnmounted(detachSocket)
 
 // --- Actions ---
 function onBarrageToggle(val) {
@@ -294,6 +264,11 @@ function togglePause() {
 }
 
 function sendTestSpeech() {
+  if (tourIsActive.value) {
+    ElMessage.warning('请先停止巡游，再进行手动播报测试')
+    return
+  }
+  if (!canTestSpeech.value) return
   send('TEST_SPEECH', { text: testText.value.trim() })
   ElMessage.info('已发送测试播报')
   testText.value = ''
@@ -350,25 +325,53 @@ const tourStatusClass = computed(() => ({
 </script>
 
 <style scoped>
-.controls-layout { height: 100%; padding: 16px; overflow-y: auto; }
-.controls-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 12px; align-content: start;
+.controls-layout {
+  height: 100%;
+  padding: 16px;
+  overflow-y: auto;
+  container: broadcast-controls / inline-size;
+  --control-columns: minmax(0, 1.65fr) minmax(0, 1fr);
 }
-.control-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; }
-.control-card.big { grid-column: span 2; display: flex; flex-direction: column; }
-.tour-card { border-color: rgba(74,222,128,.2); }
-.card-title { font-size: 13px; font-weight: 600; color: var(--amber); letter-spacing: .05em; margin-bottom: 8px; }
-.tour-card .card-title { color: var(--green); }
-.card-desc  { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 16px; }
-.btn-row    { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.repeat-input { display: flex; align-items: center; gap: 6px; margin-left: 4px; }
-.repeat-label { font-size: 12px; color: var(--text-dim); }
-.slider-row { padding: 8px 0 4px; }
-.hint       { font-size: 11px; color: var(--text-dim); margin-top: 4px; font-family: var(--font-mono); }
-.status-pill { display: inline-block; margin-top: 14px; font-size: 11px; font-weight: 600; letter-spacing: .08em; padding: 3px 12px; border-radius: 20px; }
-.status-pill.running  { background: rgba(74,222,128,.15);  color: var(--green);    border: 1px solid rgba(74,222,128,.3); }
-.status-pill.paused   { background: rgba(245,158,11,.15);  color: var(--amber);    border: 1px solid rgba(245,158,11,.3); }
-.status-pill.dim      { background: var(--bg3);            color: var(--text-dim); border: 1px solid var(--border); }
-.no-ws-banner { grid-column: 1/-1; background: rgba(245,158,11,.08); border: 1px solid var(--amber-dim); border-radius: 8px; padding: 14px 18px; color: var(--amber); font-size: 13px; }
+.controls-toolbar {
+  display: grid;
+  grid-template-columns: var(--control-columns);
+  column-gap: 14px;
+  margin-bottom: 14px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.tour-control, .broadcast-control { min-width: 0; padding: 16px 20px; }
+.broadcast-control { border-left: 1px solid var(--border); }
+.controls-grid { display: grid; grid-template-columns: var(--control-columns); gap: 14px; align-items: start; }
+.controls-side { display: grid; gap: 14px; min-width: 0; }
+.control-card { min-width: 0; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; }
+.control-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.card-title { font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: .03em; }
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.btn-row :deep(.el-button + .el-button) { margin-left: 0; }
+.repeat-input, .cooldown-input { display: flex; align-items: center; gap: 8px; }
+.repeat-input { margin-left: 4px; }
+.repeat-input :deep(.el-input-number) { width: 88px; }
+.cooldown-input :deep(.el-input-number) { width: 80px; }
+.repeat-label, .header-switch, .control-field { font-size: 12px; color: var(--text-dim); }
+.header-switch { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.header-switch :deep(.el-switch) { --el-switch-on-color: var(--amber); }
+.control-field { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.ocr-status { font-size: 11px; color: var(--amber); margin: -4px 0 12px; }
+.ocr-status.ready { color: var(--green); }
+.hint { font-size: 11px; color: var(--text-dim); margin-top: 12px; overflow-wrap: anywhere; }
+.captured-text { color: var(--amber); }
+.card-footer { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+.log-download { padding: 0; min-height: 24px; height: auto; color: var(--text-dim); }
+.test-actions { margin-top: 12px; }
+.status-pill { display: inline-flex; flex-wrap: wrap; font-size: 11px; padding: 2px 9px; border-radius: 20px; }
+.status-pill.running { background: rgba(74,222,128,.12); color: var(--green); }
+.status-pill.paused { background: rgba(245,158,11,.12); color: var(--amber); }
+.status-pill.dim { background: var(--bg3); color: var(--text-dim); }
+.no-ws-banner { margin-top: 14px; background: rgba(245,158,11,.08); border: 1px solid var(--amber-dim); border-radius: 8px; padding: 14px 18px; color: var(--amber); font-size: 13px; }
+@container broadcast-controls (max-width: 760px) {
+  .controls-toolbar, .controls-grid { grid-template-columns: minmax(0, 1fr); }
+  .broadcast-control { border-left: 0; border-top: 1px solid var(--border); }
+}
 </style>

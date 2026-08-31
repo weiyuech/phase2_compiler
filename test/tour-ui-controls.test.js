@@ -1,0 +1,117 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
+import vm from 'node:vm'
+import { getTourState, registerTourControls } from '../src/task/ui-controls.js'
+
+const blockedMessage = '请先停止巡游，再进行手动播报测试'
+const bridgeSource = readFileSync(new URL('../src/ui-bridge.js', import.meta.url), 'utf8')
+
+// Exercise the actual JSON dispatcher and registered handlers, with an in-memory
+// WebSocket server. No app startup, robot, TTS provider, sockets, or disk writes.
+function fixture() {
+  let server
+  class FakeServer extends EventEmitter {
+    constructor() { super(); this.clients = new Set(); server = this }
+  }
+  const logger = { log() {}, error() {}, warn() {} }
+  const context = vm.createContext({
+    WebSocketServer: FakeServer, Buffer, console: logger,
+    process: { env: {} }, writeSync() {},
+  })
+  vm.runInContext(bridgeSource.replace(/^import .+\n/gm, '').replace(/^export /gm, '') +
+    '\nthis.bridge = { start, on, broadcast };', context)
+  const bridge = context.bridge
+  const tour = { isRunning: false, isPaused: false, repeatCount: 1, currentIteration: 0 }
+  const calls = []
+  const tts = { speak: async text => { calls.push(text); return { ok: true } } }
+  registerTourControls({ uiBridge: bridge, tour, tts, logger })
+  bridge.start(0)
+  const socket = new EventEmitter()
+  socket.readyState = 1
+  socket.messages = []
+  socket.send = raw => socket.messages.push(JSON.parse(raw))
+  server.clients.add(socket)
+  server.emit('connection', socket)
+  socket.messages.length = 0
+  return {
+    tour, tts, calls, socket,
+    async send(type, data = {}) {
+      socket.emit('message', Buffer.from(JSON.stringify({ type, data })), false)
+      await new Promise(resolve => setImmediate(resolve))
+    },
+  }
+}
+
+for (const paused of [false, true]) {
+  test(`manual playback is rejected without touching TTS during a ${paused ? 'paused' : 'running'} tour`, async () => {
+    const h = fixture()
+    Object.assign(h.tour, { isRunning: true, isPaused: paused })
+    await h.send('TEST_SPEECH', { text: 'Do not replace point narration.' })
+    assert.deepEqual(h.calls, [])
+    assert.equal(h.socket.messages.at(-1).type, 'ERROR')
+    assert.equal(h.socket.messages.at(-1).data.message, blockedMessage)
+  })
+}
+
+test('manual playback remains available outside a tour', async () => {
+  const h = fixture()
+  await h.send('TEST_SPEECH', { text: 'Test sentence.' })
+  assert.deepEqual(h.calls, ['Test sentence.'])
+  assert.deepEqual(h.socket.messages, [])
+})
+
+test('normal manual-test cancellation is not reported as an error', async () => {
+  const h = fixture()
+  h.tts.speak = async () => ({ ok: false, aborted: true })
+  await h.send('TEST_SPEECH', { text: 'Cancelled test.' })
+  assert.deepEqual(h.socket.messages, [])
+})
+
+test('manual playback failures retain useful messages and tolerate missing error details', async () => {
+  const h = fixture()
+  for (const [speak, expected] of [
+    [async () => ({ ok: false, error: new Error('Decode failed') }), 'Decode failed'],
+    [async () => ({ ok: false }), '语音播放失败'],
+    [async () => { throw new Error('Playback failed') }, 'Playback failed'],
+    [async () => { throw null }, '语音播放失败'],
+  ]) {
+    h.tts.speak = speak
+    await h.send('TEST_SPEECH', { text: 'Test sentence.' })
+    assert.equal(h.socket.messages.at(-1).data.message, `手动播报测试失败: ${expected}`)
+  }
+})
+
+test('GET_TOUR_STATE returns the authoritative current tour state to its requester', async () => {
+  const h = fixture()
+  Object.assign(h.tour, { isRunning: true, isPaused: true, repeatCount: 4, currentIteration: 2 })
+  await h.send('GET_TOUR_STATE')
+  const reply = h.socket.messages.at(-1)
+  assert.equal(reply.type, 'TOUR_STATE')
+  assert.deepEqual(reply.data, { running: true, paused: true, repeatCount: 4, currentIteration: 2 })
+  h.tour.isRunning = false
+  h.tour.isPaused = false
+  h.tour.currentIteration = 0
+  await h.send('GET_TOUR_STATE')
+  assert.deepEqual(h.socket.messages.at(-1).data, getTourState(h.tour))
+})
+
+test('late-joining clients also receive a tour snapshot from the application hook', () => {
+  const indexSource = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
+  const begin = indexSource.indexOf("uiBridge.on('onNewClient',")
+  const end = indexSource.indexOf('// ── UI Bridge commands', begin)
+  assert.ok(begin >= 0 && end > begin)
+  let hook
+  const tour = { isRunning: true, isPaused: false, repeatCount: 3, currentIteration: 2 }
+  const context = vm.createContext({
+    uiBridge: { on: (_name, handler) => { hook = handler } }, tour, getTourState,
+    audioDiagnostics: { snapshot: () => ({}) }, transitAudio: { getConfig: () => ({}) },
+    audioOutput: { getConfig: () => ({}) }, robotConnected: false,
+  })
+  vm.runInContext(indexSource.slice(begin, end), context)
+  const sent = []
+  hook((type, data) => sent.push({ type, data }))
+  assert.deepEqual(sent.find(message => message.type === 'TOUR_STATE').data,
+    { running: true, paused: false, repeatCount: 3, currentIteration: 2 })
+})

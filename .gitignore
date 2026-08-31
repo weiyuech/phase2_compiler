@@ -3,6 +3,8 @@ node_modules/
 robot-ui/node_modules/
 robot-ui/resources/backend/node_modules/
 robot-ui/resources/backend/package*.json
+robot-ui/resources/backend-seed/
+robot-ui/resources/.backend-seed-build-*/
 
 # Sensitive config
 .env
@@ -17,6 +19,14 @@ release/
 # TTS cache database
 data/tts-cache/
 data/audio-output.json
+
+# App-owned runtime histories and temporary audio (never release inputs)
+data/backend.log*
+data/audio-diagnostics.log*
+data/barrage-ocr-log.txt
+data/robot-pcm-cache/
+data/temp-tts-play*.mp3
+robot_audio_diagnostics/
 
 # OS cache
 .DS_Store

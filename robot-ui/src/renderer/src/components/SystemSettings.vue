@@ -17,8 +17,10 @@
     <!-- Right panel -->
     <div class="settings-panel">
 
+      <AudioDiagnostics v-if="activeSection === 'diagnostics'" :ws-ref="props.wsRef" />
+
       <!-- ── 违禁词 ─────────────────────────────────────────────────────── -->
-      <template v-if="activeSection === 'banned'">
+      <template v-else-if="activeSection === 'banned'">
         <div class="panel-header">违禁词</div>
         <div class="panel-body">
           <div class="word-tags">
@@ -288,58 +290,6 @@
         </div>
       </template>
 
-      <!-- ── 过渡音频 ─────────────────────────────────────────────────────── -->
-      <template v-else-if="activeSection === 'transit'">
-        <div class="panel-header">过渡音频</div>
-        <div class="panel-body">
-          <p class="panel-note" style="margin-bottom: 16px">
-            机器人行进期间循环播放，到达下一个点位时自动停止。
-          </p>
-          <div class="params-grid">
-            <span class="param-label">启用过渡音频</span>
-            <el-switch v-model="transitConfig.enabled" />
-
-            <span class="param-label">音频类型</span>
-            <el-radio-group v-model="transitConfig.type" size="small">
-              <el-radio-button value="tts">TTS 文字</el-radio-button>
-              <el-radio-button value="mp3">MP3 文件</el-radio-button>
-            </el-radio-group>
-
-            <template v-if="transitConfig.type === 'tts'">
-              <span class="param-label" style="align-self: flex-start; padding-top: 6px">播报文字</span>
-              <div>
-                <el-input
-                  v-model="transitConfig.text"
-                  type="textarea"
-                  :rows="3"
-                  placeholder="例：正在前往下一个展区，请稍候……"
-                  style="width: 320px"
-                />
-                <p class="param-hint">经 LLM 改写后合成语音，每次行进改写一次并缓存循环</p>
-              </div>
-            </template>
-
-            <template v-else>
-              <span class="param-label">MP3 文件</span>
-              <div class="mp3-row">
-                <el-input
-                  v-model="transitConfig.mp3_file"
-                  placeholder="点击选择文件按钮选取"
-                  size="small"
-                  style="width: 240px"
-                  readonly
-                />
-                <el-button size="small" @click="pickTransitMp3">选择文件</el-button>
-              </div>
-            </template>
-          </div>
-
-          <div class="row-actions" style="margin-top: 20px">
-            <el-button type="primary" :loading="savingTransit" @click="saveTransitConfig">保存</el-button>
-            <span v-if="transitSavedOk" class="ok-text">已保存，下次发目标点时生效</span>
-          </div>
-        </div>
-      </template>
 
     </div>
   </div>
@@ -348,6 +298,7 @@
 <script setup>
 import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessageBox, ElMessage }                   from 'element-plus'
+import AudioDiagnostics from './AudioDiagnostics.vue'
 
 const props = defineProps({ wsRef: Object })
 
@@ -357,7 +308,7 @@ const navItems = [
   { key: 'prompt',  label: '改写提示词' },
   { key: 'banned',  label: '违禁词管理'   },
   { key: 'audio',   label: '音频输出'  },
-  { key: 'transit', label: '过渡音频'  },
+  { key: 'diagnostics', label: '音频诊断' },
 ]
 const activeSection = ref('cruise')
 
@@ -839,55 +790,12 @@ function saveAudioOutputConfig() {
   }, 5000)
 }
 
-// ── 过渡音频 ─────────────────────────────────────────────────────────────────
-const transitConfig  = reactive({ enabled: false, type: 'tts', text: '', mp3_file: '' })
-const savingTransit  = ref(false)
-const transitSavedOk = ref(false)
-
-function loadTransitConfig() {
-  const ws = props.wsRef
-  if (!ws || ws.readyState !== WebSocket.OPEN) return
-
-  const handler = (event) => {
-    try {
-      const msg = JSON.parse(event.data)
-      if (msg.type === 'TRANSIT_CONFIG') {
-        Object.assign(transitConfig, msg.data)
-        ws.removeEventListener('message', handler)
-      }
-    } catch { /* ignore */ }
-  }
-  ws.addEventListener('message', handler)
-  ws.send(JSON.stringify({ type: 'GET_TRANSIT_CONFIG' }))
-  // Auto-cleanup after 5s in case no response
-  setTimeout(() => ws.removeEventListener('message', handler), 5000)
-}
-
-async function pickTransitMp3() {
-  const filePath = await window.api.selectMp3File()
-  if (filePath) transitConfig.mp3_file = filePath
-}
-
-async function saveTransitConfig() {
-  const ws = props.wsRef
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    ElMessage.error('未连接后端')
-    return
-  }
-  savingTransit.value = true
-  ws.send(JSON.stringify({ type: 'SET_TRANSIT_CONFIG', data: { ...transitConfig } }))
-  transitSavedOk.value = true
-  setTimeout(() => { transitSavedOk.value = false }, 3000)
-  savingTransit.value = false
-}
-
 // ── Lifecycle ──────────────────────────────────────────────────────────────────
 onMounted(() => {
   loadBannedWords()
   loadPrompt()
   loadPublicEnv()
   loadHasPassword()
-  loadTransitConfig()
 })
 
 onBeforeUnmount(() => {

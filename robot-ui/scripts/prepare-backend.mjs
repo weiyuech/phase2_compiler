@@ -9,10 +9,16 @@ import { execSync }                  from 'child_process'
 import { join, dirname }             from 'path'
 import { fileURLToPath }             from 'url'
 import { cpSync, mkdirSync, rmSync, existsSync } from 'fs'
+import { preparePackageSeed } from './prepare-package-seed.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const rootDir   = join(__dirname, '../../')              // robot-live-system/
 const destDir   = join(__dirname, '../resources/backend')
+
+// Only these reviewed, generated seeds may enter an installer. Never package
+// the developer's live data/, config/, .env, recordings or saved credentials.
+const seedDir = preparePackageSeed({ projectRoot: rootDir })
+console.log('[prepare-backend] clean first-install seeds →', seedDir)
 
 // Clean previous install to avoid stale native binaries
 if (existsSync(join(destDir, 'node_modules'))) {

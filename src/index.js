@@ -22,9 +22,15 @@ import { createKnowledgeBaseProvider } from './knowledge/index.js'
 import { LLMRewriter }                 from './llm/index.js'
 import { TTSEngine }                   from './tts/index.js'
 import { AudioOutputRouter }           from './tts/audio-output-router.js'
+import { SpeechCoordinator }           from './tts/speech-coordinator.js'
+import { AudioDiagnostics }            from './diagnostics/audio-diagnostics.js'
+import { startBackendLogCapture }      from './diagnostics/backend-log.js'
 import { TransitAudioManager }         from './transit/manager.js'
 import { RobotListener }               from './robot/listener.js'
 import { TaskManager }                 from './task/manager.js'
+import { CruiseController }            from './task/cruise-controller.js'
+import { createPointNarrator }          from './task/point-narrator.js'
+import { getTourState, registerTourControls } from './task/ui-controls.js'
 import * as uiBridge                   from './ui-bridge.js'
 import { startTunnel, stopTunnel }     from './tunnel.js'
 import { initPhase2 }                  from './phase2/index.js'
@@ -33,6 +39,9 @@ import { safeJoin }                    from './safe-path.js'
 
 // ── Initialise modules ────────────────────────────────────────────────────────
 
+const diagnosticsDirectory = process.env.USER_DATA_DIR || join(process.cwd(), 'data')
+const backendLogCapture = startBackendLogCapture({ directory: diagnosticsDirectory })
+const audioDiagnostics = new AudioDiagnostics({ directory: diagnosticsDirectory })
 uiBridge.start()
 
 const kb = await createKnowledgeBaseProvider({
@@ -61,9 +70,12 @@ const robot = new RobotListener(
 const audioOutput = new AudioOutputRouter({
   robot,
   filePath: join(DATA_DIR, 'audio-output.json'),
+  diagnostics: audioDiagnostics,
 })
+audioDiagnostics.event('runtime', { destination: audioOutput.getConfig().destination, connected: robot.isConnected() })
 
-const tts = new TTSEngine({ audioOutput })
+const speechCoordinator = new SpeechCoordinator({ diagnostics: audioDiagnostics })
+const tts = new TTSEngine({ audioOutput, coordinator: speechCoordinator, role: 'cruise', diagnostics: audioDiagnostics })
 
 // -- Separate Barrage (弹幕) LLM & TTS Clients --
 const barrageLlm = new LLMRewriter({
@@ -79,6 +91,9 @@ await barrageLlm.init()
 
 const barrageTts = new TTSEngine({
   audioOutput,
+  coordinator: speechCoordinator,
+  role: 'barrage',
+  diagnostics: audioDiagnostics,
   TTS_APP_ID: process.env.BARRAGE_TTS_APP_ID,
   TTS_ACCESS_TOKEN: process.env.BARRAGE_TTS_ACCESS_TOKEN,
   TTS_API_KEY: process.env.BARRAGE_TTS_API_KEY,
@@ -89,28 +104,50 @@ const barrageTts = new TTSEngine({
   TTS_TIMEOUT_MS: process.env.BARRAGE_TTS_TIMEOUT_MS
 })
 
+const transitTts = new TTSEngine({ audioOutput, coordinator: speechCoordinator, role: 'transit', diagnostics: audioDiagnostics })
 const transitAudio = new TransitAudioManager({
   filePath: join(DATA_DIR, 'transit-audio.json'),
   audioOutput,
+  tts: transitTts,
 })
 
 // Speaking state driven by renderer mic detection (via DUCK_START / DUCK_END commands on ws:3001)
 let isSpeaking = false
 let isHostSpeaking = false
-let isBarrageSpeaking = false
+let audioOutputGeneration = 0
 
 function updateCruisingDucking() {
-  const shouldPause = isHostSpeaking || isBarrageSpeaking
-  if (shouldPause) {
-    tts.player.pause()
-    transitAudio.pause()
-  } else {
-    tts.player.resume()
-    transitAudio.resume()
-  }
+  // Automatic source priority is owned by the coordinator. Only immediate
+  // host/operator reasons pause an unfinished TTS sentence.
+  speechCoordinator.setPauseReason('host', ['cruise', 'transit', 'barrage'], isHostSpeaking)
+  speechCoordinator.setPauseReason('tour', ['cruise', 'transit'], tour.isPaused)
 }
 
 const tour  = new TaskManager({ filePath: join(DATA_DIR, 'tour-list.json') })
+const pointNarrator = createPointNarrator({
+  kb, llm, tts, dataDir: DATA_DIR, broadcast: uiBridge.broadcast,
+  // Barrage arbitration belongs exclusively to the coordinator. A barrage
+  // sequence can be preparing its next action while point speech continues.
+  isSpeechBlocked: () => isHostSpeaking || tour.isPaused,
+  getOutputGeneration: () => audioOutputGeneration,
+})
+
+// Selection is explicit: a tour may not silently switch the robot's map.
+let currentMap     = null
+let robotConnected = false
+let lastMapList    = null   // cached so new UI clients get the list immediately
+let lastPaths      = null   // { map_name, paths } — cached path list for current map
+let lastHeartbeat  = null   // most recent heartbeat, used for same-map short-circuit
+const cruise = new CruiseController({
+  robot, tour, getSelectedMap: () => currentMap, playPoint,
+  stopSpeech: () => tts.stop(),
+  startTransit: () => transitAudio.start(transitTts, llm),
+  stopTransit: () => { transitAudio.stop(); transitTts.stop() },
+  isTransitRunning: () => transitAudio.isRunning(),
+  syncAudioPause: updateCruisingDucking,
+  deferTransitUntilSpeech: () => true,
+  broadcast: (type, data) => uiBridge.broadcast(type, data),
+})
 
 // -- Phase 2 Sandbox Initialization --
 const phase2 = initPhase2({
@@ -120,30 +157,17 @@ const phase2 = initPhase2({
   tts: barrageTts,
   uiBridge,
   transitAudio,
-  checkGoalHandling: () => _goalHandling,
+  checkGoalHandling: () => cruise.isHandlingGoal,
   checkIsSpeaking: () => isSpeaking,
-  onBarrageSpeechStart: () => {
-    isBarrageSpeaking = true
-    updateCruisingDucking()
-  },
-  onBarrageSpeechEnd: () => {
-    isBarrageSpeaking = false
-    updateCruisingDucking()
-  }
+  onBarrageSpeechStart: updateCruisingDucking,
+  onBarrageSpeechEnd: updateCruisingDucking,
 })
-
-// Track the map currently loaded on the robot so we only switch when it changes
-let currentMap     = null
-let robotConnected = false
-let lastMapList    = null   // cached so new UI clients get the list immediately
-let lastPaths      = null   // { map_name, paths } — cached path list for current map
-let lastHeartbeat  = null   // most recent heartbeat, used for same-map short-circuit
-let _goalHandling  = false  // prevents concurrent goal-reached processing
-let _session       = 0      // incremented by skip/stop/disconnect to invalidate in-flight goal-reached
 
 // ── State snapshot for late-joining UI clients ────────────────────────────────
 
 uiBridge.on('onNewClient', (sendTo) => {
+  sendTo('TOUR_STATE', getTourState(tour))
+  sendTo('AUDIO_DIAGNOSTICS', { snapshot: audioDiagnostics.snapshot() })
   sendTo('TRANSIT_CONFIG', transitAudio.getConfig())
   sendTo('AUDIO_OUTPUT_CONFIG', {
     ...audioOutput.getConfig(),
@@ -161,17 +185,9 @@ uiBridge.on('onNewClient', (sendTo) => {
 
 // ── UI Bridge commands ────────────────────────────────────────────────────────
 
-uiBridge.on('onTestSpeech',    async (text) => {
-  try {
-    const res = await tts.speak(text)
-    if (res && res.ok === false) {
-      uiBridge.broadcast('ERROR', { message: `手动播报测试失败: ${res.error.message}` })
-    }
-  } catch (err) {
-    console.error('[系统] 手动播报测试失败:', err.message)
-    uiBridge.broadcast('ERROR', { message: `手动播报测试失败: ${err.message}` })
-  }
-})
+registerTourControls({ uiBridge, tour, tts })
+uiBridge.on('onPause', () => speechCoordinator.setPauseReason('operator', ['cruise', 'transit', 'barrage'], true))
+uiBridge.on('onResume', () => speechCoordinator.setPauseReason('operator', [], false))
 uiBridge.on('onDuckStart', () => {
   console.log('[Ducking Debug] 🎤 DUCK_START received (Co-host speaking). Pausing cruising TTS & stopping barrage speech.')
   isHostSpeaking = true
@@ -190,6 +206,10 @@ uiBridge.on('onDuckEnd', () => {
 
 uiBridge.on('onSelectMap', async (mapName) => {
   if (!mapName) return
+  if (tour.isRunning) {
+    uiBridge.broadcast('ERROR', { message: '请先停止巡游，再切换地图；暂停巡游不会停止机器人底盘' })
+    return
+  }
 
   // ── 短路：机器人已在该地图且 ready，无需发切换命令 ─────────────────────────
   const hbMap = lastHeartbeat?.map
@@ -213,6 +233,8 @@ uiBridge.on('onSelectMap', async (mapName) => {
   // ────────────────────────────────────────────────────────────────────────────
 
   uiBridge.broadcast('MAP_SWITCHING', { map_name: mapName })
+  currentMap = null
+  lastPaths = null
 
   robot.sendSwitchMap(mapName)
   let switchResult
@@ -254,39 +276,23 @@ uiBridge.on('onSelectMap', async (mapName) => {
   console.log(`[系统] 路径列表: ${paths?.join(', ')}`)
 })
 
-uiBridge.on('onStartTour', async (payload) => {
-  if (!currentMap) {
-    uiBridge.broadcast('ERROR', { message: '请先在点位编辑页选择并切换地图' })
-    return
-  }
+uiBridge.on('onStartTour', (payload) => {
   // Payload is either {repeatCount:N} from new UI, or undefined from legacy clients
   const repeatCount = (payload && typeof payload === 'object') ? payload.repeatCount : payload
-  if (tour.start(repeatCount)) {
-    uiBridge.broadcast('TOUR_STARTED', { repeatCount: tour.repeatCount })
-    await sendNextGoal()
-  } else {
-    uiBridge.broadcast('ERROR', { message: '巡游清单为空，无法开始' })
-  }
+  cruise.start(repeatCount)
 })
 
 uiBridge.on('onPauseTour', () => {
-  tour.pause()
-  uiBridge.broadcast('TOUR_PAUSED', {})
+  cruise.pause()
 })
 
-uiBridge.on('onResumeTour', async () => {
-  tour.resume()
-  uiBridge.broadcast('TOUR_RESUMED', {})
-  transitAudio.start(tts, llm)  // 继续巡游，机器人导航期间播过渡音频
-  await sendNextGoal()
+uiBridge.on('onResumeTour', () => {
+  cruise.resume()
 })
 
 uiBridge.on('onStopTour', () => {
-  _session++  // invalidate any in-flight goal-reached handler
-  tour.stop()
-  tts.stop()
-  transitAudio.stop()
-  uiBridge.broadcast('TOUR_STOPPED', {})
+  audioDiagnostics.event('stop', { source: 'point', reason: 'stop' })
+  cruise.stop()
 })
 
 uiBridge.on('onSetTourList', (items) => {
@@ -634,6 +640,11 @@ uiBridge.on('onDeleteTtsCacheEntry', async ({ hash }) => {
 uiBridge.on('onGetTransitConfig', (reply) => {
   reply('TRANSIT_CONFIG', transitAudio.getConfig())
 })
+uiBridge.on('onGetAudioDiagnostics', reply => reply('AUDIO_DIAGNOSTICS', { snapshot: audioDiagnostics.snapshot() }))
+uiBridge.on('onMarkAudioGlitch', reply => {
+  audioDiagnostics.event('user-marker', {})
+  reply('AUDIO_DIAGNOSTICS', { snapshot: audioDiagnostics.snapshot() })
+})
 
 uiBridge.on('onSetTransitConfig', (config) => {
   transitAudio.saveConfig(config)
@@ -650,10 +661,15 @@ uiBridge.on('onGetAudioOutputConfig', (reply) => {
 uiBridge.on('onSetAudioOutputConfig', (config) => {
   try {
     // Never leave a previous destination playing after the user switches.
+    audioOutputGeneration++
+    speechCoordinator.cancelAll()
     tts.stop()
     barrageTts.stop()
     transitAudio.stop()
+    transitTts.stop()
+    phase2.barrageManager?.cancelPendingSpeech?.()
     const saved = audioOutput.setConfig(config)
+    audioDiagnostics.event('destination-change', { destination: saved.destination, generation: audioOutputGeneration })
     uiBridge.broadcast('AUDIO_OUTPUT_CONFIG', {
       ...saved,
       robotConnected,
@@ -669,27 +685,9 @@ uiBridge.on('onReloadPrompt', () => {
   uiBridge.broadcast('PROMPT_RELOADED', {})
 })
 
-uiBridge.on('onSkipPoint', async () => {
-  if (!tour.isRunning) return
-  _session++      // invalidate any in-flight goal-reached handler
-  tts.stop()
-  transitAudio.stop()
-  tour.resume()   // clear paused state so goal-reached won't be filtered
-  const iterationBefore = tour.currentIteration
-  const next = tour.advance()
-  if (next) {
-    if (tour.currentIteration !== iterationBefore) {
-      uiBridge.broadcast('TOUR_ITERATION', {
-        currentIteration: tour.currentIteration,
-        repeatCount:      tour.repeatCount
-      })
-    }
-    transitAudio.start(tts, llm)  // 跳过后机器人导航期间播过渡音频
-    await sendNextGoal()
-  } else {
-    transitAudio.stop()
-    uiBridge.broadcast('TOUR_FINISHED', {})
-  }
+uiBridge.on('onSkipPoint', () => {
+  audioDiagnostics.event('stop', { source: 'point', reason: 'skip' })
+  cruise.skip()
 })
 
 // ── TaskManager events ────────────────────────────────────────────────────────
@@ -698,44 +696,43 @@ tour.on('list-changed', (items) => {
   uiBridge.broadcast('TOUR_LIST_CHANGED', { items })
 })
 
-tour.on('current-removed', async ({ nextIndex }) => {
-  _session++      // invalidate any in-flight goal-reached handler
-  tts.stop()
-  transitAudio.stop()
-  if (nextIndex < 0) {
-    tour.stop()
-    uiBridge.broadcast('TOUR_STOPPED', {})
-    return
-  }
-  tour.setCurrentIndex(nextIndex)
-  transitAudio.start(tts, llm)  // 重定向后机器人导航期间播过渡音频
-  await sendNextGoal()
+tour.on('current-removed', ({ nextIndex }) => {
+  cruise.currentRemoved(nextIndex)
 })
 
 // ── Robot events ──────────────────────────────────────────────────────────────
 
 robot.on('connected', () => {
+  audioDiagnostics.event('connected', { destination: audioOutput.getConfig().destination, connected: true, connectionGeneration: robot.connectionGeneration })
+  if (audioOutput.isRobotDestination()) invalidateRobotSpeech()
+  // Server mode can replace a connection without a disconnected event from
+  // the old socket. Invalidate any narration belonging to that old session.
+  if (tour.isRunning) {
+    cruise.stop()
+    uiBridge.broadcast('ERROR', { message: '机器人连接已更换，巡游已停止，请重新选择地图' })
+  }
   robotConnected = true
   currentMap     = null
   lastMapList    = null
   lastPaths      = null
+  lastHeartbeat  = null
   uiBridge.broadcast('ROBOT_CONNECTED', {})
   uiBridge.broadcast('AUDIO_OUTPUT_STATUS', { robotConnected: true })
   robot.sendGetMapList()
 })
 
 robot.on('disconnected', () => {
+  audioDiagnostics.event('disconnected', { destination: audioOutput.getConfig().destination, connected: false, connectionGeneration: robot.connectionGeneration })
+  if (audioOutput.isRobotDestination()) invalidateRobotSpeech()
   robotConnected = false
   currentMap     = null
   lastMapList    = null
   lastPaths      = null
+  lastHeartbeat  = null
   uiBridge.broadcast('ROBOT_DISCONNECTED', {})
   uiBridge.broadcast('AUDIO_OUTPUT_STATUS', { robotConnected: false })
   if (tour.isRunning) {
-    _session++    // invalidate any in-flight goal-reached handler
-    tour.stop()
-    tts.stop()
-    transitAudio.stop()
+    cruise.stop()
     uiBridge.broadcast('ERROR', { message: '机器人断线，巡游已停止' })
   }
 })
@@ -760,62 +757,6 @@ robot.on('reply', ({ type, data }) => {
   }
 })
 
-robot.on('goal-reached', async ({ map_name, path_file, goal_id }) => {
-  // Only handle if tour is running and not paused
-  if (!tour.isRunning || tour.isPaused) return
-
-  // Prevent concurrent handling: robot heartbeats arrive at 1 Hz, and sendSetGoal()
-  // resets _lastTriggered which can let a stale heartbeat fire a second event
-  if (_goalHandling) {
-    console.warn(`[系统] goal-reached 重入，忽略 (${map_name}/${path_file}/${goal_id})`)
-    return
-  }
-
-  // Verify this matches the current tour item
-  const item = tour.currentItem
-  if (!item) return
-  if (map_name !== item.map_name || path_file !== item.path_name || goal_id !== item.goal_id) {
-    console.warn(`[系统] goal-reached 不匹配当前任务，忽略 (${map_name}/${path_file}/${goal_id})`)
-    return
-  }
-
-  _goalHandling = true
-  const mySession = ++_session
-  try {
-    transitAudio.stop()
-    uiBridge.broadcast('POINT_ARRIVED', { map_name, path_file, goal_id })
-
-    // playPoint runs LLM + waits for duck end (if needed) + plays TTS
-    // No pre-wait here: LLM can run concurrently while co-host is speaking;
-    // the duck wait inside playPoint fires only right before TTS output.
-    await playPoint(item, { map_name, path_file, goal_id })
-
-    // Tour may have been stopped/skipped externally while TTS was playing
-    if (!tour.isRunning || _session !== mySession) return
-
-    // Advance to next point
-    const iterationBefore = tour.currentIteration
-    const next = tour.advance()
-    if (next) {
-      // Rolled over into a new repeat iteration
-      if (tour.currentIteration !== iterationBefore) {
-        uiBridge.broadcast('TOUR_ITERATION', {
-          currentIteration: tour.currentIteration,
-          repeatCount:      tour.repeatCount
-        })
-      }
-      // 正确时序：TTS 结束 → 过渡音频开始 → 机器人出发
-      transitAudio.start(tts, llm)
-      await sendNextGoal()
-    } else {
-      transitAudio.stop()
-      uiBridge.broadcast('TOUR_FINISHED', {})
-    }
-  } finally {
-    _goalHandling = false
-  }
-})
-
 robot.start()
 
 // ── ngrok tunnel (optional) ───────────────────────────────────────────────
@@ -830,145 +771,43 @@ robot.start()
 // ── Core functions ────────────────────────────────────────────────────────────
 
 /**
- * Switch map if needed, then send set_goal for the current tour item.
- */
-async function sendNextGoal() {
-  const item = tour.currentItem
-  if (!item) return
-
-  console.log(`[系统] 发布目标点: ${item.path_name}/${item.goal_id} → ${item.goal_object}`)
-  robot.sendSetGoal({
-    path_name:   item.path_name,
-    goal_id:     item.goal_id,
-    goal_object: item.goal_object
-  })
-
-  uiBridge.broadcast('GOAL_SENT', {
-    map_name:  item.map_name,
-    path_name: item.path_name,
-    goal_id:   item.goal_id
-  })
-
-  // Wait for robot to confirm the goal exists
-  let goalReply
-  try {
-    goalReply = await robot.waitForReply('goal')
-  } catch (err) {
-    uiBridge.broadcast('ERROR', { message: `等待机器人确认目标点超时: ${item.path_name}/${item.goal_id}` })
-    console.error('[系统]', err.message)
-    tour.pause()
-    return
-  }
-
-  if (goalReply.goal_check === 'false') {
-    const msg = `目标点不存在: ${item.path_name}/${item.goal_id}，巡游已暂停，请跳过或重试`
-    console.error('[系统]', msg)
-    uiBridge.broadcast('GOAL_CHECK_FAILED', {
-      map_name:  item.map_name,
-      path_name: item.path_name,
-      goal_id:   item.goal_id,
-      message:   msg
-    })
-    tour.pause()
-    return
-  }
-  // 过渡音频由调用方在 TTS 播完后启动（见 goal-reached / onSkipPoint）
-}
-
-/**
  * Look up KB content and play the point using the item's play_mode.
  */
-async function playPoint(item, { map_name, path_file, goal_id }) {
-  const goalObj = item.goal_object || null
-  const content = await kb.getContent(map_name, path_file, goal_id, goalObj)
-  if (!content) {
-    const tried = [
-      goalObj ? `${goal_id}-${goalObj}.json` : null,
-      `${goal_id}.json`,
-    ].filter(Boolean).join(' → ')
-    const msg = `没有找到点位内容: ${map_name}/${path_file}/ (尝试了 ${tried})，请检查知识库路径是否与巡游清单一致`
-    console.error('[系统]', msg)
-    uiBridge.broadcast('ERROR', { message: msg })
-    return
-  }
+async function playPoint(item, point, context = {}) {
+  return pointNarrator(item, point, context)
+}
 
-  const play_mode = item.play_mode || (content.body ? 'tts' : 'mp3')
-
-  // 如果 LLM 生成期间助播或弹幕开始说话，等说完再开始播
-  if (isSpeaking || isBarrageSpeaking) {
-    await waitUntil(() => !isSpeaking && !isBarrageSpeaking, 30000)
-  }
-
-  if (play_mode === 'mp3') {
-    let mp3FileToPlay = null
-    try {
-      const cruisingAudioDir = join(DATA_DIR, 'cruising-audio', map_name, path_file, String(goal_id))
-      const files = await fs.readdir(cruisingAudioDir)
-      const mp3Files = files.filter(f => f.toLowerCase().endsWith('.mp3'))
-      if (mp3Files.length > 0) {
-        const randomFile = mp3Files[Math.floor(Math.random() * mp3Files.length)]
-        mp3FileToPlay = join(cruisingAudioDir, randomFile)
-      }
-    } catch {
-      // Ignore reading directory errors
-    }
-
-    if (mp3FileToPlay) {
-      uiBridge.broadcast('SPEECH_START', { mp3_file: mp3FileToPlay })
-      await tts.speakFile(mp3FileToPlay)
-    } else {
-      // No MP3 files in folder: perform silent arrival (non-blocking)
-      console.log(`[系统] 点位 ${map_name}/${path_file}/${goal_id} 没有可播放的音频，执行静音抵达。`)
-      uiBridge.broadcast('SPEECH_START', { text: '[静音点位]' })
-      await new Promise(resolve => setTimeout(resolve, 1000))
-    }
-  } else {
-    if (content.body) {
-      try {
-        const result = await llm.rewrite({ ...content, goal_object: item.goal_object ?? null })
-        uiBridge.broadcast('SPEECH_START', { text: result.text })
-        const res = await tts.speak(result.text)
-        if (res && res.ok === false) {
-          console.error('[系统] 巡游合成播放失败:', res.error.message)
-        }
-      } catch (err) {
-        console.error('[系统] 巡游合成播放出错:', err.message)
-      }
-    } else {
-      // No body text: perform silent arrival (non-blocking)
-      console.log(`[系统] 点位 ${map_name}/${path_file}/${goal_id} 没有配置讲解文本，执行静音抵达。`)
-      uiBridge.broadcast('SPEECH_START', { text: '[静音点位]' })
-      await new Promise(resolve => setTimeout(resolve, 1000))
-    }
-  }
-
-  uiBridge.broadcast('SPEECH_END', {})
+function invalidateRobotSpeech() {
+  audioOutputGeneration++
+  speechCoordinator.cancelAll()
+  tts.stop()
+  barrageTts.stop()
+  transitAudio.stop()
+  transitTts.stop()
+  phase2.barrageManager?.cancelPendingSpeech?.()
 }
 
 // ── Shutdown ──────────────────────────────────────────────────────────────────
 
-function shutdown() {
+let shuttingDown = false
+async function shutdown() {
+  if (shuttingDown) return
+  shuttingDown = true
+  phase2.barrageManager?.stop?.()
+  speechCoordinator.cancelAll()
+  cruise.stop()
   transitAudio.stop()
+  transitTts.destroy()
   tts.destroy()
   barrageTts.destroy()
-  audioOutput.destroy()
+  const audioCleanup = audioOutput.destroy()
   robot.stop()
+  await Promise.race([
+    Promise.allSettled([audioCleanup, audioDiagnostics.destroy(), backendLogCapture?.destroy?.()]),
+    new Promise(resolve => setTimeout(resolve, 1000)),
+  ])
   // stopTunnel().finally(() => process.exit(0))
   process.exit(0)
 }
 process.on('SIGINT',  shutdown)
 process.on('SIGTERM', shutdown)
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function waitUntil(condition, timeoutMs = 10000) {
-  return new Promise((resolve) => {
-    const start = Date.now()
-    const interval = setInterval(() => {
-      if (condition() || Date.now() - start > timeoutMs) {
-        clearInterval(interval)
-        resolve()
-      }
-    }, 200)
-  })
-}

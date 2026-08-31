@@ -2,6 +2,10 @@
 """
 Lightweight robot audio transport tester (standard library only).
 
+The GUI also contains two fixed eight-second diagnostics: Test A sends the
+original steady 440 Hz schedule; Test B sends a 660 Hz tone with 240 ms queued
+ahead to reveal receiver-side buffering/underrun problems.
+
 GUI:
     python robot_audio_transport_test.py
 
@@ -23,6 +27,7 @@ from __future__ import print_function
 
 import argparse
 import base64
+import csv
 import hashlib
 import hmac
 import json
@@ -49,6 +54,8 @@ AUDIO_SAMPLE_WIDTH = 2
 AUDIO_CHUNK_MS = 20
 DEFAULT_DURATION_S = 2.0
 DEFAULT_FREQUENCY_HZ = 440.0
+DIAGNOSTIC_DURATION_S = 8.0
+DIAGNOSTIC_LEAD_MS = 240
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -224,7 +231,8 @@ class SimpleWebSocket:
 
 
 def send_pcm_to_robot(url, pcm, stop_event=None, status=None,
-                      rate=AUDIO_RATE, chunk_ms=AUDIO_CHUNK_MS):
+                      rate=AUDIO_RATE, chunk_ms=AUDIO_CHUNK_MS,
+                      capture=None):
     """Send PCM in real-time 20 ms JSON frames. A fresh run starts seq at 1."""
     stop_event = stop_event or threading.Event()
     status = status or (lambda _message: None)
@@ -264,6 +272,8 @@ def send_pcm_to_robot(url, pcm, stop_event=None, status=None,
             )
             ws.send_text(payload)
             sent += 1
+            if capture is not None:
+                capture.record(sent, chunk)
 
             if sent == 1 or sent % 50 == 0 or sent == frame_count:
                 status("Sent %d/%d frames." % (sent, frame_count))
@@ -288,6 +298,165 @@ def send_pcm_to_robot(url, pcm, stop_event=None, status=None,
         "total_frames": frame_count,
         "stopped": stop_event.is_set(),
     }
+
+
+def send_pcm_to_robot_with_lead(url, pcm, lead_ms=DIAGNOSTIC_LEAD_MS,
+                                stop_event=None, status=None,
+                                rate=AUDIO_RATE, chunk_ms=AUDIO_CHUNK_MS,
+                                capture=None):
+    """Send the same PCM frames while keeping a small queue ahead of real time.
+
+    This is diagnostic only. If this sounds smoother than send_pcm_to_robot(),
+    the receiver likely needs a clocked playback/jitter buffer.
+    """
+    if not 40 <= lead_ms <= 1000:
+        raise TestError("Diagnostic lead must be between 40 and 1000 ms.")
+
+    stop_event = stop_event or threading.Event()
+    status = status or (lambda _message: None)
+    chunk_bytes = int(rate * AUDIO_SAMPLE_WIDTH * chunk_ms / 1000.0)
+    chunk_bytes -= chunk_bytes % AUDIO_SAMPLE_WIDTH
+    frame_count = (len(pcm) + chunk_bytes - 1) // chunk_bytes
+    audio_duration = len(pcm) / float(rate * AUDIO_SAMPLE_WIDTH)
+    period = chunk_ms / 1000.0
+    lead = lead_ms / 1000.0
+
+    ws = SimpleWebSocket(url)
+    status("Connecting to %s ..." % url)
+    ws.connect()
+    status(
+        "Test B connected: %d frames, %d ms queued ahead."
+        % (frame_count, lead_ms)
+    )
+
+    sent = 0
+    origin = time.monotonic()
+    maximum_lateness = 0.0
+    try:
+        for offset in range(0, len(pcm), chunk_bytes):
+            if stop_event.is_set():
+                break
+
+            send_at = origin + max(0.0, sent * period - lead)
+            while not stop_event.is_set():
+                remaining = send_at - time.monotonic()
+                if remaining <= 0:
+                    break
+                stop_event.wait(min(remaining, 0.05))
+            if stop_event.is_set():
+                break
+
+            now = time.monotonic()
+            lateness = now - send_at
+            if lateness > 0.2:
+                # Shift the remaining schedule instead of sending a catch-up burst.
+                origin += lateness
+                send_at += lateness
+                lateness = 0.0
+
+            chunk = pcm[offset:offset + chunk_bytes]
+            payload = json.dumps(
+                {
+                    "audio": {
+                        "type": "pcm",
+                        "sample": "16",
+                        "seq": sent + 1,
+                        "data": base64.b64encode(chunk).decode("ascii"),
+                    }
+                },
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            ws.send_text(payload)
+            sent += 1
+            if capture is not None:
+                capture.record(sent, chunk)
+            maximum_lateness = max(maximum_lateness, lateness)
+
+            if sent == 1 or sent % 50 == 0 or sent == frame_count:
+                status("Test B sent %d/%d frames." % (sent, frame_count))
+
+        # Do not close while the robot may still be consuming queued frames.
+        playback_end = origin + audio_duration
+        while not stop_event.is_set():
+            remaining = playback_end - time.monotonic()
+            if remaining <= 0:
+                break
+            stop_event.wait(min(remaining, 0.05))
+    finally:
+        ws.close()
+
+    return {
+        "sent_frames": sent,
+        "total_frames": frame_count,
+        "stopped": stop_event.is_set(),
+        "maximum_lateness_ms": maximum_lateness * 1000.0,
+    }
+
+
+class OutgoingPcmCapture:
+    """Save successfully sent PCM as an easy-to-play WAV plus timing CSV."""
+
+    def __init__(self, label):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.directory = os.path.join(base_dir, "robot_audio_diagnostics")
+        try:
+            os.makedirs(self.directory, exist_ok=True)
+        except OSError as exc:
+            raise TestError("Cannot create diagnostic output folder: %s" % exc)
+
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        safe_label = "".join(
+            char if char.isalnum() or char in ("-", "_") else "-"
+            for char in label
+        ).strip("-") or "robot-test"
+        stem = "%s-%s" % (timestamp, safe_label)
+        self.wav_path = os.path.join(self.directory, stem + ".wav")
+        self.csv_path = os.path.join(self.directory, stem + "-timing.csv")
+
+        try:
+            self._wav = wave.open(self.wav_path, "wb")
+            self._wav.setnchannels(AUDIO_CHANNELS)
+            self._wav.setsampwidth(AUDIO_SAMPLE_WIDTH)
+            self._wav.setframerate(AUDIO_RATE)
+            self._csv_file = open(
+                self.csv_path, "w", newline="", encoding="utf-8-sig"
+            )
+        except OSError as exc:
+            try:
+                self._wav.close()
+            except Exception:
+                pass
+            raise TestError("Cannot create diagnostic files: %s" % exc)
+
+        self._csv = csv.writer(self._csv_file)
+        self._csv.writerow(("seq", "sent_at_ms", "interval_ms", "pcm_bytes"))
+        self._started_at = None
+        self._previous_at = None
+        self._closed = False
+
+    def record(self, seq, chunk):
+        now = time.monotonic()
+        if self._started_at is None:
+            self._started_at = now
+        relative_ms = (now - self._started_at) * 1000.0
+        interval_ms = ""
+        if self._previous_at is not None:
+            interval_ms = "%.3f" % ((now - self._previous_at) * 1000.0)
+        self._wav.writeframesraw(chunk)
+        self._csv.writerow(
+            (seq, "%.3f" % relative_ms, interval_ms, len(chunk))
+        )
+        self._previous_at = now
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._wav.close()
+        finally:
+            self._csv_file.close()
 
 
 def _write_temp_wav(pcm):
@@ -466,23 +635,63 @@ def run_gui():
                 row=7, column=0, columnspan=2, sticky="w", pady=(12, 0)
             )
 
+            diagnostic_note = (
+                "Test A: 8秒 440 Hz，原来的每20ms实时发送——检查基础链路是否卡顿。\n"
+                "Test B: 8秒 660 Hz，同格式但提前排队240ms——若B更流畅，机器人需要播放缓冲。\n"
+                "若仍然约每1.5秒卡一次，请记录机器人端序号；1.5秒 = 75帧。\n"
+                "每次机器人测试都会自动保存本地WAV和发送时间CSV。"
+            )
+            ttk.Label(
+                frame,
+                text=diagnostic_note,
+                wraplength=520,
+                foreground="#6b4f00",
+            ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(12, 0))
+
             ttk.Label(
                 frame,
                 textvariable=self.status_text,
-                wraplength=430,
+                wraplength=520,
                 foreground="#1f4e79",
-            ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(12, 0))
+            ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
             buttons = ttk.Frame(frame)
-            buttons.grid(row=9, column=0, columnspan=2, sticky="e", pady=(16, 0))
+            buttons.grid(row=10, column=0, columnspan=2, sticky="e", pady=(16, 0))
             self.stop_button = ttk.Button(
                 buttons, text="Stop / 停止", command=self.stop, state="disabled"
             )
             self.stop_button.grid(row=0, column=0, padx=(0, 8))
-            self.run_button = ttk.Button(
-                buttons, text="Run audio test / 开始音频测试", command=self.run
+            self.custom_button = ttk.Button(
+                buttons,
+                text="Custom tone / 自定义声音",
+                command=lambda: self.run("custom"),
             )
-            self.run_button.grid(row=0, column=1)
+            self.custom_button.grid(row=0, column=1)
+            self.test_a_button = ttk.Button(
+                buttons,
+                text="Test A: normal / 普通发送",
+                command=lambda: self.run("test-a"),
+            )
+            self.test_a_button.grid(row=1, column=0, pady=(8, 0), padx=(0, 8))
+            self.test_b_button = ttk.Button(
+                buttons,
+                text="Test B: buffered / 提前缓冲",
+                command=lambda: self.run("test-b"),
+            )
+            self.test_b_button.grid(row=1, column=1, pady=(8, 0))
+            self.open_folder_button = ttk.Button(
+                buttons,
+                text="Open saved folder / 打开诊断文件夹",
+                command=self.open_diagnostic_folder,
+            )
+            self.open_folder_button.grid(
+                row=2, column=0, columnspan=2, pady=(8, 0), sticky="ew"
+            )
+            self.run_buttons = [
+                self.custom_button,
+                self.test_a_button,
+                self.test_b_button,
+            ]
 
             self.root.protocol("WM_DELETE_WINDOW", self.close)
             self._destination_changed()
@@ -491,6 +700,10 @@ def run_gui():
         def _destination_changed(self):
             state = "normal" if self.destination.get() == "robot" else "disabled"
             self.url_entry.configure(state=state)
+            if hasattr(self, "test_a_button"):
+                self.test_a_button.configure(state=state)
+                self.test_b_button.configure(state=state)
+                self.custom_button.configure(state="normal")
 
         def _set_status(self, message):
             self.events.put(("status", message))
@@ -508,39 +721,84 @@ def run_gui():
             if not self.closing:
                 self.root.after(50, self._drain_events)
 
-        def run(self):
+        def run(self, mode="custom"):
             if self.worker is not None and self.worker.is_alive():
                 return
             try:
-                duration = float(self.duration.get())
-                frequency = float(self.frequency.get())
+                if mode == "test-a":
+                    duration = DIAGNOSTIC_DURATION_S
+                    frequency = 440.0
+                    test_name = "Test A / 普通发送"
+                elif mode == "test-b":
+                    duration = DIAGNOSTIC_DURATION_S
+                    frequency = 660.0
+                    test_name = "Test B / 提前缓冲"
+                else:
+                    duration = float(self.duration.get())
+                    frequency = float(self.frequency.get())
+                    test_name = "Custom test / 自定义测试"
                 pcm = make_sine_pcm(duration, AUDIO_RATE, frequency)
                 url = self.url.get().strip()
                 destination = self.destination.get()
                 if destination == "robot" and not url:
                     raise TestError("Enter the robot WebSocket URL.")
+                if mode != "custom" and destination != "robot":
+                    raise TestError("Test A and Test B are for the robot speaker only.")
             except (ValueError, TestError) as exc:
                 messagebox.showerror("Invalid settings / 设置错误", str(exc))
                 return
 
             self.stop_event = threading.Event()
-            self.run_button.configure(state="disabled")
+            for button in self.run_buttons:
+                button.configure(state="disabled")
             self.stop_button.configure(state="normal")
-            self.status_text.set("Starting test / 正在开始测试...")
+            self.status_text.set(
+                "%s starting: %.0f Hz for %.0f seconds / 正在开始..."
+                % (test_name, frequency, duration)
+            )
 
             def work():
+                capture = None
                 try:
                     if destination == "robot":
-                        result = send_pcm_to_robot(
-                            url, pcm, self.stop_event, self._set_status
-                        )
+                        capture = OutgoingPcmCapture(mode)
+                        try:
+                            if mode == "test-b":
+                                result = send_pcm_to_robot_with_lead(
+                                    url,
+                                    pcm,
+                                    DIAGNOSTIC_LEAD_MS,
+                                    self.stop_event,
+                                    self._set_status,
+                                    capture=capture,
+                                )
+                            else:
+                                result = send_pcm_to_robot(
+                                    url,
+                                    pcm,
+                                    self.stop_event,
+                                    self._set_status,
+                                    capture=capture,
+                                )
+                        finally:
+                            capture.close()
                         if result["stopped"]:
                             final = "Stopped after %d frames / 已停止" % result["sent_frames"]
                         else:
                             final = (
-                                "Robot test complete: %d frames sent / "
-                                "机器人测试完成：已发送 %d 帧"
-                            ) % (result["sent_frames"], result["sent_frames"])
+                                "%s complete: %d frames sent. Was it choppy? / "
+                                "%s完成：已发送%d帧，请记录是否卡顿。"
+                            ) % (
+                                test_name,
+                                result["sent_frames"],
+                                test_name,
+                                result["sent_frames"],
+                            )
+                        final += (
+                            "\nLocal WAV / 本地声音: %s"
+                            "\nTiming CSV / 发送时间: %s"
+                            % (capture.wav_path, capture.csv_path)
+                        )
                     else:
                         result = self.local_playback.play(
                             pcm, self.stop_event, self._set_status
@@ -552,7 +810,12 @@ def run_gui():
                         )
                     self._set_status(final)
                 except Exception as exc:
-                    self._set_status("Test failed / 测试失败: %s" % exc)
+                    message = "Test failed / 测试失败: %s" % exc
+                    if capture is not None:
+                        message += "\nPartial diagnostic files / 部分诊断文件: %s" % (
+                            capture.directory
+                        )
+                    self._set_status(message)
                 finally:
                     self.events.put(("finished", None))
 
@@ -564,9 +827,28 @@ def run_gui():
             self.local_playback.stop()
             self.status_text.set("Stopping / 正在停止...")
 
+        def open_diagnostic_folder(self):
+            folder = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "robot_audio_diagnostics",
+            )
+            try:
+                os.makedirs(folder, exist_ok=True)
+                if sys.platform == "win32":
+                    os.startfile(folder)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", folder])
+                else:
+                    subprocess.Popen(["xdg-open", folder])
+            except Exception as exc:
+                messagebox.showerror(
+                    "Cannot open folder / 无法打开文件夹",
+                    "%s\n%s" % (folder, exc),
+                )
+
         def _finished(self):
-            self.run_button.configure(state="normal")
             self.stop_button.configure(state="disabled")
+            self._destination_changed()
 
         def close(self):
             self.closing = True

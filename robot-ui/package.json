@@ -1,6 +1,6 @@
 {
   "name": "robot-live-ui",
-  "version": "1.0.1",
+  "version": "1.0.2-test.1",
   "description": "Robot Live System Control Panel",
   "author": "weiyuech",
   "repository": {
@@ -51,19 +51,34 @@
         ]
       },
       {
-        "from": "../config",
-        "to": "backend/config"
+        "from": "resources/backend-seed/config",
+        "to": "backend/config",
+        "filter": [
+          "banned-words.txt",
+          "llm-system-prompt.txt",
+          "barrage-prompt-name.txt",
+          "barrage-prompt-general.txt"
+        ]
       },
       {
-        "from": "../data",
-        "to": "backend/data"
+        "from": "resources/backend-seed/data",
+        "to": "backend/data",
+        "filter": [
+          "models/PP-OCRv6_medium_det.onnx",
+          "models/PP-OCRv6_medium_rec.onnx",
+          "models/ppocrv6_dict.txt",
+          "tour-list.json",
+          "transit-audio.json",
+          "audio-output.json",
+          "barrage-knowledge/config.json"
+        ]
       },
       {
         "from": "../package.json",
         "to": "backend/package.json"
       },
       {
-        "from": "../.env.example",
+        "from": "resources/backend-seed/.env.example",
         "to": "backend/.env.example"
       },
       {

@@ -42,7 +42,7 @@ contextBridge.exposeInMainWorld('api', {
   getBackendStatus: () => ipcRenderer.invoke('get-backend-status'),
   getUiPort: () => ipcRenderer.invoke('get-ui-port'),
   onUiPort: (callback) => ipcRenderer.on('ui-port', (_event, port) => callback(port)),
-  exportDiagnostics: () => ipcRenderer.invoke('export-diagnostics'),
+  exportDiagnostics: (options = {}) => ipcRenderer.invoke('export-diagnostics', { includeBackendLogs: options?.includeBackendLogs === true }),
 
   // Barrage Overlay
   openBarrageOverlay: () => ipcRenderer.invoke('open-barrage-overlay'),

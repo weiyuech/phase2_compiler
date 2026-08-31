@@ -132,6 +132,7 @@
 
 <script setup>
 import { ref, watch, nextTick, computed, onMounted, onUnmounted } from 'vue'
+import { SpeechCaptions } from '../speech-captions.js'
 
 const props = defineProps({ wsRef: Object })
 const emit  = defineEmits(['send'])
@@ -144,6 +145,7 @@ const battery         = ref(null)
 const ducking         = ref(false)
 const currentPoint    = ref('')
 const currentText     = ref('')
+const speechCaptions = new SpeechCaptions()
 const tourStatus      = ref('idle')   // idle | running | paused | finished
 const goalCheckFailed = ref(null)     // { message, map_name, path_name, goal_id } | null
 const tunnelUrl       = ref(null)     // ngrok wss:// URL | null
@@ -498,12 +500,17 @@ function handleMessage(raw) {
         break
 
       case 'SPEECH_START':
-        currentText.value = data.text || `[MP3] ${data.mp3_file || ''}`
-        broadcastCount.value++
+        if (speechCaptions.start(data)) broadcastCount.value++
+        currentText.value = speechCaptions.text
         addLog(data.mp3_file ? 'mp3' : 'speech', currentText.value)
         break
+      case 'SPEECH_SENTENCE':
+        speechCaptions.sentence(data)
+        currentText.value = speechCaptions.text
+        break
       case 'SPEECH_END':
-        currentText.value = ''
+        speechCaptions.end(data)
+        currentText.value = speechCaptions.text
         break
 
       case 'DUCK_START':

@@ -1,0 +1,116 @@
+# Prepared playback and audio diagnostics
+
+## Speaking contract
+
+Both output modes share **host → barrage → point narration → transit** priority.
+Preparation does not own playback. TTS is split at sentence endings, retaining
+punctuation/closing quotes and protecting common abbreviations and decimals.
+Commas are not boundaries; an unpunctuated passage stays one unit. MP3 has no
+invented sentence boundaries.
+
+| Incoming event | Current TTS | Current MP3 |
+| --- | --- | --- |
+| Ready barrage | Finish current sentence; reply; resume next sentence | Pause at current position; reply; resume |
+| Ready point narration during transit | Finish transit sentence; discard remaining transit passage | Stop transit when point playback starts |
+| Host speech / operator pause | Immediate pause; retain position | Immediate pause; retain position |
+| Stop / skip / stale point / output or robot-connection replacement | Cancel affected preparation and playback | Cancel affected preparation and playback |
+
+Tour pause blocks point/transit, not otherwise eligible barrage. Host speech
+blocks all automated audio. A ready barrage waiting for a boundary is discarded
+on host interruption, preserving the existing host override. Barrage keeps one
+current job plus one replaceable latest OCR event, with immutable OCR input and
+the configured cooldown. Preparation between barrage actions does not mute point
+audio. A skipped point cannot start later from a stale callback.
+
+TTS starts with the first complete sentence; only the current sentence plus the
+next two are prefetched. Across all three engines, at most two synthesis requests
+run simultaneously; foreground barrage outranks queued speculative work. Voice,
+resource, speed, volume, sample rate, endpoint and format are frozen into cache
+identity. A missing next sentence waits at the boundary; it does not skip words or
+insert transit filler. Failures are surfaced instead of claiming successful audio.
+
+One utterance start/end pair owns its caption and broadcast count. Sentence
+updates use the same utterance ID; stale end/update callbacks cannot clear or
+resurrect another speaker's caption. Local TTS continues to use ffplay, one gated
+sentence at a time. Local MP3 stays on its existing player; M4A uses seekable file
+input to preserve support for non-streamable containers. Player/process startup
+can introduce sentence gaps: this is not a sample-gapless guarantee.
+
+## Robot transport and storage
+
+- Decode each complete file or synthesized sentence to 16 kHz mono signed 16-bit
+  little-endian PCM before activation. No progressive decoder is tied to playback
+  backpressure; full preparation cannot deadlock behind the old one-second limit.
+- Prepared PCM: 64 MiB RAM, 256 MiB temporary disk cache; two concurrent decodes.
+  Active/referenced assets cannot be evicted. Disk assets use bounded read-ahead.
+  Capacity failures cancel/fail safely; incomplete assets are not played.
+- The app-owned `data/robot-pcm-cache` uses an owner lock. Shutdown releases owned
+  files; a later startup recovers only recognized generated files after confirming
+  the previous owner is gone. Developer cache/log histories are excluded from the
+  package and first-run data seeding.
+- Synthesized compressed sentences have a separate 8 MiB bounded cache. The
+  existing user TTS library remains available: successful utterances are merged
+  with ffmpeg (not concatenated MP3 bytes), using voice-aware identity. Temporary
+  harvesting is limited to two 16 MiB jobs; oversized harvests are skipped without
+  failing playback. Existing user library files are not automatically deleted.
+- Send 640-byte PCM frames every 20 ms using one monotonic-clock timer, preserving
+  deadline catch-up/rebase behavior. The last packet can be shorter. Completion
+  includes the calculated remaining PCM duration after late/catch-up sends.
+- Do not upload an entire clip in advance. Keep the existing robot socket and JSON
+  protocol, continuous sequence within an utterance, pause/resume position and
+  source-session conventions. No Python runtime, second audio socket or invented
+  receiver-flush command is introduced.
+- WebSocket write callbacks and backlog are measured; optional frame compression
+  is disabled. The existing 256 KiB backlog cutoff remains a failure limit, not a
+  latency target. Network stalls, disk read-ahead waits and event-loop stalls can
+  still interrupt delivery. The socket remains on the existing event loop.
+
+## Exporting a choppiness report
+
+Open **系统设置 → 音频诊断** at any time, including while connected. Recording is
+automatic. After a glitch, optionally press **刚才卡顿**, then **导出音频诊断**.
+The default text/JSON report contains timing, preparation/wait states, anonymous
+session/utterance IDs, cancellations, fixed error codes, packet summaries,
+backlog, event-loop/resource statistics, versions and retained time range.
+No audio, image, transcript, credentials or full URL is included by default.
+Nothing uploads automatically.
+
+Audio history and backend history each have their own **1 MiB total** budget,
+two 512 KiB segments. The backend migrates the newest bounded history from its
+older larger logs. Rotation discards oldest records; oversized records and slow
+or failed writes cannot grow queues indefinitely. Packets are measured in memory;
+one-second summaries and bounded events are written asynchronously. Diagnostic
+records are dropped under pressure rather than waiting on disk in the audio path.
+Runtime summaries contain drop/discard/truncation counters. Last unflushed events
+may be lost after a crash; exports state the actual retained interval.
+
+Electron main exports persisted files even when the backend cannot start.
+Development storage is project `data/`; packaged storage is Electron `userData`.
+Including **raw backend logs** is an explicit checkbox plus native privacy warning:
+those existing logs can contain spoken/OCR text, paths, documents and URLs. Review
+before sharing. Exported files are user-owned and are never cleaned up by rotation.
+
+## Verification and release gate
+
+Run `npm test` for the existing navigation/WebSocket tests and the prepared audio,
+sentence, handoff, caption, latest-only barrage, cache and logging regressions.
+Some tests bind localhost WebSocket fixtures; none need the physical robot or
+production TTS credentials. Run `npm --prefix robot-ui run build` for all Electron
+bundles. Browser fixture checks exercise connected/offline diagnostics controls;
+they do not prove native save dialogs or packaged Windows operation.
+
+Before release, compare the same MP3 against the successful Python client on the
+real robot. Record both with the actual live camera/phone microphone. Check cloned
+voice consistency, sentence intonation/gaps, every source handoff, immediate host
+pause/stop response, skipped-point cancellation and scene correctness. Include
+tests with OCR/barrage disabled and then enabled; inspect diagnostics around the
+same marked time in the recording. Verify native export on a packaged user machine
+with the backend running, stopped and failed; verify privacy opt-in and rotation.
+
+Camera/stream settings are unchanged. Because the same camera microphone hears
+the robot speaker, preparation changes speech start time, not an independent
+audio/video track offset. This does **not** establish acceptable scene alignment
+or acoustic latency. Robot boundaries are **sender-estimated**: this protocol has
+no audible-completion acknowledgment. If the recording reveals cut sentence tails
+or old speech carrying into a new scene, block release and investigate receiver
+buffering rather than inserting guessed delays.

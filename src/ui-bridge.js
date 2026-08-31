@@ -28,6 +28,7 @@ const handlers = {
   onSkipPoint:     null,
   // Queries (reply to specific client)
   onGetTourList:   null,
+  onGetTourState:  null,
   onGetKbMaps:     null,
   onGetKbList:     null,
   onGetKbPaths:    null,
@@ -60,6 +61,8 @@ const handlers = {
   // Playback destination (local computer / robot speaker)
   onGetAudioOutputConfig: null,
   onSetAudioOutputConfig: null,
+  onGetAudioDiagnostics: null,
+  onMarkAudioGlitch: null,
   // Cruising point audio files
   onGetCruisingAudioFiles: null,
   onUploadCruisingAudio:   null,
@@ -233,12 +236,21 @@ function listen(port, isFallback) {
             break
 
           // ── Queries (reply to this client only) ─────────────────────────────
+          case 'GET_AUDIO_DIAGNOSTICS':
+          case 'MARK_AUDIO_GLITCH': {
+            const reply = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
+            if (type === 'GET_AUDIO_DIAGNOSTICS') handlers.onGetAudioDiagnostics?.(reply)
+            else handlers.onMarkAudioGlitch?.(reply)
+            break
+          }
           case 'GET_TOUR_LIST':
+          case 'GET_TOUR_STATE':
           case 'GET_KB_MAPS':
           case 'GET_KB_LIST':
           case 'GET_KB_PATHS': {
             const reply = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
             if (type === 'GET_TOUR_LIST') handlers.onGetTourList?.(reply)
+            if (type === 'GET_TOUR_STATE') handlers.onGetTourState?.(reply)
             if (type === 'GET_KB_MAPS')   handlers.onGetKbMaps?.(reply)
             if (type === 'GET_KB_LIST')   handlers.onGetKbList?.(reply)
             if (type === 'GET_KB_PATHS')  handlers.onGetKbPaths?.(msgData, reply)

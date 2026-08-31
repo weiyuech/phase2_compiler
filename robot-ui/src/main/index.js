@@ -1,7 +1,10 @@
 import { app, BrowserWindow, ipcMain, dialog, utilityProcess, systemPreferences, Tray, Menu, nativeImage } from 'electron'
 import { join, resolve }                        from 'path'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync, appendFileSync, statSync, renameSync, openSync, readSync, closeSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, cpSync } from 'fs'
 import { scryptSync, randomBytes, timingSafeEqual } from 'crypto'
+import { RollingLog } from '../../../src/diagnostics/rolling-log.js'
+import { createDiagnosticsReport } from '../../../src/diagnostics/report.js'
+import { seedPackagedUserData } from '../../../src/packaging/seed-user-data.js'
 
 // ─── PROJECT_ROOT ─────────────────────────────────────────────────────────────
 // dev:      src/main/ → src/ → robot-ui/ → robot-live-system/  (3 levels up)
@@ -25,6 +28,7 @@ function buildPath() {
 // ─── USER_DATA_DIR ────────────────────────────────────────────────────────────
 // 运行时可写数据（巡游清单、知识库文件）放此处，避免 Windows 安装目录写权限问题
 const USER_DATA_DIR = app.getPath('userData')
+const DIAGNOSTICS_DIR = app.isPackaged ? USER_DATA_DIR : join(PROJECT_ROOT, 'data')
 
 // 打包后所有可写文件放 userData，避免 Windows C:\Program Files\ 写权限问题
 const CONFIG_DIR = app.isPackaged
@@ -32,36 +36,9 @@ const CONFIG_DIR = app.isPackaged
   : join(PROJECT_ROOT, 'config')
 
 function seedUserData() {
-  // data/ 目录
-  const dataSrc = join(PROJECT_ROOT, 'data')
-  const dataDst = join(USER_DATA_DIR, 'data')
-  if (!existsSync(dataDst) && existsSync(dataSrc)) {
-    mkdirSync(dataDst, { recursive: true })
-    cpSync(dataSrc, dataDst, { recursive: true })
-    console.log('[main] 首次启动，已初始化用户数据目录:', dataDst)
-  }
-  // .env 配置文件：如果用户数据目录下不存在 .env，则从打包资源中拷贝默认 .env.example
-  if (app.isPackaged) {
-    const envDst = join(USER_DATA_DIR, '.env')
-    if (!existsSync(envDst)) {
-      const envSrc = join(PROJECT_ROOT, '.env.example')
-      if (existsSync(envSrc)) {
-        cpSync(envSrc, envDst)
-        console.log('[main] 首次启动，已拷贝默认 .env.example 配置文件至:', envDst)
-      }
-    }
-  }
-  // config/ 目录：仅复制初始配置文件（banned-words / llm-prompt），不覆盖用户已有内容
-  if (app.isPackaged) {
-    mkdirSync(CONFIG_DIR, { recursive: true })
-    for (const file of ['banned-words.txt', 'llm-system-prompt.txt', 'barrage-prompt-name.txt', 'barrage-prompt-general.txt']) {
-      const dst = join(CONFIG_DIR, file)
-      if (!existsSync(dst)) {
-        const src = join(PROJECT_ROOT, 'config', file)
-        if (existsSync(src)) cpSync(src, dst)
-      }
-    }
-  }
+  const result = seedPackagedUserData({ packaged: app.isPackaged, projectRoot: PROJECT_ROOT, userDataDir: USER_DATA_DIR })
+  if (result.dataCreated) console.log('[main] 首次启动，已初始化空白用户数据目录')
+  if (result.environmentCreated) console.log('[main] 首次启动，已初始化空白连接配置')
 }
 
 const BANNED_WORDS_PATH = join(CONFIG_DIR, 'banned-words.txt')
@@ -173,28 +150,12 @@ let _lastBackendExit = null
 let _uiPort = null
 
 // ─── backend.log 轮转 ─────────────────────────────────────────────────────────
-// 开着弹幕识别时日志约 280KB/小时，连播几天就是几十 MB。
-// 只在启动时检查大小是不够的——直播机器可能连续跑一周不重启，
-// 那样单个文件会一直涨下去。所以改成写入时检查：超过上限就轮转。
-// 用内存里的计数器累加，避免每写一行都去 statSync（1Hz 的系统调用没必要）。
-const LOG_MAX_BYTES = 5 * 1024 * 1024
-let _logBytes = null
-
-function appendLog(logPath, s) {
-  const str = String(s)
-  try {
-    if (_logBytes === null) {
-      _logBytes = existsSync(logPath) ? statSync(logPath).size : 0
-    }
-    if (_logBytes >= LOG_MAX_BYTES) {
-      renameSync(logPath, logPath + '.1')   // 只保留一份历史，诊断导出会把两份都带上
-      _logBytes = 0
-    }
-    // appendFileSync 是同步系统调用，写完立刻落盘，进程崩溃也不会丢数据
-    // createWriteStream / writeFileSync 都有内存缓冲，崩溃前来不及 flush 就截断
-    appendFileSync(logPath, str)
-    _logBytes += Buffer.byteLength(str)
-  } catch {}
+// 两段各 512 KiB，整个类别最多 1 MiB；队列有上限，异步批量写入。
+let _backendLog = null
+function appendLog(value) {
+  // Packaged mode has one main-process writer. Dev's backend owns its tee.
+  _backendLog ||= new RollingLog({ directory: DIAGNOSTICS_DIR, name: 'backend.log' })
+  _backendLog.append(value)
 }
 
 function startBackend() {
@@ -202,12 +163,11 @@ function startBackend() {
 
   _lastBackendExit = null
   _uiPort = null            // 重启后端会重新分配，先清掉旧值
-  _logBytes = null          // 重新读一次文件大小（外部可能删过日志）
 
   const entry   = join(PROJECT_ROOT, 'src/index.js')
   const logPath = join(USER_DATA_DIR, 'backend.log')
 
-  const log = (s) => appendLog(logPath, s)
+  const log = (s) => appendLog(s)
 
   log(`\n=== backend start ${new Date().toISOString()} ===\n`)
   log(`entry: ${entry}\n`)
@@ -220,6 +180,7 @@ function startBackend() {
       ...process.env,
       PROJECT_ROOT:        PROJECT_ROOT,
       USER_DATA_DIR:       USER_DATA_DIR,
+      BACKEND_LOG_OWNER:   'electron',
       DOTENV_CONFIG_PATH:  ENV_PATH,
       PATH:                buildPath(),
     },
@@ -234,11 +195,8 @@ function startBackend() {
     log('[out] ' + outDecoder.write(Buffer.isBuffer(d) ? d : Buffer.from(d)))
   })
 
-  // stderr 逐块直接落盘（和 stdout 一样）。原先是全部缓冲到流 close 再一次性写，
-  // 理由是"怕最后一个 chunk 来不及写"——但 data 事件没触发的 chunk 同样不在缓冲里，
-  // 而 appendFileSync 是同步写、落盘即安全，反而更抗崩；主进程被杀时缓冲会全丢。
-  // 缓冲还会随运行时间无上限增长（后端每秒都可能往 stderr 写东西）。
-  // 这里只额外保留一小段尾巴，给界面上的失败提示用。
+  // stderr 和 stdout 一样进入有上限的异步日志队列；这里只额外保留
+  // 少量错误尾部给启动失败提示。异常退出可能丢失最后尚未写入的数据。
   const STDERR_TAIL_MAX = 64 * 1024
   const errDecoder = new StringDecoder('utf8')
   let stderrTail = ''
@@ -442,93 +400,35 @@ app.on('before-quit', () => {
 // 目的：让非技术用户能一键把排障需要的信息存成一个文件发给开发者，
 // 而不是让对方去 %APPDATA% 里翻目录。后端崩了也能用（全在主进程里跑）。
 
-const LOG_TAIL_BYTES = 300 * 1024   // 只取日志末尾，保证文件小到能直接发出去
-
-// 只把文件末尾那一段读进内存。轮转只在后端启动时发生，长期不重启的机器
-// 日志可能远超 5MB，整份 readFileSync 进来就太吓人了
-function readLogTail(p) {
-  if (!existsSync(p)) return '(日志文件不存在)'
-  let fd
-  try {
-    const size    = statSync(p).size
-    const len     = Math.min(size, LOG_TAIL_BYTES)
-    const skipped = size - len
-    const buf     = Buffer.allocUnsafe(len)
-    fd = openSync(p, 'r')
-    readSync(fd, buf, 0, len, skipped)
-    return (skipped > 0 ? `…（已省略前 ${Math.round(skipped / 1024)} KB）\n` : '') + buf.toString('utf8')
-  } catch (e) {
-    return `(读取失败: ${e.message})`
-  } finally {
-    if (fd !== undefined) { try { closeSync(fd) } catch {} }
-  }
+async function buildDiagnosticsReport(includeBackendLogs = false) {
+  // A failed backend cannot answer a flush request. Persisted audio history is
+  // still exportable; never wait indefinitely on a live or crashed process.
+  if (_backendLog) await Promise.race([_backendLog.flush(), new Promise(resolve => setTimeout(resolve, 500))])
+  return createDiagnosticsReport({
+    directory: DIAGNOSTICS_DIR, includeBackendLogs,
+    metadata: {
+      appVersion: app.getVersion(), electronVersion: process.versions.electron,
+      nodeVersion: process.versions.node, platform: process.platform, arch: process.arch,
+      packaged: app.isPackaged,
+      backendStatus: !app.isPackaged ? 'external' : (_backendProcess ? 'running' : (_lastBackendExit ? 'exited' : 'not-running')),
+      backendEntryExists: existsSync(join(PROJECT_ROOT, 'src/index.js')),
+      dependenciesExist: existsSync(join(PROJECT_ROOT, 'node_modules')),
+      ffplayBundled: existsSync(join(PROJECT_ROOT, 'ffplay.exe')),
+    },
+  })
 }
 
-function buildDiagnosticsReport() {
-  const os      = require('os')
-  const logPath = join(USER_DATA_DIR, 'backend.log')
-  const entry   = join(PROJECT_ROOT, 'src/index.js')
-  const L       = []
-
-  L.push('===== 机器人直播控制台 · 诊断信息 =====')
-  L.push(`生成时间   : ${new Date().toLocaleString('zh-CN', { hour12: false })}`)
-  L.push(`应用版本   : ${app.getVersion()}`)
-  L.push(`系统       : ${process.platform} ${os.release()} ${process.arch}`)
-  L.push(`Electron   : ${process.versions.electron}  Node: ${process.versions.node}`)
-  L.push(`打包模式   : ${app.isPackaged}`)
-  L.push('')
-  L.push('----- 路径检查 -----')
-  L.push(`PROJECT_ROOT  : ${PROJECT_ROOT}`)
-  L.push(`USER_DATA_DIR : ${USER_DATA_DIR}`)
-  L.push(`后端入口      : ${entry}  存在: ${existsSync(entry)}`)
-  L.push(`.env          : ${ENV_PATH}  存在: ${existsSync(ENV_PATH)}`)
-  L.push(`data 目录     : ${join(USER_DATA_DIR, 'data')}  存在: ${existsSync(join(USER_DATA_DIR, 'data'))}`)
-  for (const f of ['PP-OCRv6_medium_det.onnx', 'PP-OCRv6_medium_rec.onnx', 'ppocrv6_dict.txt']) {
-    L.push(`OCR 模型      : ${f}  存在: ${existsSync(join(PROJECT_ROOT, 'data/models', f))}`)
-  }
-  L.push(`ffplay.exe    : 存在: ${existsSync(join(PROJECT_ROOT, 'ffplay.exe'))}`)
-  L.push(`backend 依赖  : ${existsSync(join(PROJECT_ROOT, 'node_modules'))}`)
-  L.push('')
-  L.push('----- 后端进程状态 -----')
-  if (!app.isPackaged) {
-    L.push('开发模式：后端由开发者用 npm start 手动运行，本应用不托管它')
-  } else if (_backendProcess) {
-    L.push('后端进程：运行中')
-  } else if (_lastBackendExit) {
-    L.push(_lastBackendExit.code == null
-      ? '后端进程：没能启动起来'
-      : `后端进程：已退出，退出码 ${_lastBackendExit.code}`)
-    if (_lastBackendExit.code === 3) L.push('→ 退出码 3 = 控制台通道无法监听（端口占用会自动换端口，不属于这一类）')
-    L.push('最后的错误输出:')
-    L.push(_lastBackendExit.stderr || '(无)')
-  } else {
-    L.push('后端进程：未运行（没有捕获到退出事件）')
-  }
-  L.push('')
-  L.push('----- 配置检查（.env 里的密钥值已屏蔽，只显示是否填写）-----')
+ipcMain.handle('export-diagnostics', async (_event, options = {}) => {
   try {
-    const all = existsSync(ENV_PATH) ? parseEnv(readFileSync(ENV_PATH, 'utf-8')) : {}
-    for (const k of PUBLIC_ENV_KEYS)    L.push(`${k} = ${all[k] ?? ''}`)
-    for (const k of SENSITIVE_ENV_KEYS) L.push(`${k} = ${all[k] ? '已填写' : '【未填写】'}`)
-  } catch (e) {
-    L.push(`读取 .env 失败: ${e.message}`)
-  }
-  L.push('')
-  L.push(`----- backend.log（${logPath}）-----`)
-  L.push('（以下为后端原始输出，未做过滤；发送前如有顾虑请自行检查）')
-  L.push(readLogTail(logPath))
-  const rotated = logPath + '.1'
-  if (existsSync(rotated)) {
-    L.push('')
-    L.push(`----- 上一轮日志 backend.log.1 -----`)
-    L.push(readLogTail(rotated))
-  }
-
-  return L.join('\n')
-}
-
-ipcMain.handle('export-diagnostics', async () => {
-  try {
+    const includeBackendLogs = options?.includeBackendLogs === true
+    if (includeBackendLogs) {
+      const answer = await dialog.showMessageBox({
+        type: 'warning', buttons: ['取消', '包含后台日志并继续'], defaultId: 0, cancelId: 0,
+        title: '后台日志可能包含隐私内容',
+        message: '原始后台日志可能含播报文字、OCR、文档内容、文件路径或连接地址。请在发送给他人前检查文件。',
+      })
+      if (answer.response !== 1) return { ok: false, error: '已取消' }
+    }
     const now  = new Date()
     const pad  = (n) => String(n).padStart(2, '0')
     const name = `诊断日志-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.txt`
@@ -542,7 +442,8 @@ ipcMain.handle('export-diagnostics', async () => {
 
     // \r\n + BOM：用户大概率直接用 Windows 记事本打开。
     // 旧版记事本（Win10 1903 之前 / Win7）不加 BOM 会把中文显示成乱码
-    writeFileSync(filePath, '﻿' + buildDiagnosticsReport().replace(/\r?\n/g, '\r\n'), 'utf-8')
+    const report = await buildDiagnosticsReport(includeBackendLogs)
+    writeFileSync(filePath, '﻿' + report.replace(/\r?\n/g, '\r\n'), 'utf-8')
     const { shell } = require('electron')
     shell.showItemInFolder(filePath)        // 直接在资源管理器里高亮这个文件
     return { ok: true, path: filePath }
@@ -654,7 +555,7 @@ _overlayWin = new BrowserWindow({
   x: 0,
   y: 0,
   transparent: true,
-  backgroundColor: '#4ade8033', // Exact light green veil color (20% opacity)
+  backgroundColor: '#00000000', // Transparent native background; the overlay page draws the green tint.
   frame: false,
   hasShadow: false,
   alwaysOnTop: true,

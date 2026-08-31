@@ -84,7 +84,7 @@ test('MP3 file is converted to paced 16 kHz PCM frames', async () => {
       assert.ok(frame.buffer.length > 0)
       assert.ok(frame.buffer.length <= ROBOT_AUDIO_FORMAT.chunkBytes)
     }
-    router.destroy()
+    await router.destroy()
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -97,11 +97,13 @@ test('foreground audio preempts and then restores background audio', async () =>
     const foregroundFile = makeTone(dir, 'foreground.mp3', 880, 0.2)
     const { router, robot } = makeRouter(dir)
 
-    const background = router.playFile({ name: 'background' }, backgroundFile)
+    const backgroundAudio = await router.prepareFile(backgroundFile)
+    const foregroundAudio = await router.prepareFile(foregroundFile)
+    const background = router.playPrepared({ name: 'background' }, backgroundAudio)
     await delay(110)
     const beforePreemption = robot.frames.length
 
-    const foreground = router.playFile({ name: 'foreground' }, foregroundFile)
+    const foreground = router.playPrepared({ name: 'foreground' }, foregroundAudio)
     await foreground.promise
     const afterForeground = robot.frames.length
     await background.promise
@@ -111,7 +113,9 @@ test('foreground audio preempts and then restores background audio', async () =>
     assert.ok(beforePreemption >= 3 && beforePreemption <= 7)
     assert.ok(foregroundFrames >= 9 && foregroundFrames <= 12)
     assert.ok(resumedFrames >= 23, 'background audio did not resume')
-    router.destroy()
+    backgroundAudio.release()
+    foregroundAudio.release()
+    await router.destroy()
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -142,7 +146,7 @@ test('streaming TTS audio stops sending while paused and resumes in place', asyn
     ))
     assert.ok(Math.max(...gaps) >= 190, 'pause was not preserved in send timing')
     assert.ok(robot.frames.length >= 20 && robot.frames.length <= 22)
-    router.destroy()
+    await router.destroy()
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
