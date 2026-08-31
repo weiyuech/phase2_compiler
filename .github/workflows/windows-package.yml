@@ -1,0 +1,255 @@
+name: Verify and package Windows
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: 'Exact test tag; empty means checks only'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            robot-ui/package-lock.json
+
+      - name: Install Root Dependencies
+        run: npm ci
+
+      - name: Install UI Dependencies
+        run: |
+          cd robot-ui
+          npm ci
+
+      - name: Backend and UI regression tests
+        shell: pwsh
+        run: |
+          $tests = @(Get-ChildItem test/*.test.js, robot-ui/test/*.test.mjs | ForEach-Object { $_.FullName })
+          node --test --test-concurrency=4 @tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build and Package Electron App
+        # Explicit x64 target: use Windows native dependencies from this runner.
+        run: |
+          cd robot-ui
+          node scripts/gen-icon.mjs
+          node scripts/prepare-backend.mjs
+          npx electron-vite build
+          npx electron-builder --win --x64 --publish never
+
+      - name: Verify packaged clean defaults and resource allowlist
+        run: node robot-ui/scripts/prepare-package-seed.mjs --verify release/win-unpacked/resources/backend
+
+      - name: Verify packaged Electron audio and OCR runtime
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'release/win-unpacked/robot-live-ui.exe').Path
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          try {
+            & $exe robot-ui/scripts/verify-packaged-runtime.mjs --backend-root release/win-unpacked/resources/backend --report release/packaged-runtime.json
+            if ($LASTEXITCODE -ne 0) { throw 'Packaged audio/OCR runtime verification failed' }
+          } finally {
+            Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+          }
+
+      # 打包产物里少了 native 模块或资源时，安装包依然会"构建成功"，
+      # 用户装上之后才发现后端起不来。这两步就是在 CI 里替用户先装一次、跑一次。
+      # 已在 run #30 验证可稳定通过，因此设为硬失败：起不来的包不允许发布。
+      - name: Verify packaged tree contains required files
+        shell: pwsh
+        run: |
+          $root = "release/win-unpacked/resources/backend"
+          $required = @(
+            "$root/src/index.js",
+            "$root/data/models/PP-OCRv6_medium_det.onnx",
+            "$root/data/models/PP-OCRv6_medium_rec.onnx",
+            "$root/data/models/ppocrv6_dict.txt",
+            "$root/ffplay.exe",
+            "$root/node_modules/ffmpeg-static/ffmpeg.exe",
+            "$root/node_modules/ws",
+            "$root/node_modules/onnxruntime-node/bin/napi-v6/win32/x64",
+            "$root/node_modules/sharp"
+          )
+          $missing = @()
+          foreach ($p in $required) { if (-not (Test-Path $p)) { $missing += $p } }
+          if ($missing.Count -gt 0) {
+            Write-Host "缺少以下打包内容:"; $missing | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
+          Write-Host "打包内容检查通过"
+
+      # 验证实际应用/后端连接。音频解码和 OCR 另由 native 检查验证，
+      # 后端就绪本身不代表 OCR 模型已成功初始化。
+      - name: Smoke test — packaged app must start its backend
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "release/win-unpacked/robot-live-ui.exe").Path
+          Write-Host "exe: $exe"
+
+          # 捕获 Electron 自己的输出：应用如果在 whenReady 之前就崩了，
+          # backend.log 根本不会被创建，只有这里能看到原因
+          $out = Join-Path $env:RUNNER_TEMP "app-stdout.txt"
+          $err = Join-Path $env:RUNNER_TEMP "app-stderr.txt"
+          $proc = Start-Process $exe -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          Write-Host "started pid=$($proc.Id)"
+
+          # userData 目录名来自 package.json 的 name（robot-live-ui），
+          # 不是 productName（机器人直播控制台）——第一版就是写错了这个路径，
+          # 导致"应用其实跑得好好的"被误判成"后端起不来"。
+          # 这里不写死名字，直接在 APPDATA 下找，改名字也不会失效。
+          $log = $null
+          $deadline = (Get-Date).AddSeconds(120)
+          $ok = $false
+          while ((Get-Date) -lt $deadline) {
+            if (-not $log) {
+              $found = Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 2 -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+              if ($found) { $log = $found.FullName; Write-Host "backend.log: $log" }
+            }
+            if ($log -and (Test-Path $log)) {
+              if (Select-String -Path $log -Pattern '控制台通道已就绪' -Quiet -ErrorAction SilentlyContinue) { $ok = $true; break }
+              if (Select-String -Path $log -Pattern 'ERR_MODULE_NOT_FOUND|FATAL|process exited with code' -Quiet -ErrorAction SilentlyContinue) { break }
+            }
+            if ($proc.HasExited) { Write-Host "应用进程已退出，退出码 $($proc.ExitCode)"; break }
+            Start-Sleep -Seconds 3
+          }
+
+          Write-Host "----- 进程状态 -----"
+          Write-Host "HasExited: $($proc.HasExited)"
+          if ($proc.HasExited) { Write-Host "ExitCode: $($proc.ExitCode)" }
+
+          Write-Host "----- APPDATA 下实际创建的目录 -----"
+          Get-ChildItem $env:APPDATA -Directory -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Name | ForEach-Object { Write-Host "  $_" }
+
+          Write-Host "----- 任意位置的 backend.log -----"
+          Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 3 -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "found: $($_.FullName)"; Get-Content $_.FullName }
+
+          foreach ($f in @($out, $err)) {
+            if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+              Write-Host "----- $(Split-Path $f -Leaf) -----"; Get-Content $f
+            }
+          }
+
+          # 后端就绪之后，界面还需要一点时间才会连上来，
+          # 所以这里再等一轮，别把"还没连"误判成"连不上"
+          $uiConnected = $false
+          if ($ok) {
+            $uiDeadline = (Get-Date).AddSeconds(60)
+            while ((Get-Date) -lt $uiDeadline) {
+              if ((Test-Path $log) -and (Select-String -Path $log -Pattern '界面已连接' -Quiet -ErrorAction SilentlyContinue)) { $uiConnected = $true; break }
+              Start-Sleep -Seconds 3
+            }
+          }
+
+          Get-Process robot-live-ui -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not $ok) { Write-Host "后端未能在 120 秒内就绪"; exit 1 }
+          # 后端起来了还不够：界面也得真的连上。
+          # "界面已连接" 证明窗口渲染成功并和后端通上了话。
+          if (-not $uiConnected) { Write-Host "后端起来了，但界面没有连上来"; exit 1 }
+          Write-Host "后端启动成功，界面已连接"
+
+      # 端口冲突的兜底分支平时不会跑到（3001 通常是空闲的），
+      # 所以这里主动占住 3001，逼它走一次自动换端口的路径。
+      #
+      # run #38 已在 Windows 上完整验证通过：占住 3001 -> 后端换到 60846 ->
+      # 主进程收到新端口 -> 界面连上。因此设为硬失败。
+      - name: Smoke test — backend survives a taken port 3001
+        shell: pwsh
+        run: |
+          # backend.log 是一直追加的，上一步的内容还在里面。
+          # 不先清掉的话，下面查"已就绪"会立刻命中上一次运行留下的那行，
+          # 于是还没等新实例启动就误判为成功（run #33 就是这么挂的）。
+          # GitHub 的 pwsh 默认 $ErrorActionPreference='Stop'：对着一个不存在的文件
+          # 调 Select-String 会直接终止整个脚本。所以统一走这个helper，先查存在性。
+          function Test-LogPattern($path, $pattern) {
+            if (-not $path) { return $false }
+            if (-not (Test-Path $path)) { return $false }
+            return [bool](Select-String -Path $path -Pattern $pattern -Quiet -ErrorAction SilentlyContinue)
+          }
+
+          $old = (Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 2 -ErrorAction SilentlyContinue |
+                  Select-Object -First 1).FullName
+          if ($old) { Remove-Item $old -Force; Write-Host "已清空上一轮日志: $old" }
+          $log = $null      # 文件已删除，路径必须一并清空，否则后面会对着不存在的路径查找
+
+          # ExclusiveAddressUse=true：.NET 默认为 false，那样 Windows 允许别的
+          # 进程共享同一端口，占用就不是真的占用。
+          $squatter = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), 3001)
+          $squatter.ExclusiveAddressUse = $true
+          $squatter.Start()
+          Write-Host "已独占 127.0.0.1:3001"
+
+          $exe = (Resolve-Path "release/win-unpacked/robot-live-ui.exe").Path
+          $proc = Start-Process $exe -PassThru
+          $deadline = (Get-Date).AddSeconds(120)
+          $ok = $false
+          while ((Get-Date) -lt $deadline) {
+            if (-not $log -or -not (Test-Path $log)) {
+              $found = Get-ChildItem $env:APPDATA -Recurse -Filter backend.log -Depth 2 -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+              $log = if ($found) { $found.FullName } else { $null }
+            }
+            if (Test-LogPattern $log '控制台通道已就绪') { $ok = $true; break }
+            if ($proc.HasExited) { Write-Host "应用已退出，退出码 $($proc.ExitCode)"; break }
+            Start-Sleep -Seconds 3
+          }
+
+          # 后端就绪后再等界面连上来（换端口的场景下这一步才是真正的验证）
+          $uiConnected = $false
+          if ($ok) {
+            $uiDeadline = (Get-Date).AddSeconds(60)
+            while ((Get-Date) -lt $uiDeadline) {
+              if (Test-LogPattern $log '界面已连接') { $uiConnected = $true; break }
+              Start-Sleep -Seconds 3
+            }
+          }
+
+          if ($log) { Write-Host "----- backend.log -----"; Get-Content $log }
+          Get-Process robot-live-ui -ErrorAction SilentlyContinue | Stop-Process -Force
+          $squatter.Stop()
+
+          if (-not $ok) { Write-Host "端口被占用时后端未能就绪"; exit 1 }
+          # 必须确认它真的换了端口，而不是"碰巧 3001 又空了"
+          if (-not (Test-LogPattern $log '改用系统自动分配的空闲端口')) {
+            Write-Host "后端就绪了，但没有走到换端口分支——本次未真正验证兜底逻辑"; exit 1
+          }
+          # 最关键的一条：界面必须也连上了新端口。
+          # "界面已连接" 由后端在收到 UI 连接时打印，
+          # 出现它就说明整条链路在 Windows 上打通了：
+          # 后端选端口 → parentPort → 主进程 → IPC → 渲染进程 → 连上并发指令。
+          if (-not $uiConnected) { Write-Host "后端换了端口，但界面没有连上来——端口传递链路有问题"; exit 1 }
+          Write-Host "端口冲突兜底验证通过（界面已连接到新端口）"
+
+      - name: Upload Build Artifacts
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          path: |
+            release/*.exe
+            release/packaged-runtime.json
+
+      - name: Deliver exact test tag to a new draft release
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: node robot-ui/scripts/test-release.mjs
