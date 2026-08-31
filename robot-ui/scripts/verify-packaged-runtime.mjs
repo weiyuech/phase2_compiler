@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /**
- * Execute with the exact installed/unpacked app binary (not system Node):
- * $env:ELECTRON_RUN_AS_NODE='1'
- * & "$unpacked\robot-live-ui.exe" "robot-ui\scripts\verify-packaged-runtime.mjs" --backend-root "$unpacked\resources\backend" --report "$artifacts\packaged-runtime.json"
+ * Execute with the exact installed/unpacked app binary (not system Node).
+ * Windows GUI executables require Start-Process -Wait -PassThru before reading
+ * their exit code/report; the full quoted invocation is in windows-package.yml.
+ * Arguments: <this script> --backend-root <resources/backend> --report <json>.
+ * The launcher sets ELECTRON_RUN_AS_NODE=1 only for the check process.
  *
  * Never starts the backend, contacts providers/robots, captures screens or plays
  * audio. --local-preflight cannot produce a release-passing report.

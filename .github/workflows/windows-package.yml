@@ -62,11 +62,21 @@ jobs:
         shell: pwsh
         run: |
           $exe = (Resolve-Path 'release/win-unpacked/robot-live-ui.exe').Path
+          $checker = (Resolve-Path 'robot-ui/scripts/verify-packaged-runtime.mjs').Path
+          $backend = (Resolve-Path 'release/win-unpacked/resources/backend').Path
+          $report = Join-Path (Resolve-Path 'release').Path 'packaged-runtime.json'
+          $out = Join-Path $env:RUNNER_TEMP 'native-check-stdout.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'native-check-stderr.txt'
           $env:ELECTRON_RUN_AS_NODE = '1'
           try {
-            & $exe robot-ui/scripts/verify-packaged-runtime.mjs --backend-root release/win-unpacked/resources/backend --report release/packaged-runtime.json
-            if (Test-Path 'release/packaged-runtime.json') { Get-Content 'release/packaged-runtime.json' }
-            if ($LASTEXITCODE -ne 0) { throw 'Packaged audio/OCR runtime verification failed' }
+            # Electron is a GUI executable: the call operator can return before
+            # it exits. Wait for this exact process, not a stale LASTEXITCODE.
+            $arguments = @(('"' + $checker + '"'), '--backend-root', ('"' + $backend + '"'), '--report', ('"' + $report + '"'))
+            $native = Start-Process -FilePath $exe -ArgumentList $arguments -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+            foreach ($file in @($out, $err, $report)) { if (Test-Path $file) { Get-Content $file } }
+            if ($native.ExitCode -ne 0) { throw "Packaged audio/OCR runtime exited with code $($native.ExitCode)" }
+            if (-not (Test-Path $report)) { throw 'Packaged runtime report is missing' }
+            if ((Get-Content $report -Raw | ConvertFrom-Json).status -ne 'passed') { throw 'Packaged audio/OCR checks did not pass' }
           } finally {
             Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
           }
