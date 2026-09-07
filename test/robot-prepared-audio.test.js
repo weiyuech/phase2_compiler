@@ -63,6 +63,12 @@ function fakeDecode(router, bytes = 1280) {
   return () => calls
 }
 
+function pcm16(...samples) {
+  const result = Buffer.alloc(samples.length * 2)
+  samples.forEach((sample, index) => result.writeInt16LE(sample, index * 2))
+  return result
+}
+
 async function until(predicate) {
   const deadline = performance.now() + 3000
   while (!predicate()) {
@@ -214,6 +220,86 @@ test('one monotonic timer, actual short-tail duration, and shared sentence seque
   await second.promise
   assert.deepEqual(h.robot.frames.map(f => f.seq), [7, 8, 9, 10])
   assert.equal(sequenceState.nextSeq, 11)
+  prepared.release()
+})
+
+test('robot volume defaults legacy config to 100 and validates and persists its own setting', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'robot-volume-config-test-'))
+  await writeFile(join(directory, 'output.json'), JSON.stringify({ destination: 'robot' }))
+  const robot = new Robot()
+  const router = new AudioOutputRouter({ robot, filePath: join(directory, 'output.json'), ffmpegPath: ffmpeg })
+  t.after(async () => { await router.destroy(); await rm(directory, { recursive: true, force: true }) })
+  assert.deepEqual(router.getConfig(), { destination: 'robot', robotVolumePercent: 100 })
+  const generation = router.generation
+  assert.deepEqual(router.setConfig({ robotVolumePercent: 73 }), { destination: 'robot', robotVolumePercent: 73 })
+  assert.equal(router.generation, generation)
+  assert.deepEqual(JSON.parse(await readFile(join(directory, 'output.json'), 'utf8')),
+    { destination: 'robot', robotVolumePercent: 73 })
+  for (const robotVolumePercent of [-1, 20.5, 151, '100']) {
+    assert.throws(() => router.setConfig({ robotVolumePercent }), /0 到 150/)
+  }
+  router.setConfig({ destination: 'local' })
+  const localGeneration = router.generation
+  router.setConfig({ robotVolumePercent: 40 })
+  assert.equal(router.generation, localGeneration, 'local playback generation is not affected by robot volume')
+})
+
+test('robot gain is exact at 100 percent and handles zero, half and saturated boost without mutating prepared PCM', async t => {
+  const clock = fakeClock()
+  const h = await harness(t, clock)
+  const original = pcm16(10000, -10000, 30000, -30000, 12345)
+  h.router._decode = async (_source, write) => write(original)
+  const prepared = await h.router.prepareBuffer(Buffer.from('volume-source'))
+
+  async function playAt(percent) {
+    h.robot.frames = []
+    h.router.setConfig({ robotVolumePercent: percent })
+    const session = h.router.playPrepared({}, prepared, { managed: true })
+    await session.ready
+    clock.advance(prepared.durationMs)
+    await session.promise
+    return Buffer.concat(h.robot.frames.map(frame => frame.buffer))
+  }
+
+  assert.deepEqual(await playAt(100), original)
+  assert.deepEqual(await playAt(0), pcm16(0, 0, 0, 0, 0))
+  assert.deepEqual(await playAt(50), pcm16(5000, -5000, 15000, -15000, 6173))
+  assert.deepEqual(await playAt(150), pcm16(15000, -15000, 32767, -32768, 18518))
+  assert.deepEqual(original, pcm16(10000, -10000, 30000, -30000, 12345))
+  assert.equal(h.packets.filter(packet => packet.stage === 'scheduled_send').at(-1).clippedSamples, 2)
+  prepared.release()
+})
+
+test('active robot volume update ramps for 100ms without cancelling or resetting sequence', async t => {
+  const clock = fakeClock()
+  const h = await harness(t, clock)
+  const samples = Array.from({ length: 3200 }, () => 10000)
+  h.router._decode = async (_source, write) => write(pcm16(...samples))
+  const prepared = await h.router.prepareBuffer(Buffer.from('ramp-source'))
+  const session = h.router.playPrepared({}, prepared, { managed: true })
+  await session.ready
+  clock.advance(0)
+  const generation = h.router.generation
+  h.router.setConfig({ destination: 'robot', robotVolumePercent: 0 })
+  assert.equal(h.router.generation, generation)
+  assert.equal(session.isActive(), true)
+  clock.advance(40)
+  session.pause('host')
+  const beforePause = h.robot.frames.length
+  clock.advance(500)
+  assert.equal(h.robot.frames.length, beforePause, 'volume ramp must not advance while playback is paused')
+  session.resume('host')
+  clock.advance(80)
+  assert.equal(session.isActive(), true)
+  assert.deepEqual(h.robot.frames.map(frame => frame.seq), [1, 2, 3, 4, 5, 6, 7, 8])
+  assert.equal(h.robot.frames[0].buffer.readInt16LE(0), 10000)
+  assert.equal(h.robot.frames[1].buffer.readInt16LE(0), 10000)
+  assert.ok(h.robot.frames[5].buffer.readInt16LE(638) < 10)
+  assert.ok(h.robot.frames[6].buffer.every(byte => byte === 0))
+  clock.advance(60)
+  assert.equal((await session.promise).ok, true)
+  assert.deepEqual(h.robot.frames.map(frame => frame.seq), Array.from({ length: 10 }, (_, index) => index + 1))
+  assert.ok(h.events.some(event => event.type === 'robot_volume_change' && event.robotVolumePercent === 0 && event.ramped))
   prepared.release()
 })
 

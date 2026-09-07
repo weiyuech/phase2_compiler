@@ -47,7 +47,12 @@ contextBridge.exposeInMainWorld('api', {
   // Barrage Overlay
   openBarrageOverlay: () => ipcRenderer.invoke('open-barrage-overlay'),
   closeBarrageOverlay: (rect) => ipcRenderer.invoke('close-barrage-overlay', rect),
-  onBarrageRegionSelected: (callback) => ipcRenderer.on('barrage-region-selected', (_event, rect) => callback(rect)),
+  onBarrageRegionSelected: (callback) => {
+    const listener = (_event, rect) => callback(rect)
+    ipcRenderer.on('barrage-region-selected', listener)
+    return () => ipcRenderer.removeListener('barrage-region-selected', listener)
+  },
   captureScreenRegion: (rect) => ipcRenderer.invoke('capture-screen-region', rect),
-  getScreenSourceId: () => ipcRenderer.invoke('get-screen-source-id')
+  getScreenSourceId: () => ipcRenderer.invoke('get-screen-source-id'),
+  openScreenRecordingSettings: () => ipcRenderer.invoke('open-screen-recording-settings')
 })

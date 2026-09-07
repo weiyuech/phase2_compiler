@@ -60,10 +60,25 @@ can introduce sentence gaps: this is not a sample-gapless guarantee.
   protocol, continuous sequence within an utterance, pause/resume position and
   source-session conventions. No Python runtime, second audio socket or invented
   receiver-flush command is introduced.
+- Robot volume is applied only at the final PCM send boundary. `100%` is bit-exact;
+  `0–150%` changes use signed 16-bit saturation and a short live ramp without
+  cancelling playback, resetting sequence numbers or changing prepared caches.
 - WebSocket write callbacks and backlog are measured; optional frame compression
   is disabled. The existing 256 KiB backlog cutoff remains a failure limit, not a
   latency target. Network stalls, disk read-ahead waits and event-loop stalls can
   still interrupt delivery. The socket remains on the existing event loop.
+
+OCR image processing runs in one persistent worker with bounded ONNX/Sharp native
+parallelism. It executes one frame at a time and retains at most one newer waiting
+frame; repeated region selection, stop and reconnect use generation guards so stale
+results and capture loops cannot restart. OCR pauses new inference while a barrage
+reply is audibly playing, and its downloadable text log uses bounded asynchronous
+writes rather than blocking the robot packet scheduler.
+
+`onnxruntime-node` is intentionally pinned to `1.23.2`: later published packages
+omit the prebuilt macOS Intel (`darwin/x64`) binding. The same N-API package retains
+the Windows x64 binding used by the installer, which is independently exercised by
+the packaged-runtime gate. Do not widen this pin without testing both platforms.
 
 ## Exporting a choppiness report
 

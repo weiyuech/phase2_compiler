@@ -91,12 +91,13 @@ test('socket completion measurements never double-count scheduled packets', asyn
   const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false })
   t.after(() => diagnostics.destroy())
   for (let seq = 1; seq <= 3; seq++) {
-    diagnostics.packet({ sessionId: 7, seq, bytes: 640, stage: 'scheduled_send', gapMs: 20, latenessMs: 2 })
+    diagnostics.packet({ sessionId: 7, seq, bytes: 640, stage: 'scheduled_send', gapMs: 20, latenessMs: 2,
+      robotVolumePercent: 150, clippedSamples: seq })
     diagnostics.packet({ sessionId: 7, seq, bytes: 640, stage: 'socket_write', writeMs: 4, bufferedAmount: 200,
       payloadBytes: 950, staleConnection: seq === 3, failed: seq === 3 })
   }
   diagnostics.event('pause', { reason: 'host' })
-  diagnostics.packet({ sessionId: 7, seq: 4, bytes: 640, stage: 'scheduled_send', gapMs: 2000 })
+  diagnostics.packet({ sessionId: 7, seq: 4, bytes: 640, stage: 'scheduled_send', gapMs: 2000, clippedSamples: 4 })
   const totals = diagnostics.snapshot().totals
   assert.equal(totals.frames, 4)
   assert.equal(totals.bytes, 2560)
@@ -107,12 +108,14 @@ test('socket completion measurements never double-count scheduled packets', asyn
   assert.equal(totals.maxSendCallbackMs, 4)
   assert.equal(totals.maxBufferedBytes, 200)
   assert.equal(totals.maxGapMs, 20)
+  assert.equal(totals.clippedSamples, 10)
   await diagnostics.flush()
   const summary = (await readAudioHistory({ directory })).find(event => event.type === 'packet-summary')
   assert.equal(summary.frames, 4)
   assert.equal(summary.socketWrites, 3)
   assert.equal(summary.staleWrites, 1)
   assert.equal(summary.p99GapMs, 20)
+  assert.equal(summary.clippedSamples, 10)
 })
 
 test('opaque utterance correlation survives different sentence sessions and bounded ID eviction', async t => {

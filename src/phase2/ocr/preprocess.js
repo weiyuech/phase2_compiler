@@ -9,7 +9,9 @@ const MEAN = [0.5, 0.5, 0.5];
 const STD = [0.5, 0.5, 0.5];
 
 export async function preprocessForDetection(imageBuffer) {
-  const { info } = await sharp(imageBuffer)
+  // Decode the PNG once. The raw pixels are reused for detector resizing and
+  // every recognition crop in the worker.
+  const { data: sourceData, info } = await sharp(imageBuffer)
     .removeAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
@@ -21,9 +23,10 @@ export async function preprocessForDetection(imageBuffer) {
   const targetW = Math.max(32, Math.round((width * ratio) / 32) * 32);
   const targetH = Math.max(32, Math.round((height * ratio) / 32) * 32);
 
-  const resizedData = await sharp(imageBuffer)
+  const resizedData = await sharp(sourceData, {
+    raw: { width, height, channels: info.channels }
+  })
     .resize(targetW, targetH)
-    .removeAlpha()
     .raw()
     .toBuffer();
 
@@ -43,23 +46,29 @@ export async function preprocessForDetection(imageBuffer) {
     originalWidth: width,
     originalHeight: height,
     resizedWidth: targetW,
-    resizedHeight: targetH
+    resizedHeight: targetH,
+    sourceData,
+    sourceChannels: info.channels
   };
 }
 
-export async function preprocessForRecognition(imageBuffer) {
+export async function preprocessForRecognition(imageBuffer, { raw = null, extract = null } = {}) {
   const targetH = 48;
-  const metadata = await sharp(imageBuffer).metadata();
+  const metadata = raw || await sharp(imageBuffer).metadata();
 
   if (!metadata.width || !metadata.height) {
     throw new Error('Cannot read OCR image dimensions');
   }
 
   const maxW = parseInt(process.env.OCR_REC_MAX_WIDTH || '1920', 10);
-  let targetW = Math.round((metadata.width * targetH) / metadata.height);
+  const sourceWidth = extract?.width || metadata.width;
+  const sourceHeight = extract?.height || metadata.height;
+  let targetW = Math.round((sourceWidth * targetH) / sourceHeight);
   targetW = Math.max(16, Math.min(maxW, targetW));
 
-  const resizedData = await sharp(imageBuffer)
+  let pipeline = raw ? sharp(imageBuffer, { raw }) : sharp(imageBuffer);
+  if (extract) pipeline = pipeline.extract(extract);
+  const resizedData = await pipeline
     .resize(targetW, targetH)
     .removeAlpha()
     .raw()

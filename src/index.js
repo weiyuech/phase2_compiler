@@ -22,6 +22,7 @@ import { createKnowledgeBaseProvider } from './knowledge/index.js'
 import { LLMRewriter }                 from './llm/index.js'
 import { TTSEngine }                   from './tts/index.js'
 import { AudioOutputRouter }           from './tts/audio-output-router.js'
+import { applyAudioOutputConfig }      from './tts/audio-output-config.js'
 import { SpeechCoordinator }           from './tts/speech-coordinator.js'
 import { AudioDiagnostics }            from './diagnostics/audio-diagnostics.js'
 import { startBackendLogCapture }      from './diagnostics/backend-log.js'
@@ -72,7 +73,7 @@ const audioOutput = new AudioOutputRouter({
   filePath: join(DATA_DIR, 'audio-output.json'),
   diagnostics: audioDiagnostics,
 })
-audioDiagnostics.event('runtime', { destination: audioOutput.getConfig().destination, connected: robot.isConnected() })
+audioDiagnostics.event('runtime', { ...audioOutput.getConfig(), connected: robot.isConnected() })
 
 const speechCoordinator = new SpeechCoordinator({ diagnostics: audioDiagnostics })
 const tts = new TTSEngine({ audioOutput, coordinator: speechCoordinator, role: 'cruise', diagnostics: audioDiagnostics })
@@ -660,16 +661,22 @@ uiBridge.on('onGetAudioOutputConfig', (reply) => {
 
 uiBridge.on('onSetAudioOutputConfig', (config) => {
   try {
-    // Never leave a previous destination playing after the user switches.
-    audioOutputGeneration++
-    speechCoordinator.cancelAll()
-    tts.stop()
-    barrageTts.stop()
-    transitAudio.stop()
-    transitTts.stop()
-    phase2.barrageManager?.cancelPendingSpeech?.()
-    const saved = audioOutput.setConfig(config)
-    audioDiagnostics.event('destination-change', { destination: saved.destination, generation: audioOutputGeneration })
+    let destinationChanged = false
+    const saved = applyAudioOutputConfig({ audioOutput, config, onDestinationChange: () => {
+      // Never leave a previous destination playing after the user switches.
+      // Volume-only changes are applied by the router without cancelling speech.
+      destinationChanged = true
+      audioOutputGeneration++
+      speechCoordinator.cancelAll()
+      tts.stop()
+      barrageTts.stop()
+      transitAudio.stop()
+      transitTts.stop()
+      phase2.barrageManager?.cancelPendingSpeech?.()
+    } })
+    if (destinationChanged) {
+      audioDiagnostics.event('destination-change', { destination: saved.destination, generation: audioOutputGeneration })
+    }
     uiBridge.broadcast('AUDIO_OUTPUT_CONFIG', {
       ...saved,
       robotConnected,
@@ -803,7 +810,7 @@ async function shutdown() {
   const audioCleanup = audioOutput.destroy()
   robot.stop()
   await Promise.race([
-    Promise.allSettled([audioCleanup, audioDiagnostics.destroy(), backendLogCapture?.destroy?.()]),
+    Promise.allSettled([audioCleanup, audioDiagnostics.destroy(), backendLogCapture?.destroy?.(), phase2.destroy?.()]),
     new Promise(resolve => setTimeout(resolve, 1000)),
   ])
   // stopTunnel().finally(() => process.exit(0))

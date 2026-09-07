@@ -6,7 +6,7 @@ const EVENTS = new Set([
   'session-start', 'prepare-start', 'prepared', 'playback-start', 'playback-end',
   'pause', 'resume', 'stop', 'error', 'handoff', 'boundary', 'user-marker',
   'destination-change', 'connected', 'disconnected', 'runtime', 'packet-summary',
-  'waiting',
+  'waiting', 'volume-change',
 ])
 const EVENT_ALIASES = {
   sentence_prepared: 'prepared', sentence_wait: 'waiting', sentence_playing: 'playback-start',
@@ -14,6 +14,7 @@ const EVENT_ALIASES = {
   completed: 'playback-end', cancelled: 'stop', audio_cache_ready: 'prepared',
   robot_audio_generation: 'stop', robot_audio_prepared: 'prepared', robot_audio_start: 'playback-start',
   robot_audio_read_ahead_wait: 'waiting', robot_audio_failed: 'error', robot_audio_sent: 'playback-end',
+  robot_volume_change: 'volume-change',
 }
 const ENUMS = {
   destination: new Set(['local', 'robot']),
@@ -34,8 +35,9 @@ const NUMBERS = new Set([
   'eventLoopP99Ms', 'eventLoopMaxMs', 'cpuPercent', 'rssBytes', 'heapBytes',
   'generation', 'connectionGeneration', 'offsetBytes', 'memoryBytes', 'diskBytes', 'entries', 'activeDecodes', 'payloadBytes',
   'socketWrites', 'failedWrites', 'staleWrites', 'maxPayloadBytes', 'diagnosticDroppedRecords', 'diagnosticDiscardedBytes', 'diagnosticTruncatedRecords', 'diagnosticStoredBytes',
+  'robotVolumePercent', 'clippedSamples',
 ])
-const BOOLEANS = new Set(['connected', 'ducking', 'barrageEnabled', 'ocrEnabled', 'paused', 'prepared', 'compressed', 'playbackAcknowledged', 'staleConnection', 'failed'])
+const BOOLEANS = new Set(['connected', 'ducking', 'barrageEnabled', 'ocrEnabled', 'paused', 'prepared', 'compressed', 'playbackAcknowledged', 'staleConnection', 'failed', 'ramped'])
 
 function normalizeFields(fields = {}) {
   if (!fields || typeof fields !== 'object') return {}
@@ -73,7 +75,7 @@ function percentile(values, fraction) {
 function batch() {
   return { frames: 0, bytes: 0, maxGapMs: 0, maxLatenessMs: 0, late30Count: 0, late50Count: 0,
     maxBufferedBytes: 0, maxPcmBufferedBytes: 0, maxSendCallbackMs: 0, sequenceGaps: 0, socketWrites: 0, failedWrites: 0,
-    staleWrites: 0, maxPayloadBytes: 0 }
+    staleWrites: 0, maxPayloadBytes: 0, clippedSamples: 0 }
 }
 
 export class AudioDiagnostics {
@@ -182,6 +184,7 @@ export class AudioDiagnostics {
       stats.maxPcmBufferedBytes = Math.max(stats.maxPcmBufferedBytes, fields.pcmBufferedBytes || 0)
       stats.maxSendCallbackMs = Math.max(stats.maxSendCallbackMs, fields.sendCallbackMs || 0)
       stats.sequenceGaps += seqGap
+      stats.clippedSamples += fields.clippedSamples || 0
     }
     // No per-packet file, console, IPC or WebSocket writes.
   }

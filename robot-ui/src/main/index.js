@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, utilityProcess, systemPreferences, Tray, Menu, nativeImage } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, utilityProcess, systemPreferences, desktopCapturer, shell, Tray, Menu, nativeImage } from 'electron'
 import { join, resolve }                        from 'path'
 import { readFileSync, writeFileSync, existsSync, cpSync } from 'fs'
 import { scryptSync, randomBytes, timingSafeEqual } from 'crypto'
@@ -478,31 +478,112 @@ ipcMain.handle('restart-backend', () => {
 
 // ─── IPC: Barrage Overlay ─────────────────────────────────────────────────────
 
-const { desktopCapturer } = require('electron')
-
 let _overlayWin = null
+let _finishOverlaySelection = null
+
+function getScreenCapturePermissionStatus() {
+  if (process.platform !== 'darwin') return 'not-applicable'
+  return systemPreferences.getMediaAccessStatus('screen')
+}
+
+function screenSourceForDisplay(sources, display) {
+  const displayId = String(display?.id ?? '')
+  return sources.find(source => String(source?.display_id ?? '') === displayId) || sources[0] || null
+}
+
+function screenCapturePermissionFailure(status) {
+  const appLabel = app.isPackaged ? '机器人直播控制台' : 'Electron（本地开发版）'
+  return {
+    ok: false,
+    code: 'SCREEN_PERMISSION_DENIED',
+    permissionStatus: status,
+    canOpenSettings: true,
+    error: `macOS 未允许 ${appLabel} 录制屏幕。请在“系统设置 → 隐私与安全性 → 屏幕与系统音频录制（或屏幕录制）”中开启权限，然后完全退出并重新打开应用。`
+  }
+}
 
 ipcMain.handle('get-screen-source-id', async () => {
-  const { desktopCapturer } = require('electron')
-  // Super fast: width/height 0 means it doesn't waste CPU taking pictures
-  const sources = await desktopCapturer.getSources({ 
-    types: ['screen'], 
-    thumbnailSize: { width: 0, height: 0 } 
-  })
-  return sources.length ? sources[0].id : null
+  let permissionStatus = getScreenCapturePermissionStatus()
+  try {
+    // Do not return early when macOS reports `denied`. Before the first request
+    // after a TCC reset, screen status may still look denied; getSources() is the
+    // user-initiated call that gives macOS a chance to display its consent prompt.
+    // Width/height 0 avoids making thumbnails; the renderer only needs the id.
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 0, height: 0 }
+    })
+    if (!sources.length) {
+      if (process.platform === 'darwin' && permissionStatus !== 'granted') {
+        return screenCapturePermissionFailure(permissionStatus)
+      }
+      return {
+        ok: false,
+        code: 'NO_SCREEN_SOURCE',
+        permissionStatus,
+        error: '未找到可用的屏幕画面。请完全退出并重新打开应用；若仍失败，请导出诊断日志。'
+      }
+    }
+    const { screen } = require('electron')
+    const primaryDisplay = screen.getPrimaryDisplay()
+    const source = screenSourceForDisplay(sources, primaryDisplay)
+    const primaryMatched = String(source?.display_id ?? '') === String(primaryDisplay.id)
+    if (!primaryMatched && sources.length > 1) {
+      console.warn(`[screen-capture] primary display ${primaryDisplay.id} did not match a source display_id; using ${source.id}`)
+    }
+    return {
+      ok: true,
+      sourceId: source.id,
+      permissionStatus,
+      display: {
+        id: String(primaryDisplay.id),
+        bounds: {
+          x: primaryDisplay.bounds.x,
+          y: primaryDisplay.bounds.y,
+          width: primaryDisplay.bounds.width,
+          height: primaryDisplay.bounds.height
+        },
+        scaleFactor: primaryDisplay.scaleFactor
+      },
+      primaryMatched
+    }
+  } catch (error) {
+    permissionStatus = getScreenCapturePermissionStatus()
+    console.error(
+      `[screen-capture] source enumeration failed: permission=${permissionStatus} ` +
+      `platform=${process.platform} electron=${process.versions.electron} error=${error?.message || error}`
+    )
+    if (process.platform === 'darwin' && permissionStatus !== 'granted') {
+      return screenCapturePermissionFailure(permissionStatus)
+    }
+    return {
+      ok: false,
+      code: 'SCREEN_SOURCE_FAILED',
+      permissionStatus,
+      error: process.platform === 'win32'
+        ? '无法获取屏幕画面。请在 Windows“设置 → 隐私和安全性 → 屏幕截图和录制”中允许桌面应用访问，然后重启应用。'
+        : '系统已允许屏幕录制，但 Electron 无法获取屏幕画面。请完全退出并重新打开应用；若仍失败，请导出诊断日志。'
+    }
+  }
+})
+
+ipcMain.handle('open-screen-recording-settings', async () => {
+  if (process.platform !== 'darwin') {
+    return { ok: false, error: '此设置入口仅适用于 macOS。' }
+  }
+  try {
+    await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) }
+  }
 })
 
 ipcMain.handle('capture-screen-region', async (_, rect) => {
   try {
-    // 0. macOS Permission Check
-    if (process.platform === 'darwin') {
-      const { systemPreferences } = require('electron')
-      const status = systemPreferences.getMediaAccessStatus('screen')
-      if (status !== 'granted') {
-        return { ok: false, error: '请在 macOS 系统设置 -> 隐私与安全性 -> 屏幕录制 中允许本应用访问屏幕。' }
-      }
-    }
-
+    // Do not gate capture on the macOS preflight value. Electron cannot request
+    // Screen Recording through askForMediaAccess(), and a reset/changed binary
+    // can still report `denied` before the first real user-initiated capture.
     const { screen } = require('electron')
     const primaryDisplay = screen.getPrimaryDisplay()
     const scaleFactor = primaryDisplay.scaleFactor
@@ -520,7 +601,7 @@ ipcMain.handle('capture-screen-region', async (_, rect) => {
       return { ok: false, error: '无法获取屏幕画面。Windows 11 用户请前往 设置 -> 隐私和安全性 -> 屏幕截图和录制，开启"允许桌面应用访问"。' }
     }
     
-    const primaryScreen = sources[0]
+    const primaryScreen = screenSourceForDisplay(sources, primaryDisplay)
     
     // 2. DPI Correction: Multiply logical CSS coordinates by Windows Scale Factor (e.g. 1.25, 1.5)
     const physicalRect = {
@@ -536,7 +617,11 @@ ipcMain.handle('capture-screen-region', async (_, rect) => {
     // 4. Return as a raw PNG buffer
     return { ok: true, buffer: cropped.toPNG() }
   } catch (error) {
-    return { ok: false, error: error.message }
+    const permissionStatus = getScreenCapturePermissionStatus()
+    if (process.platform === 'darwin' && permissionStatus !== 'granted') {
+      return screenCapturePermissionFailure(permissionStatus)
+    }
+    return { ok: false, code: 'SCREEN_CAPTURE_FAILED', permissionStatus, error: error.message }
   }
 })
 
@@ -548,49 +633,61 @@ ipcMain.handle('open-barrage-overlay', () => {
 
   const { screen } = require('electron')
   const primaryDisplay = screen.getPrimaryDisplay()
-  const { width, height } = primaryDisplay.bounds
-_overlayWin = new BrowserWindow({
-  width,
-  height,
-  x: 0,
-  y: 0,
-  transparent: true,
-  backgroundColor: '#00000000', // Transparent native background; the overlay page draws the green tint.
-  frame: false,
-  hasShadow: false,
-  alwaysOnTop: true,
-  skipTaskbar: true,
-  resizable: false,
-  movable: false,
-  webPreferences: {
-    preload: join(__dirname, '../preload/index.js'),
-    contextIsolation: true,
-    nodeIntegration: false,
-    devTools: DEVTOOLS_ENABLED,
-    allowLoadingUnsignedLibraries: true
+  const { x, y, width, height } = primaryDisplay.bounds
+  _overlayWin = new BrowserWindow({
+    width,
+    height,
+    x,
+    y,
+    transparent: true,
+    backgroundColor: '#00000000', // Transparent native background; the overlay page draws the green tint.
+    frame: false,
+    hasShadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    movable: false,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      devTools: DEVTOOLS_ENABLED,
+      allowLoadingUnsignedLibraries: true
+    }
+  })
+  const overlayWin = _overlayWin
+  let selectionResolved = false
+  const finishSelection = (rect) => {
+    if (selectionResolved) return
+    selectionResolved = true
+    if (_win && !_win.isDestroyed()) {
+      _win.webContents.send('barrage-region-selected', rect || null)
+    }
   }
-})
+  _finishOverlaySelection = finishSelection
   // Load a special route or HTML for the overlay.
   // In dev mode, Vite serves the whole app, we can use a hash route like `#/overlay`
   if (process.env['ELECTRON_RENDERER_URL']) {
-    _overlayWin.loadURL(process.env['ELECTRON_RENDERER_URL'] + '#/overlay')
+    overlayWin.loadURL(process.env['ELECTRON_RENDERER_URL'] + '#/overlay')
   } else {
-    _overlayWin.loadFile(join(__dirname, '../renderer/index.html'), { hash: '/overlay' })
+    overlayWin.loadFile(join(__dirname, '../renderer/index.html'), { hash: '/overlay' })
   }
 
-  _overlayWin.on('closed', () => {
-    _overlayWin = null
+  overlayWin.on('closed', () => {
+    if (_overlayWin === overlayWin) {
+      _overlayWin = null
+      _finishOverlaySelection = null
+    }
+    finishSelection(null)
   })
 })
 
 ipcMain.handle('close-barrage-overlay', (_, rect) => {
-  if (_overlayWin) {
-    _overlayWin.close()
-    _overlayWin = null
-  }
-  // If rect is provided, we can broadcast it to the main window or backend
-  if (rect && _win) {
-    _win.webContents.send('barrage-region-selected', rect)
+  const overlayWin = _overlayWin
+  const finishSelection = _finishOverlaySelection
+  finishSelection?.(rect || null)
+  if (overlayWin && !overlayWin.isDestroyed()) {
+    overlayWin.close()
   }
   return { ok: true }
 })

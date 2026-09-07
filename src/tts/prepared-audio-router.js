@@ -9,6 +9,9 @@ import { PreparedAudioCache, abortedError } from './prepared-audio-cache.js'
 const RATE = 16000
 const BYTES_PER_MS = RATE * 2 / 1000
 const CHUNK_BYTES = 640
+const DEFAULT_ROBOT_VOLUME_PERCENT = 100
+const MAX_ROBOT_VOLUME_PERCENT = 150
+const VOLUME_RAMP_SAMPLES = Math.round(RATE * 0.1)
 const MAX_INPUT_BYTES = 64 * 1024 * 1024
 const VALID_DESTINATIONS = new Set(['local', 'robot'])
 const HANDLE = Symbol('prepared-robot-audio')
@@ -28,6 +31,10 @@ export class PreparedAudioOutputRouter {
     this._schedule = schedule
     this._unschedule = unschedule
     this._config = this._loadConfig()
+    this._gain = this._config.robotVolumePercent / 100
+    this._targetGain = this._gain
+    this._gainStep = 0
+    this._rampSamplesRemaining = 0
     this._generation = 0
     this._destroyed = false
     this._active = null
@@ -51,24 +58,83 @@ export class PreparedAudioOutputRouter {
     try {
       if (this.filePath && existsSync(this.filePath)) {
         const saved = JSON.parse(readFileSync(this.filePath, 'utf8'))
-        if (VALID_DESTINATIONS.has(saved?.destination)) return { destination: saved.destination }
+        return {
+          destination: VALID_DESTINATIONS.has(saved?.destination) ? saved.destination : 'local',
+          robotVolumePercent: this._validRobotVolume(saved?.robotVolumePercent)
+            ? saved.robotVolumePercent
+            : DEFAULT_ROBOT_VOLUME_PERCENT,
+        }
       }
     } catch (err) { console.warn('[音频输出] 配置读取失败:', err.message) }
-    return { destination: 'local' }
+    return { destination: 'local', robotVolumePercent: DEFAULT_ROBOT_VOLUME_PERCENT }
+  }
+  _validRobotVolume(value) {
+    return Number.isInteger(value) && value >= 0 && value <= MAX_ROBOT_VOLUME_PERCENT
   }
   getConfig() { return { ...this._config } }
   isRobotDestination() { return this._config.destination === 'robot' }
+  validateConfig(config = {}) {
+    const destination = config.destination ?? this._config.destination
+    const robotVolumePercent = config.robotVolumePercent ?? this._config.robotVolumePercent
+    if (!VALID_DESTINATIONS.has(destination)) throw new Error(`无效的音频播放设备: ${destination}`)
+    if (!this._validRobotVolume(robotVolumePercent)) throw new Error('机器人音量必须是 0 到 150 之间的整数')
+    return { destination, robotVolumePercent }
+  }
   setConfig(config = {}) {
-    if (!VALID_DESTINATIONS.has(config.destination)) throw new Error(`无效的音频播放设备: ${config.destination}`)
-    if (config.destination !== this._config.destination) {
+    const { destination, robotVolumePercent } = this.validateConfig(config)
+    const destinationChanged = destination !== this._config.destination
+    const volumeChanged = robotVolumePercent !== this._config.robotVolumePercent
+    if (!destinationChanged && !volumeChanged) return this.getConfig()
+    if (destinationChanged) {
       this._invalidate(abortedError())
-      this._config = { destination: config.destination }
-      if (this.filePath) {
-        mkdirSync(dirname(this.filePath), { recursive: true })
-        writeFileSync(this.filePath, JSON.stringify(this._config, null, 2))
+    }
+    const ramped = volumeChanged && !destinationChanged && this.isRobotDestination()
+      && !!this._active?.isActive() && this._active._activated
+    this._config = { destination, robotVolumePercent }
+    if (volumeChanged || destinationChanged) this._setRobotVolume(robotVolumePercent, ramped)
+    if (this.filePath) {
+      mkdirSync(dirname(this.filePath), { recursive: true })
+      writeFileSync(this.filePath, JSON.stringify(this._config, null, 2))
+    }
+    if (volumeChanged) this.diagnostics?.event?.('robot_volume_change', { destination, robotVolumePercent, ramped })
+    return this.getConfig()
+  }
+  _setRobotVolume(percent, ramped) {
+    const target = percent / 100
+    this._targetGain = target
+    if (!ramped) {
+      this._gain = target
+      this._gainStep = 0
+      this._rampSamplesRemaining = 0
+      return
+    }
+    this._rampSamplesRemaining = VOLUME_RAMP_SAMPLES
+    this._gainStep = (target - this._gain) / VOLUME_RAMP_SAMPLES
+  }
+  _applyRobotGain(chunk) {
+    if (this._rampSamplesRemaining === 0 && this._gain === 1) {
+      // Keep cached/prepared PCM immutable even on the bit-exact 100% path.
+      return { buffer: Buffer.from(chunk), clippedSamples: 0 }
+    }
+    const output = Buffer.from(chunk)
+    let clippedSamples = 0
+    for (let offset = 0; offset + 1 < output.length; offset += 2) {
+      const sample = output.readInt16LE(offset)
+      let adjusted = Math.round(sample * this._gain)
+      if (adjusted > 32767) { adjusted = 32767; clippedSamples++ }
+      else if (adjusted < -32768) { adjusted = -32768; clippedSamples++ }
+      output.writeInt16LE(adjusted, offset)
+      if (this._rampSamplesRemaining > 0) {
+        this._rampSamplesRemaining--
+        if (this._rampSamplesRemaining === 0) {
+          this._gain = this._targetGain
+          this._gainStep = 0
+        } else {
+          this._gain += this._gainStep
+        }
       }
     }
-    return this.getConfig()
+    return { buffer: output, clippedSamples }
   }
   _assertReady(generation = this.generation) {
     if (this._destroyed || generation !== this.generation) throw abortedError()
@@ -211,16 +277,20 @@ export class PreparedAudioOutputRouter {
   _sendFrame(session, chunk, seq, fields) {
     if (this._active !== session) throw new Error('音频会话不再拥有机器人发送通道')
     this._assertReady(session.generation)
-    this.robot.sendAudioFrame(chunk, seq, {
+    const adjusted = this._applyRobotGain(chunk)
+    const diagnosticFields = { ...fields, robotVolumePercent: this._config.robotVolumePercent,
+      clippedSamples: adjusted.clippedSamples }
+    this.robot.sendAudioFrame(adjusted.buffer, seq, {
       generation: session.connectionGeneration,
       onComplete: (err, metrics) => {
-        this.diagnostics?.packet?.({ ...fields, ...metrics, stage: 'socket_write', failed: !!err })
+        this.diagnostics?.packet?.({ ...diagnosticFields, ...metrics, stage: 'socket_write', failed: !!err })
         if (err && session.isActive()) session.fail(err)
         else if (err) this.diagnostics?.event?.('error', session._metadata({
           errorCode: err.code || 'OTHER', failed: true, bufferedBytes: metrics?.bufferedAmount,
         }))
       },
     })
+    return diagnosticFields
   }
   playFile(owner, filePath) { this._assertReady(); return new LegacyPreparationSession(this, owner, filePath) }
   startMp3Stream(owner) { this._assertReady(); return new LegacyPreparationSession(this, owner, null) }
@@ -346,12 +416,12 @@ class PreparedPcmSession {
       const seq = this.sequenceState.nextSeq
       const fields = this._metadata({ seq, bytes: size, gapMs: this._lastAt === null ? null : now - this._lastAt,
         latenessMs, generation: this.generation })
-      this.router._sendFrame(this, chunk, seq, fields)
+      const sentFields = this.router._sendFrame(this, chunk, seq, fields)
       if (!this.active) return
       this.sequenceState.nextSeq++
       this._offset += size
       this._lastAt = now
-      this.router.diagnostics?.packet?.({ ...fields, stage: 'scheduled_send' })
+      this.router.diagnostics?.packet?.({ ...sentFields, stage: 'scheduled_send' })
       const durationMs = size / BYTES_PER_MS
       // Packet cadence may catch up after a short timer stall, but a sentence
       // cannot finish before the PCM just sent has had its computed duration.

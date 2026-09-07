@@ -350,8 +350,11 @@ function listen(port, isFallback) {
             broadcast('DUCK_END', {})
             break
           case 'BARRAGE_START':
-            handlers.onBarrageStart?.(msgData)
-            broadcast('BARRAGE_START', msgData)
+            // A native OCR load failure can reject the start. Do not overwrite
+            // its final BARRAGE_STOP with an unconditional START echo.
+            if (handlers.onBarrageStart?.(msgData) !== false) {
+              broadcast('BARRAGE_START', msgData)
+            }
             break
           case 'BARRAGE_STOP':
             handlers.onBarrageStop?.()

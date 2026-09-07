@@ -18,7 +18,7 @@ export const SEED_DATA_FILES = Object.freeze({
   'transit-audio.json': JSON.stringify({
     enabled: false, type: 'tts', text: '', mp3_file: '', mp3_files: [], mp3_mode: 'repeat',
   }, null, 2) + '\n',
-  'audio-output.json': JSON.stringify({ destination: 'local' }, null, 2) + '\n',
+  'audio-output.json': JSON.stringify({ destination: 'local', robotVolumePercent: 100 }, null, 2) + '\n',
   'barrage-knowledge/config.json': JSON.stringify({
     mode: 'llm-strict', document_name: '', priority_mode: false, random_reply: false, cooldown: 3,
   }, null, 2) + '\n',

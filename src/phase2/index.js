@@ -7,8 +7,8 @@
 
 import { Phase2Monitor } from './monitor.js';
 import { BarrageManager } from './barrage-manager.js';
-import fs from 'fs';
 import path from 'path';
+import { BoundedOcrTextLog } from './ocr/text-log.js';
 
 // OCR 依赖 onnxruntime-node / sharp 两个 native 模块。静态 import 时，
 // 只要目标机器上加载失败（缺 VC++ 运行库、打包遗漏平台二进制…），
@@ -77,26 +77,68 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
   console.log('---------------------------------------------------------');
 
   const monitor = new Phase2Monitor({ robot, tour, llm });
-  const barrageManager = new BarrageManager({ tts, llm, tour, uiBridge, checkGoalHandling, checkIsSpeaking, onBarrageSpeechStart, onBarrageSpeechEnd });
+  let barrageSpeechActive = false;
+  let ocrTrackingActive = false;
+  let ocrSessionEpoch = 0;
+  let ocrWorkerGeneration = null;
+  let ocrDestroyed = false;
+
+  const setOcrPlaybackPaused = (paused) => {
+    loadOcr()
+      .then(ocr => ocr.setOcrPaused(paused))
+      .catch(err => disableOcr(err));
+  };
+
+  const barrageManager = new BarrageManager({
+    tts,
+    llm,
+    tour,
+    uiBridge,
+    checkGoalHandling,
+    checkIsSpeaking,
+    onBarrageSpeechStart: () => {
+      barrageSpeechActive = true;
+      if (ocrTrackingActive) setOcrPlaybackPaused(true);
+      onBarrageSpeechStart?.();
+    },
+    onBarrageSpeechEnd: () => {
+      barrageSpeechActive = false;
+      if (ocrTrackingActive) setOcrPlaybackPaused(false);
+      onBarrageSpeechEnd?.();
+    },
+  });
 
   // Initialize the Node.js OCR engine
   let ocrLoadError = null;
+  let ocrFailureReported = false;
+
+  function disableOcr(error) {
+    if (ocrDestroyed) return;
+    _ocrUnavailable = true;
+    if (ocrFailureReported) return;
+    ocrFailureReported = true;
+    ocrLoadError = error?.message || String(error);
+    ocrTrackingActive = false;
+    ocrWorkerGeneration = null;
+    ocrSessionEpoch += 1;
+    barrageManager.stop();
+
+    const msg = `弹幕识别不可用：OCR 引擎失败（${ocrLoadError}）。其余功能不受影响。`;
+    console.error(`[Phase 2] [OCR] ${msg}`);
+    uiBridge.broadcast('ERROR', { message: msg });
+    uiBridge.broadcast('BARRAGE_LOG', { text: msg });
+    // Keep this last: a failed asynchronous start must leave the UI/capture off.
+    uiBridge.broadcast('BARRAGE_STOP', {});
+  }
+
   loadOcr()
     .then(ocr => ocr.initOcr())
-    .catch(err => {
-      ocrLoadError = err.message;
-      console.error('[Phase 2] [OCR] 引擎加载失败，弹幕识别不可用（其余功能不受影响）:', err.message);
-      // 也要告诉界面。只写日志的话，用户会看到"识别已开启"却永远没有反应，
-      // 而这正是我们在别处刚消灭掉的那种"静悄悄地坏掉"。
-      // 启动时界面可能还没连上，所以下面开启识别时会再报一次。
-      uiBridge.broadcast('ERROR', {
-        message: `弹幕识别不可用：OCR 引擎加载失败（${err.message}）。其余功能不受影响。`
-      });
-    });
+    .catch(err => disableOcr(err));
 
   const USER_DATA = process.env.USER_DATA_DIR;
   const DATA_DIR = USER_DATA ? path.join(USER_DATA, 'data') : './data';
   const logPath = path.join(DATA_DIR, 'barrage-ocr-log.txt');
+  const ocrTextLog = new BoundedOcrTextLog({ filePath: logPath });
 
   let lastLoggedText = null;
   let lastFullOcrText = null;
@@ -106,17 +148,40 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
     if (text === lastLoggedText) return;
     lastLoggedText = text;
 
-    try {
-      const timestamp = new Date().toLocaleString('zh-CN', { hour12: false });
-      fs.appendFileSync(logPath, `[${timestamp}] ${text}\n`, 'utf8');
-    } catch (err) {
-      console.error('[Phase 2] Failed to write to OCR log:', err.message);
-    }
+    const timestamp = new Date().toLocaleString('zh-CN', { hour12: false });
+    ocrTextLog.append(`[${timestamp}] ${text}\n`);
   }
 
-  let isProcessingBarrage = false;
   let framesProcessed = 0;
   let lastHeartbeat = Date.now();
+
+  function startOcrTrackingSession() {
+    if (ocrDestroyed) return;
+    const epoch = ++ocrSessionEpoch;
+    ocrTrackingActive = true;
+    ocrWorkerGeneration = null;
+    loadOcr()
+      .then(async (ocr) => {
+        if (!ocrTrackingActive || epoch !== ocrSessionEpoch) return;
+        await ocr.initOcr();
+        if (!ocrTrackingActive || epoch !== ocrSessionEpoch) return;
+        const generation = ocr.startOcrSession();
+        ocrWorkerGeneration = generation;
+        if (barrageSpeechActive) ocr.setOcrPaused(true);
+      })
+      .catch(err => disableOcr(err));
+  }
+
+  function stopOcrTrackingSession() {
+    ocrTrackingActive = false;
+    ocrWorkerGeneration = null;
+    ocrSessionEpoch += 1;
+    loadOcr()
+      .then(ocr => ocr.stopOcrSession())
+      .catch(err => {
+        if (!_ocrUnavailable) disableOcr(err);
+      });
+  }
 
   // -- Hook into Phase 2 Barrage UI Commands --
   uiBridge.on('onBarrageStart', (rect) => {
@@ -127,7 +192,7 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
       uiBridge.broadcast('ERROR', { message: msg });
       uiBridge.broadcast('BARRAGE_LOG', { text: msg });
       uiBridge.broadcast('BARRAGE_STOP', {});   // 让界面的开关回到关闭状态
-      return;
+      return false;
     }
     console.log(`[Phase 2] Barrage OCR tracking STARTED on region:`, rect);
     lastLoggedText = null;
@@ -135,21 +200,17 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
     barrageManager.isActive = true;
     barrageManager.mp3Count = 0;
     barrageManager.llmCount = 0;
+    startOcrTrackingSession();
     uiBridge.broadcast('BARRAGE_LOG', { text: '弹幕识别已启动，开始记录日志...' });
 
-    // Overwrite / clear the past log file
-    try {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-      fs.writeFileSync(logPath, '', 'utf8');
-      console.log(`[Phase 2] Truncated barrage OCR log file: ${logPath}`);
-    } catch (err) {
-      console.error('[Phase 2] Failed to initialize log file:', err.message);
-    }
+    // Reset is ordered with later appends but never blocks the audio event loop.
+    ocrTextLog.reset();
+    return true;
   });
 
   uiBridge.on('onBarrageStop', () => {
     console.log(`[Phase 2] Barrage OCR tracking STOPPED`);
-    isProcessingBarrage = false;
+    stopOcrTrackingSession();
     barrageManager.stop();
     // Clear manager's deduplication state when stopped
     barrageManager.lastRecognizedText = null;
@@ -158,7 +219,6 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
     uiBridge.broadcast('BARRAGE_LOG', { text: summaryText });
   });
 
-  let lastDebugSave = 0;
   uiBridge.on('onBarrageTextRead', (text) => {
     // Legacy fallback, in case UI sends text directly
     console.log(`[Phase 2] OCR Output (from UI):`, text);
@@ -171,29 +231,33 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
   });
 
   uiBridge.on('onBarrageImage', async (data) => {
-    if (!barrageManager.isActive) return;
+    if (!barrageManager.isActive || !ocrTrackingActive) return;
     if (_ocrUnavailable) return;     // OCR 引擎加载失败过：直接丢帧，别每秒重试+刷日志
-    if (isProcessingBarrage) return; // Drop frame instead of piling up
-    isProcessingBarrage = true;
+    const sessionEpoch = ocrSessionEpoch;
+    const workerGeneration = ocrWorkerGeneration;
+    if (workerGeneration === null) return;
 
     try {
       // Support both raw Buffer (binary) and Base64 string (fallback)
       const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data, 'base64');
-
-      // 1. Save debug image occasionally
-      const now = Date.now();
-      if (now - lastDebugSave > 5000) {
-        lastDebugSave = now;
-        const debugPath = path.resolve('./data/debug-ocr-crop.png');
-        fs.writeFileSync(debugPath, buffer);
-      }
-
-      // 2. Process image with Node.js OCR engine
       const { recognizeText } = await loadOcr();
-      const result = await recognizeText(buffer);
+      const result = await recognizeText(buffer, { generation: workerGeneration });
+
+      // A stop/reselection, a newer OCR session, or active barrage speech makes
+      // this result stale. While speech is active the worker client retains only
+      // the newest pending screenshot and resumes it after playback.
+      if (
+        !ocrTrackingActive ||
+        !barrageManager.isActive ||
+        sessionEpoch !== ocrSessionEpoch ||
+        workerGeneration !== ocrWorkerGeneration ||
+        barrageSpeechActive
+      ) return;
+
       framesProcessed++;
 
-      // 3. Status Heartbeat (Logs every 5 seconds so you know it's not dead)
+      // Status heartbeat (not a per-frame log).
+      const now = Date.now();
       if (now - lastHeartbeat > 5000) {
         console.log(`[Phase 2] [Status] OCR loop alive. Processed ${framesProcessed} frames so far.`);
         lastHeartbeat = now;
@@ -231,15 +295,32 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
         }
       }
     } catch (err) {
+      if (err?.ocrFatal) {
+        disableOcr(err);
+        return;
+      }
       console.error('[Phase 2] [OCR] Pipeline error:', err.message);
-    } finally {
-      // Bulletproof Lock Release: This ALWAYS runs, even if OCR crashes
-      isProcessingBarrage = false;
     }
   });
 
   return {
     monitor,
-    barrageManager
+    barrageManager,
+    async destroy() {
+      if (ocrDestroyed) return;
+      ocrDestroyed = true;
+      ocrTrackingActive = false;
+      ocrWorkerGeneration = null;
+      ocrSessionEpoch += 1;
+      barrageManager.stop();
+      try {
+        const ocr = await loadOcr();
+        await ocr.shutdownOcr();
+      } catch {
+        // Native OCR may be exactly why shutdown is running. Other subsystems
+        // must still be allowed to finish their cleanup.
+      }
+      await ocrTextLog.close();
+    },
   };
 }

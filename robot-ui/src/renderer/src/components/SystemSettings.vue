@@ -273,11 +273,24 @@
             <span :class="robotAudioConnected ? 'ok-text' : 'err-text'">
               {{ robotAudioConnected ? '已连接，可以传输音频' : '未连接；选择机器人端后将暂时无法播放' }}
             </span>
+
+            <span class="param-label">机器人音量</span>
+            <div class="robot-volume-control">
+              <el-slider
+                v-model="audioOutputConfig.robotVolumePercent"
+                :min="0"
+                :max="150"
+                :step="1"
+                show-input
+                input-size="small"
+              />
+              <span class="param-hint">仅影响机器人端播放；100% 为原始音量。</span>
+            </div>
           </div>
 
           <div class="audio-output-help">
             <p><strong>本地：</strong>声音从运行本应用的电脑播放。</p>
-            <p><strong>机器人端：</strong>音频自动转换为 16 kHz、单声道、16 位小端 PCM，通过现有机器人连接实时发送。</p>
+            <p><strong>机器人端：</strong>通过现有机器人连接实时发送。</p>
             <p>切换输出位置会停止当前正在播放的声音，新设置从下一次播放开始生效。</p>
           </div>
 
@@ -719,7 +732,7 @@ function lockSensitive() {
 }
 
 // ── 音频输出 ─────────────────────────────────────────────────────────────────
-const audioOutputConfig  = reactive({ destination: 'local' })
+const audioOutputConfig  = reactive({ destination: 'local', robotVolumePercent: 100 })
 const robotAudioConnected = ref(false)
 const savingAudioOutput  = ref(false)
 const audioOutputSavedOk = ref(false)
@@ -731,6 +744,9 @@ function handleAudioOutputMessage(event) {
     const msg = JSON.parse(event.data)
     if (msg.type === 'AUDIO_OUTPUT_CONFIG') {
       if (msg.data?.destination) audioOutputConfig.destination = msg.data.destination
+      if (Number.isInteger(msg.data?.robotVolumePercent)) {
+        audioOutputConfig.robotVolumePercent = Math.min(150, Math.max(0, msg.data.robotVolumePercent))
+      }
       if (typeof msg.data?.robotConnected === 'boolean') {
         robotAudioConnected.value = msg.data.robotConnected
       }
@@ -780,7 +796,10 @@ function saveAudioOutputConfig() {
   audioOutputSavedOk.value = false
   ws.send(JSON.stringify({
     type: 'SET_AUDIO_OUTPUT_CONFIG',
-    data: { destination: audioOutputConfig.destination },
+    data: {
+      destination: audioOutputConfig.destination,
+      robotVolumePercent: audioOutputConfig.robotVolumePercent,
+    },
   }))
   clearTimeout(audioOutputSaveTimer)
   audioOutputSaveTimer = setTimeout(() => {
@@ -894,6 +913,9 @@ onBeforeUnmount(() => {
 }
 .audio-output-help p + p { margin-top: 6px; }
 .audio-output-help strong { color: var(--text); }
+.robot-volume-control {
+  width: min(360px, 100%);
+}
 
 /* ── Lock chip ── */
 .lock-chip {

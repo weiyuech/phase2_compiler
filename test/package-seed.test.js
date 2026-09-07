@@ -104,7 +104,9 @@ test('new packaged user data starts empty/local/disabled with no models, admin c
   assert.deepEqual(files(join(userData, 'data')), Object.keys(SEED_DATA_FILES).sort())
   assert.deepEqual(JSON.parse(readFileSync(join(userData, 'data/tour-list.json'))), [])
   assert.equal(JSON.parse(readFileSync(join(userData, 'data/transit-audio.json'))).enabled, false)
-  assert.equal(JSON.parse(readFileSync(join(userData, 'data/audio-output.json'))).destination, 'local')
+  assert.deepEqual(JSON.parse(readFileSync(join(userData, 'data/audio-output.json'))), {
+    destination: 'local', robotVolumePercent: 100,
+  })
   for (const file of SEED_EMPTY_DIRECTORIES) assert.deepEqual(readdirSync(join(userData, 'data', file)), [])
   assert.equal(existsSync(join(userData, 'config/admin.json')), false)
   assert.equal(existsSync(join(userData, 'data/models')), false)

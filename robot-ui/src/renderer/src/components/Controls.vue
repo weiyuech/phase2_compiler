@@ -53,7 +53,13 @@
             <div class="card-title">弹幕识别</div>
             <label class="header-switch">
               <span>启用</span>
-              <el-switch v-model="barrageEnabled" size="small" aria-label="启用弹幕识别" @change="onBarrageToggle" />
+              <el-switch
+                v-model="barrageEnabled"
+                size="small"
+                aria-label="启用弹幕识别"
+                :disabled="!canCaptureBarrage"
+                @change="onBarrageToggle"
+              />
             </label>
           </div>
           <p v-if="barrageEnabled" class="ocr-status" :class="{ ready: ocrReady }">{{ ocrStatusMsg }}</p>
@@ -114,14 +120,25 @@ const tourStatus = ref('idle')   // idle | running | paused | finished
 const tourStateKnown = ref(false)
 const tourIsActive = computed(() => tourStatus.value === 'running' || tourStatus.value === 'paused')
 
-const ocrReady = ref(true) // Backend handles this now
-const ocrStatusMsg = ref('处理中')
 const barrageEnabled = ref(false)
 const barrageRegion = ref(null)
+const barrageStartPending = ref(false)
+const ownsBarrageCapture = ref(false)
+const ocrReady = computed(() => barrageEnabled.value && Boolean(barrageRegion.value) && !barrageStartPending.value)
+const ocrStatusMsg = computed(() => {
+  if (barrageStartPending.value) return '正在启动'
+  if (barrageRegion.value) return '识别中'
+  return '请选择识别区域'
+})
 const currentCapturedText = ref('')
 const barrageCooldown = ref(0)
 const repeatCount = ref(1)  // How many full passes through the tour list
 const currentIteration = ref(0)
+const canCaptureBarrage = Boolean(
+  window.api?.openBarrageOverlay &&
+  window.api?.getScreenSourceId &&
+  window.api?.onBarrageRegionSelected
+)
 
 // --- WebSocket ---
 const wsConnected = ref(false)
@@ -177,6 +194,24 @@ function handleMessage(raw) {
       case 'BARRAGE_CURRENT_TEXT':
         currentCapturedText.value = data.text || ''
         break
+      case 'BARRAGE_START':
+        barrageEnabled.value = true
+        barrageRegion.value = data || null
+        barrageStartPending.value = false
+        break
+      case 'BARRAGE_STOP':
+        barrageEnabled.value = false
+        barrageRegion.value = null
+        barrageStartPending.value = false
+        ownsBarrageCapture.value = false
+        currentCapturedText.value = ''
+        break
+      case 'ERROR':
+        if (/OCR|弹幕识别/.test(data?.message || '')) {
+          barrageStartPending.value = false
+          ElMessage.error(data.message)
+        }
+        break
 
     }
   } catch { /* ignore */ }
@@ -194,6 +229,12 @@ function onSocketOpen() {
   tourStateKnown.value = false
   send('GET_TOUR_STATE')
   send('GET_BARRAGE_CONFIG')
+  // The backend process does not persist the selected screen rectangle. If it
+  // restarted while this renderer/capture survived, restore the active OCR
+  // session through the normal authoritative START echo.
+  if (canCaptureBarrage && ownsBarrageCapture.value && barrageEnabled.value && barrageRegion.value) {
+    send('BARRAGE_START', barrageRegion.value)
+  }
 }
 function onSocketClose() {
   wsConnected.value = false
@@ -212,13 +253,27 @@ watch(() => props.wsRef?.value || props.wsRef, (socket) => {
 }, { immediate: true })
 
 function onMsg(e) { handleMessage(e.data) }
-onUnmounted(detachSocket)
 
 // --- Actions ---
-function onBarrageToggle(val) {
+async function onBarrageToggle(val) {
+  if (!canCaptureBarrage) {
+    // A browser may mirror an active native session. It must not turn that
+    // shared session off, nor start a capture it cannot own.
+    barrageEnabled.value = Boolean(barrageRegion.value)
+    if (val) ElMessage.warning('浏览器预览无法截取屏幕，请在 Electron 窗口使用弹幕识别')
+    return
+  }
   if (val) {
-    window.api.openBarrageOverlay()
+    barrageStartPending.value = false
+    try {
+      await window.api.openBarrageOverlay()
+    } catch (error) {
+      barrageEnabled.value = false
+      ownsBarrageCapture.value = false
+      ElMessage.error(`无法打开弹幕选区：${error?.message || error}`)
+    }
   } else {
+    barrageStartPending.value = false
     barrageRegion.value = null
     currentCapturedText.value = ''
     send('BARRAGE_STOP')
@@ -291,21 +346,32 @@ function onCooldownChange(val) {
   })
 }
 
+let removeBarrageRegionListener = null
 // Global hook for results (in case App.vue logic needs to share state)
 if (window.api && window.api.onBarrageRegionSelected) {
-  window.api.onBarrageRegionSelected((rect) => {
+  removeBarrageRegionListener = window.api.onBarrageRegionSelected((rect) => {
     if (rect) {
       console.log('--- OCR TRIGGER: Confirm Clicked ---')
+      ownsBarrageCapture.value = true
       barrageRegion.value = rect
-      ElMessage.success('已选中弹幕区域，开始截取...')
-      // Signal already handled by App.vue, but we update UI state here
+      barrageStartPending.value = true
+      ElMessage.info('弹幕区域已选中，正在启动识别…')
+      // LiveMonitor owns capture/start; this card waits for backend confirmation.
     } else {
+      ownsBarrageCapture.value = false
+      barrageStartPending.value = false
       barrageEnabled.value = false
       barrageRegion.value = null
       currentCapturedText.value = ''
     }
   })
 }
+
+onUnmounted(() => {
+  detachSocket()
+  removeBarrageRegionListener?.()
+  removeBarrageRegionListener = null
+})
 
 // --- Computed ---
 const tourStatusLabel = computed(() => ({
