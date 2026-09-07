@@ -125,7 +125,12 @@ export async function deliverTestRelease({
   const installers = names.filter(name => /\.exe$/i.test(name))
   if (installers.length !== 1) fail('Exactly one Windows installer .exe is required.')
   const installer = installers[0]
-  if (!/^[^\x00-\x1f\x7f/#\\]+$/u.test(installer) || installer !== basename(installer)) fail('Unsafe installer asset name.')
+  // GitHub normalizes Unicode and whitespace in release asset names. Require
+  // the on-disk installer name to already be stable so manifests, checksums,
+  // API metadata and authenticated downloads all refer to the same filename.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.exe$/i.test(installer) || installer !== basename(installer)) {
+    fail('Installer asset name must be GitHub-stable ASCII.')
+  }
   const artifact = async name => {
     const file = join(directory, name)
     const before = await io.lstat(file)

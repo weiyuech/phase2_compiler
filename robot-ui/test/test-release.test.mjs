@@ -7,7 +7,7 @@ import { deliverTestRelease, validateReleaseContext, validateNativeReport } from
 const commit = 'a'.repeat(40)
 const otherCommit = 'b'.repeat(40)
 const tagObject = 'c'.repeat(40)
-const tag = 'v1.0.2-test.1'
+const tag = 'v1.0.2-test.3'
 const checkNames = ['runtime', 'packaged-layout', 'ffmpeg-pcm', 'ffplay', 'sharp', 'onnx-models', 'ocr-pipeline', 'packaged-native-bindings']
 const environment = () => ({
   GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'push', GITHUB_REF: `refs/tags/${tag}`,
@@ -26,7 +26,7 @@ function fixture() {
   const root = resolve('/virtual/robot-project')
   const releaseDir = join(root, 'release')
   const temporaryRoot = join(root, 'tmp')
-  const installer = 'Robot Setup 1.0.2-test.1.exe'
+  const installer = 'Setup.1.0.2-test.3.exe'
   const files = new Map()
   const directories = new Set([releaseDir, temporaryRoot])
   const writes = [], commands = [], logs = [], removedDirectories = []
@@ -34,7 +34,7 @@ function fixture() {
   function put(file, value, extra = {}) {
     files.set(file, { data: Buffer.isBuffer(value) ? value : Buffer.from(value), mtimeMs: clock++, ...extra })
   }
-  put(join(root, 'robot-ui/package.json'), JSON.stringify({ version: '1.0.2-test.1' }))
+  put(join(root, 'robot-ui/package.json'), JSON.stringify({ version: '1.0.2-test.3' }))
   put(join(root, 'docs/windows-test-installer.md'), '# Test installer\nVerify on the actual robot before release.\n')
   put(join(releaseDir, installer), Buffer.from('synthetic installer fixture'))
   put(join(releaseDir, 'packaged-runtime.json'), JSON.stringify(nativeReport()))
@@ -158,7 +158,7 @@ function fixture() {
 test('pure context guard accepts exact push and workflow-dispatch test tags', () => {
   for (const event of ['push', 'workflow_dispatch']) {
     const env = { ...environment(), GITHUB_EVENT_NAME: event }
-    const result = validateReleaseContext({ env, version: '1.0.2-test.1', head: `${commit}\n`, platform: 'win32', arch: 'x64' })
+    const result = validateReleaseContext({ env, version: '1.0.2-test.3', head: `${commit}\n`, platform: 'win32', arch: 'x64' })
     assert.equal(result.tag, tag)
     assert.equal(result.commit, commit)
     assert.equal(JSON.stringify(result).includes(env.GH_TOKEN), false)
@@ -218,7 +218,7 @@ test('failed or incomplete native verification prevents release creation', async
   }
 })
 
-for (const [scenario, expected] of [['missing', /Exactly one/], ['multiple', /Exactly one/], ['empty', /Invalid or empty/], ['symlink', /Invalid or empty/], ['label-injection', /Unsafe/]]) {
+for (const [scenario, expected] of [['missing', /Exactly one/], ['multiple', /Exactly one/], ['empty', /Invalid or empty/], ['symlink', /Invalid or empty/], ['label-injection', /GitHub-stable/], ['whitespace-normalized', /GitHub-stable/], ['unicode-normalized', /GitHub-stable/]]) {
   test(`${scenario} installer cannot be delivered`, async () => {
     const h = fixture(), file = join(h.releaseDir, h.installer)
     if (scenario === 'missing') h.files.delete(file)
@@ -226,6 +226,8 @@ for (const [scenario, expected] of [['missing', /Exactly one/], ['multiple', /Ex
     if (scenario === 'empty') h.put(file, '')
     if (scenario === 'symlink') h.files.get(file).symlink = true
     if (scenario === 'label-injection') { h.files.delete(file); h.put(join(h.releaseDir, 'installer#label.exe'), 'fixture') }
+    if (scenario === 'whitespace-normalized') { h.files.delete(file); h.put(join(h.releaseDir, 'Setup 1.0.2-test.3.exe'), 'fixture') }
+    if (scenario === 'unicode-normalized') { h.files.delete(file); h.put(join(h.releaseDir, '机器人直播控制台.Setup.1.0.2-test.3.exe'), 'fixture') }
     await assert.rejects(h.deliver(), expected)
     assert.deepEqual(h.mutations(), [])
     assert.deepEqual(h.writes, [])
@@ -268,7 +270,7 @@ test('annotated reviewed tag creates one draft with all four verified assets and
   assert.equal(h.mutations().length, 1)
   assert.deepEqual(h.state.uploads.map(file => basename(file)).sort(), [h.installer, 'SHA256SUMS.txt', 'build-info.json', 'packaged-runtime.json'].sort())
   const manifest = JSON.parse(h.files.get(join(h.releaseDir, 'build-info.json')).data)
-  assert.equal(manifest.version, '1.0.2-test.1')
+  assert.equal(manifest.version, '1.0.2-test.3')
   assert.equal(manifest.commit, commit)
   assert.equal(manifest.tag, tag)
   assert.equal(manifest.workflow.runId, '123')

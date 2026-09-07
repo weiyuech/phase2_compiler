@@ -1,6 +1,6 @@
 {
   "name": "robot-live-ui",
-  "version": "1.0.2-test.2",
+  "version": "1.0.2-test.3",
   "description": "Robot Live System Control Panel",
   "author": "weiyuech",
   "repository": {
@@ -96,6 +96,7 @@
       "executableName": "robot-live-ui"
     },
     "nsis": {
+      "artifactName": "Setup.${version}.${ext}",
       "oneClick": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,

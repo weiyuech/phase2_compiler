@@ -15,12 +15,13 @@ const manifest = JSON.parse(readFileSync(join(uiRoot, 'package.json')))
 
 test('installer retains app identity and synchronizes test version metadata', () => {
   const lock = JSON.parse(readFileSync(join(uiRoot, 'package-lock.json')))
-  assert.equal(manifest.version, '1.0.2-test.2')
+  assert.equal(manifest.version, '1.0.2-test.3')
   assert.equal(lock.version, manifest.version)
   assert.equal(lock.packages[''].version, manifest.version)
   assert.equal(manifest.name, 'robot-live-ui')
   assert.equal(manifest.build.appId, 'com.robot.live')
   assert.equal(manifest.build.win.executableName, 'robot-live-ui')
+  assert.equal(manifest.build.nsis.artifactName, 'Setup.${version}.${ext}')
   assert.equal(manifest.build.nsis.deleteAppDataOnUninstall, undefined)
 })
 
