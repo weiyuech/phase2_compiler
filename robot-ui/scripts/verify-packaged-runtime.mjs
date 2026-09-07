@@ -228,7 +228,7 @@ export async function verifyPackagedRuntime({ backendRoot, localPreflight = fals
   })
   await check('packaged-layout', async () => {
     root = await realpath(root)
-    const required = ['package.json', 'ffplay.exe', 'src/phase2/ocr/index.js',
+    const required = ['package.json', 'ffplay.exe', 'src/phase2/ocr/index.js', 'src/phase2/ocr/worker.js',
       ...MODEL_FILES.map(name => 'data/models/' + name)]
     const files = []
     for (const name of required) {
@@ -285,14 +285,19 @@ export async function verifyPackagedRuntime({ backendRoot, localPreflight = fals
   await check('ocr-pipeline', async () => {
     if (!ort || !image) throw new Error('Native OCR prerequisites failed')
     const originalDirectory = process.cwd()
+    let pipeline
     try {
-      // Production utility backend uses this same cwd. initOcr catches errors;
-      // therefore a real recognizeText result is mandatory evidence here.
+      // Production utility backend uses this same cwd. A real result from the
+      // worker-backed public pipeline is mandatory evidence here.
       process.chdir(root)
-      const pipeline = await importPackaged(root, 'src/phase2/ocr/index.js')
+      pipeline = await importPackaged(root, 'src/phase2/ocr/index.js')
       await pipeline.initOcr()
-      return assertRecognition(await pipeline.recognizeText(image))
-    } finally { process.chdir(originalDirectory) }
+      const generation = pipeline.startOcrSession()
+      return assertRecognition(await pipeline.recognizeText(image, { generation }))
+    } finally {
+      await pipeline?.shutdownOcr?.()
+      process.chdir(originalDirectory)
+    }
   })
   await check('packaged-native-bindings', async () => {
     if (!sharp || !ort) throw new Error('Both Sharp and ONNX must have loaded their native bindings')

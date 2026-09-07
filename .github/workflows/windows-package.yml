@@ -90,6 +90,7 @@ jobs:
           $root = "release/win-unpacked/resources/backend"
           $required = @(
             "$root/src/index.js",
+            "$root/src/phase2/ocr/worker.js",
             "$root/data/models/PP-OCRv6_medium_det.onnx",
             "$root/data/models/PP-OCRv6_medium_rec.onnx",
             "$root/data/models/ppocrv6_dict.txt",

@@ -2,7 +2,8 @@ import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import * as fs from 'node:fs/promises'
-import { basename, join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
@@ -70,6 +71,8 @@ function parseJson(raw, label) {
 export async function deliverTestRelease({
   root = defaultRoot, env = process.env, platform = process.platform, arch = process.arch,
   io = fs, run = exec, hashFile = hashRealFile, log = console.log,
+  sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms)),
+  temporaryRoot = tmpdir(),
 } = {}) {
   root = resolve(root)
   const commandEnv = { ...env, GH_HOST: 'github.com', GH_PROMPT_DISABLED: '1', GH_DEBUG: '', GH_TRACE: '' }
@@ -171,15 +174,82 @@ export async function deliverTestRelease({
     '--repo', context.repository, '--draft', '--prerelease', '--latest=false', '--verify-tag',
     '--target', context.commit, '--title', context.tag, '--notes-file', notesFile])
 
-  const releases = await releasesForTag()
-  if (releases.length !== 1) fail('Could not uniquely verify the newly created draft; manual review required.')
-  const release = releases[0]
-  if (release.draft !== true || release.prerelease !== true || release.tag_name !== context.tag || release.target_commitish !== context.commit) fail('Created release is not the expected draft prerelease; manual review required.')
-  if (!Array.isArray(release.assets) || release.assets.length !== artifacts.length) fail('Draft asset count mismatch; manual review required.')
-  for (const expected of artifacts) {
-    const matching = release.assets.filter(asset => asset.name === expected.name)
-    if (matching.length !== 1 || matching[0].size !== expected.bytes || matching[0].state !== 'uploaded') fail('Draft asset name/size/upload mismatch; manual review required.')
+  // Release assets are eventually consistent after a large upload. Poll only
+  // with read-only API calls; never repeat `gh release create`, delete a draft,
+  // or overwrite an asset after an uncertain result.
+  const verificationDelays = [1000, 2000, 4000, 8000, 8000, 8000]
+  let release = null
+  let assetMismatch = false
+  for (let attempt = 0; attempt <= verificationDelays.length; attempt++) {
+    const releases = await releasesForTag()
+    if (releases.length > 1) fail('Could not uniquely verify the newly created draft; manual review required.')
+    release = releases[0] || null
+    if (release) {
+      if (release.draft !== true || release.prerelease !== true || release.tag_name !== context.tag || release.target_commitish !== context.commit) {
+        fail('Created release is not the expected draft prerelease; manual review required.')
+      }
+      assetMismatch = !Array.isArray(release.assets) || release.assets.length !== artifacts.length || artifacts.some(expected => {
+        const matching = release.assets?.filter(asset => asset.name === expected.name) || []
+        return matching.length !== 1 || matching[0].size !== expected.bytes || matching[0].state !== 'uploaded'
+      })
+      if (!assetMismatch) break
+    }
+    if (attempt < verificationDelays.length) await sleep(verificationDelays[attempt])
   }
+  if (!release) fail('Could not uniquely verify the newly created draft; manual review required.')
+  if (assetMismatch) fail('Draft asset name/size/upload mismatch; manual review required.')
+
+  // Metadata alone did not catch the transient asset state that made the first
+  // test delivery look red after a successful upload. Download this exact tag
+  // once, into a fresh app-owned directory, and verify the bytes independently.
+  // This is deliberately after metadata settles and never retries or changes
+  // the draft. A failed verification leaves the draft for manual inspection.
+  const temporaryParent = resolve(temporaryRoot)
+  const temporaryPrefix = join(temporaryParent, 'robot-live-release-verify-')
+  let verificationDirectory = null
+  try {
+    verificationDirectory = await io.mkdtemp(temporaryPrefix)
+    const resolvedVerificationDirectory = resolve(verificationDirectory)
+    if (dirname(resolvedVerificationDirectory) !== temporaryParent ||
+        !basename(resolvedVerificationDirectory).startsWith('robot-live-release-verify-')) {
+      fail('Unsafe release verification directory; download stopped.')
+    }
+    const directoryState = await io.lstat(resolvedVerificationDirectory)
+    if (!directoryState.isDirectory() || directoryState.isSymbolicLink() || (await io.readdir(resolvedVerificationDirectory)).length) {
+      fail('Release verification directory is not a fresh real directory.')
+    }
+    verificationDirectory = resolvedVerificationDirectory
+    await call('gh', ['release', 'download', context.tag, '--repo', context.repository, '--dir', verificationDirectory])
+
+    const downloadedNames = (await io.readdir(verificationDirectory)).sort()
+    const expectedNames = artifacts.map(item => item.name).sort()
+    if (JSON.stringify(downloadedNames) !== JSON.stringify(expectedNames)) {
+      fail('Downloaded draft asset names do not exactly match the reviewed release.')
+    }
+    for (const expected of artifacts) {
+      const file = join(verificationDirectory, expected.name)
+      const before = await io.lstat(file)
+      if (!before.isFile() || before.isSymbolicLink() || before.size !== expected.bytes) {
+        fail(`Downloaded draft asset size/type mismatch: ${expected.name}.`)
+      }
+      const sha256 = await hashFile(file)
+      const after = await io.lstat(file)
+      if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || sha256 !== expected.sha256) {
+        fail(`Downloaded draft asset checksum mismatch: ${expected.name}.`)
+      }
+    }
+    const downloadedSums = await io.readFile(join(verificationDirectory, 'SHA256SUMS.txt'), 'utf8')
+    const expectedSums = checksummed.map(item => `${item.sha256}  ${item.name}\n`).join('')
+    if (downloadedSums !== expectedSums) fail('Downloaded SHA256SUMS.txt does not match the reviewed artifacts.')
+  } finally {
+    if (verificationDirectory) {
+      const candidate = resolve(verificationDirectory)
+      if (dirname(candidate) === temporaryParent && basename(candidate).startsWith('robot-live-release-verify-')) {
+        await io.rm(candidate, { recursive: true, force: true })
+      }
+    }
+  }
+
   await assertRemoteTag()
   const url = new URL(release.html_url)
   if (url.origin !== 'https://github.com' || !url.pathname.startsWith(`/${context.repository}/releases/`) || url.username || url.password || url.search || url.hash) fail('Unexpected draft release URL.')

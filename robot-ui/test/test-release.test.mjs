@@ -25,10 +25,12 @@ const nativeReport = () => ({
 function fixture() {
   const root = resolve('/virtual/robot-project')
   const releaseDir = join(root, 'release')
+  const temporaryRoot = join(root, 'tmp')
   const installer = 'Robot Setup 1.0.2-test.1.exe'
   const files = new Map()
-  const writes = [], commands = [], logs = []
-  let clock = 1
+  const directories = new Set([releaseDir, temporaryRoot])
+  const writes = [], commands = [], logs = [], removedDirectories = []
+  let clock = 1, temporarySequence = 0
   function put(file, value, extra = {}) {
     files.set(file, { data: Buffer.isBuffer(value) ? value : Buffer.from(value), mtimeMs: clock++, ...extra })
   }
@@ -44,7 +46,7 @@ function fixture() {
       return encoding ? entry.data.toString(encoding) : Buffer.from(entry.data)
     },
     async lstat(file) {
-      if (file === releaseDir) return { isDirectory: () => true, isSymbolicLink: () => false }
+      if (directories.has(file)) return { isFile: () => false, isDirectory: () => true, isSymbolicLink: () => false }
       const entry = files.get(file)
       if (!entry) throw missing()
       return { size: entry.data.length, mtimeMs: entry.mtimeMs,
@@ -58,9 +60,28 @@ function fixture() {
       writes.push(file)
       put(file, value)
     },
+    async mkdtemp(prefix) {
+      assert.equal(prefix, join(temporaryRoot, 'robot-live-release-verify-'))
+      const directory = `${prefix}${++temporarySequence}`
+      assert.equal(directories.has(directory), false)
+      directories.add(directory)
+      return directory
+    },
+    async rm(directory, options) {
+      assert.deepEqual(options, { recursive: true, force: true })
+      assert.equal(directories.has(directory), true, 'cleanup targets only a directory created by this fixture')
+      assert.equal(dirname(directory), temporaryRoot)
+      assert.ok(basename(directory).startsWith('robot-live-release-verify-'))
+      for (const file of [...files.keys()]) {
+        if (dirname(file) === directory) files.delete(file)
+      }
+      directories.delete(directory)
+      removedDirectories.push(directory)
+    },
   }
-  const state = { created: false, remoteSha: commit, head: commit, existing: [], annotated: false, tagReads: 0, releaseReads: 0,
-    failApi: false, failCreate: false, finalAssetMutation: null, remoteAfterRead: null }
+  const state = { created: false, remoteSha: commit, head: commit, existing: [], annotated: false, tagReads: 0, releaseReads: 0, sleeps: [],
+    failApi: false, failCreate: false, failDownload: false, finalAssetMutation: null, downloadMutation: null,
+    downloadCalls: 0, downloadedNames: [], remoteAfterRead: null }
   const run = async (program, args, options) => {
     commands.push({ program, args: [...args], options })
     assert.ok(Array.isArray(args))
@@ -96,6 +117,21 @@ function fixture() {
       // The relevant release is deliberately not on the first API page.
       return { stdout: JSON.stringify([[], releases]) }
     }
+    if (args[0] === 'release' && args[1] === 'download') {
+      assert.deepEqual(args, ['release', 'download', tag, '--repo', 'example/robot', '--dir', args[6]])
+      const destination = args[6]
+      assert.equal(directories.has(destination), true)
+      assert.equal((await io.readdir(destination)).length, 0, 'downloads start in a fresh directory')
+      state.downloadCalls++
+      let entries = state.uploads.map(file => ({
+        name: basename(file), data: Buffer.from(files.get(file).data), extra: {},
+      }))
+      if (state.downloadMutation) entries = state.downloadMutation(entries)
+      for (const entry of entries) put(join(destination, entry.name), entry.data, entry.extra)
+      state.downloadedNames = entries.map(entry => entry.name)
+      if (state.failDownload) throw new Error('unsafe fixture-token-never-export download error')
+      return { stdout: '' }
+    }
     assert.deepEqual(args.slice(0, 3), ['release', 'create', tag])
     assert.equal(state.created, false, 'only one create attempt')
     assert.equal(args.includes('--clobber'), false)
@@ -110,10 +146,13 @@ function fixture() {
     state.created = true
     return { stdout: `https://github.com/example/robot/releases/tag/${tag}\n` }
   }
-  const options = { root, env: environment(), platform: 'win32', arch: 'x64', io, run,
+  const options = { root, env: environment(), platform: 'win32', arch: 'x64', io, run, temporaryRoot,
+    sleep: async ms => state.sleeps.push(ms),
     hashFile: async file => createHash('sha256').update(files.get(file).data).digest('hex'), log: value => logs.push(value) }
-  return { root, releaseDir, installer, files, writes, commands, logs, state, options, put,
-    deliver: () => deliverTestRelease(options), mutations: () => commands.filter(call => call.program === 'gh' && call.args[0] !== 'api') }
+  return { root, releaseDir, installer, files, writes, commands, logs, removedDirectories, state, options, put,
+    deliver: () => deliverTestRelease(options),
+    downloads: () => commands.filter(call => call.program === 'gh' && call.args[0] === 'release' && call.args[1] === 'download'),
+    mutations: () => commands.filter(call => call.program === 'gh' && call.args[0] === 'release' && call.args[1] !== 'download') }
 }
 
 test('pure context guard accepts exact push and workflow-dispatch test tags', () => {
@@ -242,8 +281,60 @@ test('annotated reviewed tag creates one draft with all four verified assets and
     const hash = createHash('sha256').update(h.files.get(join(h.releaseDir, name)).data).digest('hex')
     assert.ok(sums.includes(`${hash}  ${name}\n`))
   }
+  assert.equal(h.downloads().length, 1)
+  assert.deepEqual(h.state.downloadedNames.sort(), [h.installer, 'SHA256SUMS.txt', 'build-info.json', 'packaged-runtime.json'].sort())
+  assert.equal(h.removedDirectories.length, 1)
+  assert.ok(basename(h.removedDirectories[0]).startsWith('robot-live-release-verify-'))
   assert.deepEqual(h.logs, [result.url])
   assert.equal(h.state.tagReads, 3)
+})
+
+test('eventually consistent assets are verified with reads and never a second create', async () => {
+  const h = fixture()
+  h.state.finalAssetMutation = assets => h.state.releaseReads < 5
+    ? assets.map((asset, index) => index ? asset : { ...asset, state: 'starter', size: 0 })
+    : assets
+  const result = await h.deliver()
+  assert.match(result.url, /^https:\/\/github\.com\//)
+  assert.equal(h.mutations().length, 1)
+  assert.equal(h.downloads().length, 1)
+  assert.deepEqual(h.state.sleeps, [1000, 2000])
+  assert.equal(h.state.releaseReads, 5)
+})
+
+test('a partial draft download fails closed and cleans only its fresh temporary directory', async () => {
+  const h = fixture()
+  h.state.downloadMutation = entries => entries.slice(1)
+  await assert.rejects(h.deliver(), /Downloaded draft asset names/)
+  assert.equal(h.mutations().length, 1)
+  assert.equal(h.downloads().length, 1)
+  assert.equal(h.removedDirectories.length, 1)
+  assert.deepEqual(h.logs, [])
+})
+
+test('same-size downloaded asset corruption is rejected by SHA-256', async () => {
+  const h = fixture()
+  h.state.downloadMutation = entries => entries.map((entry, index) => {
+    if (index) return entry
+    const data = Buffer.from(entry.data)
+    data[0] ^= 0xff
+    return { ...entry, data }
+  })
+  await assert.rejects(h.deliver(), /checksum mismatch/)
+  assert.equal(h.mutations().length, 1)
+  assert.equal(h.downloads().length, 1)
+  assert.equal(h.removedDirectories.length, 1)
+  assert.deepEqual(h.logs, [])
+})
+
+test('failed authenticated download is not retried and its partial files are cleaned', async () => {
+  const h = fixture()
+  h.state.failDownload = true
+  await assert.rejects(h.deliver(), error => /no further release/.test(error.message) && !error.message.includes(h.options.env.GH_TOKEN))
+  assert.equal(h.mutations().length, 1)
+  assert.equal(h.downloads().length, 1)
+  assert.equal(h.removedDirectories.length, 1)
+  assert.deepEqual(h.logs, [])
 })
 
 test('tag moving between validation and upload fails before any GitHub writes', async () => {
@@ -296,6 +387,8 @@ for (const [name, mutate] of [
     h.state.finalAssetMutation = mutate
     await assert.rejects(h.deliver(), /asset/)
     assert.equal(h.mutations().length, 1)
+    assert.equal(h.downloads().length, 0)
+    assert.deepEqual(h.removedDirectories, [])
     assert.deepEqual(h.logs, [])
   })
 }
