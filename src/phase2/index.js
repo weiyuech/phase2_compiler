@@ -9,7 +9,7 @@ import { Phase2Monitor } from './monitor.js';
 import { BarrageManager } from './barrage-manager.js';
 import path from 'path';
 import { BoundedOcrTextLog } from './ocr/text-log.js';
-import { CommentHistory } from './ocr/comment-history.js';
+import { OcrTextJudge } from './ocr/text-judge.js';
 
 // OCR 依赖 onnxruntime-node / sharp 两个 native 模块。静态 import 时，
 // 只要目标机器上加载失败（缺 VC++ 运行库、打包遗漏平台二进制…），
@@ -39,6 +39,7 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
   let ocrSessionEpoch = 0;
   let ocrWorkerGeneration = null;
   let ocrDestroyed = false;
+  let deferredOcrText = null;
 
   const setOcrPlaybackPaused = (paused) => {
     loadOcr()
@@ -98,7 +99,17 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
   const ocrTextLog = new BoundedOcrTextLog({ filePath: logPath });
 
   let lastLoggedText = null;
-  const commentHistory = new CommentHistory();
+  const textJudge = new OcrTextJudge({
+    judge: (system, user) => llm.judgeOcr(system, user),
+    promptPath: path.join(process.env.USER_DATA_DIR || '.', 'config', 'barrage-prompt-judge.txt'),
+    onText: async text => {
+      if (!barrageManager.isActive || ocrDestroyed) return;
+      appendOcrLog(text);
+      uiBridge.broadcast('BARRAGE_TEXT_READ', { text });
+      await barrageManager.handleOcrText(text);
+    },
+    onError: () => uiBridge.broadcast('BARRAGE_LOG', { text: '新增问题判断失败，本轮跳过，请检查大模型配置或稍后重试。' }),
+  });
 
   function appendOcrLog(text) {
     if (!text || !text.trim()) return;
@@ -130,6 +141,8 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
   }
 
   function stopOcrTrackingSession() {
+    deferredOcrText = null;
+    textJudge.reset();
     ocrTrackingActive = false;
     ocrWorkerGeneration = null;
     ocrSessionEpoch += 1;
@@ -153,8 +166,9 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
     }
     console.log(`[Phase 2] Barrage OCR tracking STARTED on region:`, rect);
     lastLoggedText = null;
-    commentHistory.reset();
+    textJudge.reset();
     barrageManager.isActive = true;
+    deferredOcrText = null;
     barrageManager.mp3Count = 0;
     barrageManager.llmCount = 0;
     startOcrTrackingSession();
@@ -166,6 +180,7 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
   });
 
   uiBridge.on('onBarrageStop', () => {
+    textJudge.reset();
     console.log(`[Phase 2] Barrage OCR tracking STOPPED`);
     stopOcrTrackingSession();
     barrageManager.stop();
@@ -180,11 +195,7 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
     // Legacy fallback, in case UI sends text directly
     console.log(`[Phase 2] OCR Output (from UI):`, text);
     if (!barrageManager.isActive || checkIsSpeaking?.()) return;
-    const newText = commentHistory.extract(String(text || '').split(/\n/));
-    if (newText) appendOcrLog(newText);
-    barrageManager.handleOcrText(newText).catch(err => {
-      console.error('[Phase 2] BarrageManager text processing failed:', err.message);
-    });
+    textJudge.submit(text);
   });
 
   uiBridge.on('onBarrageImage', async (data) => {
@@ -207,8 +218,7 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
         !ocrTrackingActive ||
         !barrageManager.isActive ||
         sessionEpoch !== ocrSessionEpoch ||
-        workerGeneration !== ocrWorkerGeneration ||
-        barrageSpeechActive
+        workerGeneration !== ocrWorkerGeneration
       ) return;
 
       framesProcessed++;
@@ -225,32 +235,10 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
         // Broadcast the raw full text to UI for current display box
         uiBridge.broadcast('BARRAGE_CURRENT_TEXT', { text });
 
-        // Do not consume comments while the host blocks replies. The worker
-        // returns cached recognition for unchanged images after the host stops.
-        if (checkIsSpeaking?.()) return;
-        const newText = commentHistory.extract(result.lines || text.split(/\n/));
-
-        // Log only newly observed comments.
-        if (newText && newText.trim()) {
-          console.log(`[Phase 2] [OCR Result - New]:`, newText);
-          appendOcrLog(newText);
-          uiBridge.broadcast('BARRAGE_TEXT_READ', { text: newText });
-        }
-
-        // Playback Trigger: feed payload to BarrageManager if host is quiet.
-        // The history above is only advanced while the host is quiet.
-        const isHostSpeaking = checkIsSpeaking && checkIsSpeaking();
-        if (!isHostSpeaking) {
-          const playbackPayload = newText;
-
-          if (playbackPayload && playbackPayload.trim()) {
-            console.log(`[Phase 2] [Playback Trigger]: Feeding "${playbackPayload}" to BarrageManager`);
-            barrageManager.handleOcrText(playbackPayload).catch(err => {
-              console.error('[Phase 2] BarrageManager text processing failed:', err.message);
-            });
-          }
-
-        }
+        const currentText = (result.lines || [text]).join('\n');
+        if (checkIsSpeaking?.() || barrageSpeechActive) { deferredOcrText = currentText; return; }
+        if (!result.unchanged || deferredOcrText !== null) textJudge.submit(currentText);
+        deferredOcrText = null;
       }
     } catch (err) {
       if (err?.ocrFatal) {
@@ -267,6 +255,7 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
     async destroy() {
       if (ocrDestroyed) return;
       ocrDestroyed = true;
+      textJudge.reset();
       ocrTrackingActive = false;
       ocrWorkerGeneration = null;
       ocrSessionEpoch += 1;

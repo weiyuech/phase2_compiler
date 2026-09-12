@@ -58,10 +58,8 @@ export class BarrageManager {
       return;
     }
 
-    // Deduplicate OCR stream (same as frontend behavior)
-    if (text === this.lastRecognizedText) {
-      return;
-    }
+    // The OCR judge owns semantic/new-question decisions. Identical output
+    // may still be intentional under the operator's custom judge prompt.
     this.lastRecognizedText = text;
 
     const generation = this._generation;

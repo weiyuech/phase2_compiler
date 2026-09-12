@@ -63,6 +63,14 @@ export class LLMRewriter {
     return cleaned.text
   }
 
+  async judgeOcr(system, user) {
+    const result = await this._tryProviderCustom(this.primary, system, user)
+      || await this._tryProviderCustom(this.fallback, system, user)
+    // Preserve the judge's exact control signal; speech word filtering belongs
+    // to the later reply stage, not the comparison result.
+    return result?.text ?? null
+  }
+
   async _tryProviderCustom(provider, system, user) {
     try {
       const text = await Promise.race([

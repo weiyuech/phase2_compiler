@@ -89,6 +89,18 @@
             <el-input v-model="barrageGeneralText" type="textarea" :rows="3" class="prompt-textarea" :disabled="!customBarrageGeneralEnabled" />
           </div>
 
+          <div>
+            <div class="prompt-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <span class="section-sub-title" style="color: var(--text); font-size: 13px; font-weight: 600;">弹幕 - 新增问题判断提示词</span>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="font-size: 12px; color: var(--text-dim)">自定义</span>
+                <el-switch v-model="customJudgeEnabled" size="small" @change="handleJudgeSwitch" />
+              </div>
+            </div>
+            <el-input v-model="judgePromptText" type="textarea" :rows="3" class="prompt-textarea" :disabled="!customJudgeEnabled" />
+            <p class="panel-note">“无新问题”跳过本轮，其他文本交给弹幕问答。</p>
+          </div>
+
           <div class="row-actions" style="margin-top: auto; padding-top: 16px;">
             <el-button type="primary" :loading="savingPrompt" @click="savePrompt">保存全部提示词</el-button>
             <span v-if="promptSavedOk" class="ok-text">已保存，后端已重载</span>
@@ -312,6 +324,7 @@
 import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessageBox, ElMessage }                   from 'element-plus'
 import AudioDiagnostics from './AudioDiagnostics.vue'
+import { DEFAULT_OCR_JUDGE_PROMPT } from '../../../../../src/phase2/ocr/judge-prompt.js'
 
 const props = defineProps({ wsRef: Object })
 
@@ -365,6 +378,14 @@ async function saveBannedWords() {
 
 // ── 改写提示词 ─────────────────────────────────────────────────────────────────
 const promptText   = ref('')
+const judgePromptText = ref(DEFAULT_OCR_JUDGE_PROMPT)
+const customJudgeEnabled = ref(false)
+const customJudgeText = ref('')
+function handleJudgeSwitch(enabled) {
+  if (enabled) judgePromptText.value = customJudgeText.value || DEFAULT_OCR_JUDGE_PROMPT
+  else { customJudgeText.value = judgePromptText.value; judgePromptText.value = DEFAULT_OCR_JUDGE_PROMPT }
+}
+watch(judgePromptText, value => { if (customJudgeEnabled.value) customJudgeText.value = value })
 const barrageNameText = ref('')
 const barrageGeneralText = ref('')
 const savingPrompt = ref(false)
@@ -412,6 +433,11 @@ function isDefaultMatch(savedText, defaultText) {
 async function loadPrompt() {
   if (!window.api) return
   try {
+    const judge = await window.api.readBarragePromptJudge()
+    if (!judge.ok) throw new Error(judge.error || '判断提示词读取失败')
+    judgePromptText.value = judge.text || DEFAULT_OCR_JUDGE_PROMPT
+    customJudgeEnabled.value = !isDefaultMatch(judge.text, DEFAULT_OCR_JUDGE_PROMPT)
+    if (customJudgeEnabled.value) customJudgeText.value = judge.text
     const res = await window.api.readLlmPrompt()
     if (res.ok) {
       const text = res.text
@@ -500,6 +526,8 @@ async function savePrompt() {
   if (!window.api) return
   savingPrompt.value = true
   try {
+    const judge = await window.api.writeBarragePromptJudge(judgePromptText.value)
+    if (!judge.ok) throw new Error(judge.error || '判断提示词保存失败')
     const res = await window.api.writeLlmPrompt(promptText.value)
     if (!res.ok) throw new Error(res.error || '保存失败')
     

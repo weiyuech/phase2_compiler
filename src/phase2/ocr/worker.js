@@ -155,7 +155,7 @@ parentPort.on('message', async (message) => {
     const { data, info } = await sharp(imageBuffer).greyscale().raw().toBuffer({ resolveWithObject: true });
     const image = { data, width: info.width, height: info.height };
     if (imagesEquivalent(previousImage, image)) {
-      parentPort.postMessage({ type: 'RESULT', requestId: message.requestId, result: previousResult });
+      parentPort.postMessage({ type: 'RESULT', requestId: message.requestId, result: previousResult ? { ...previousResult, unchanged: true } : null });
       return;
     }
     const result = await recognize(imageBuffer);

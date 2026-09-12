@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('api', {
   readBarragePromptName:  ()     => ipcRenderer.invoke('read-barrage-prompt-name'),
   writeBarragePromptName: (text) => ipcRenderer.invoke('write-barrage-prompt-name', text),
   readBarragePromptGeneral:  ()     => ipcRenderer.invoke('read-barrage-prompt-general'),
+  readBarragePromptJudge: () => ipcRenderer.invoke('read-barrage-prompt-judge'),
+  writeBarragePromptJudge: text => ipcRenderer.invoke('write-barrage-prompt-judge', text),
   writeBarragePromptGeneral: (text) => ipcRenderer.invoke('write-barrage-prompt-general', text),
 
   // Admin password

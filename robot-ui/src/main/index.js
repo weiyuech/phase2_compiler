@@ -5,6 +5,7 @@ import { scryptSync, randomBytes, timingSafeEqual } from 'crypto'
 import { RollingLog } from '../../../src/diagnostics/rolling-log.js'
 import { createDiagnosticsReport } from '../../../src/diagnostics/report.js'
 import { seedPackagedUserData } from '../../../src/packaging/seed-user-data.js'
+import { DEFAULT_OCR_JUDGE_PROMPT } from '../../../src/phase2/ocr/judge-prompt.js'
 
 // ─── PROJECT_ROOT ─────────────────────────────────────────────────────────────
 // dev:      src/main/ → src/ → robot-ui/ → robot-live-system/  (3 levels up)
@@ -45,6 +46,7 @@ const BANNED_WORDS_PATH = join(CONFIG_DIR, 'banned-words.txt')
 const LLM_PROMPT_PATH   = join(CONFIG_DIR, 'llm-system-prompt.txt')
 const BARRAGE_PROMPT_NAME_PATH = join(CONFIG_DIR, 'barrage-prompt-name.txt')
 const BARRAGE_PROMPT_GENERAL_PATH = join(CONFIG_DIR, 'barrage-prompt-general.txt')
+const BARRAGE_PROMPT_JUDGE_PATH = join(CONFIG_DIR, 'barrage-prompt-judge.txt')
 const ADMIN_PATH        = join(CONFIG_DIR, 'admin.json')
 const ENV_PATH          = app.isPackaged ? join(USER_DATA_DIR, '.env') : join(PROJECT_ROOT, '.env')
 
@@ -807,6 +809,21 @@ ipcMain.handle('read-barrage-prompt-general', () => {
     const text = readFileSync(BARRAGE_PROMPT_GENERAL_PATH, 'utf-8')
     return { ok: true, text }
   } catch (e) { return { ok: false, error: e.message, text: '' } }
+})
+
+ipcMain.handle('read-barrage-prompt-judge', () => {
+  try { return { ok: true, text: readFileSync(BARRAGE_PROMPT_JUDGE_PATH, 'utf-8') } }
+  catch (e) {
+    return e.code === 'ENOENT' ? { ok: true, text: DEFAULT_OCR_JUDGE_PROMPT } : { ok: false, error: e.message }
+  }
+})
+
+ipcMain.handle('write-barrage-prompt-judge', (_, text) => {
+  try {
+    if (typeof text !== 'string' || !text.trim() || text.length > 32000) throw new Error('判断提示词不能为空且不能超过 32000 字符')
+    writeFileSync(BARRAGE_PROMPT_JUDGE_PATH, text, 'utf-8')
+    return { ok: true }
+  } catch (e) { return { ok: false, error: e.message } }
 })
 
 ipcMain.handle('write-barrage-prompt-general', (_, text) => {

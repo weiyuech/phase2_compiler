@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CommentHistory } from '../src/phase2/ocr/comment-history.js';
+import { OcrTextJudge } from '../src/phase2/ocr/text-judge.js';
+import { DEFAULT_OCR_JUDGE_PROMPT } from '../src/phase2/ocr/judge-prompt.js';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import { imagesEquivalent } from '../src/phase2/ocr/image-change.js';
 import { BarrageProvider } from '../src/knowledge/barrage-provider.js';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -22,36 +24,57 @@ test('scan interval and cooldown persist independently and interval is bounded',
   assert.equal((await provider.getConfig()).cooldown, 25);
 });
 
-test('scrolling feeds only new lines, retaining older captures in bounded history', () => {
-  const h = new CommentHistory();
-  assert.equal(h.extract(['A', 'B', 'C', 'D', 'E']), 'A\nB\nC\nD\nE');
-  assert.equal(h.extract(['B', 'C', 'D', 'E', 'F', 'G']), 'F\nG');
-  assert.equal(h.extract(['C', 'D', 'E', 'F', 'G']), '');
-  assert.equal(h.extract(['A', 'F', 'G']), '');
+test('judge alone decides new text; only exact signal skips', async () => {
+  const sent = [], inputs = [], outputs = ['无新问题', 'F\nG', '无新问题。'];
+  const h = new OcrTextJudge({ judge: async (prompt, user) => {
+    assert.equal(prompt, DEFAULT_OCR_JUDGE_PROMPT);
+    inputs.push(user);
+    return outputs.shift();
+  }, onText: text => sent.push(text) });
+  for (const text of ['ABCDE', 'BCDEFG', 'BCDEFG']) { h.submit(text); await nextTurn(); }
+  assert.deepEqual(sent, ['F\nG', '无新问题。']);
+  assert.equal(inputs[1], '<previous_ocr>\nABCDE\n</previous_ocr>\n<current_ocr>\nBCDEFG\n</current_ocr>');
+  assert.equal(inputs.length, 3, 'no hidden text-equality judge');
 });
 
-test('anchored long-line OCR substitution does not replay old comments', () => {
-  const h = new CommentHistory();
-  h.extract(['用户说今天中午好', '保持不变']);
-  assert.equal(h.extract(['用户说今天中牛好', '保持不变', '新问题']), '新问题');
-  assert.equal(h.extract(['用户说今天中午好', '新问题']), '');
+test('slow judge retains only latest pending capture and reset discards old answers', async () => {
+  const calls = [], sent = [];
+  const h = new OcrTextJudge({ judge: (_prompt, user) => new Promise(resolve => calls.push({ user, resolve })), onText: text => sent.push(text) });
+  h.submit('A'); h.submit('B'); h.submit('C');
+  assert.equal(calls.length, 1);
+  calls[0].resolve('无新问题'); await nextTurn();
+  assert.equal(calls[1].user, '<previous_ocr>\nA\n</previous_ocr>\n<current_ocr>\nC\n</current_ocr>');
+  h.reset(); h.submit('new session');
+  calls[1].resolve('stale answer'); await nextTurn();
+  assert.equal(calls[2].user, '<previous_ocr>\n\n</previous_ocr>\n<current_ocr>\nnew session\n</current_ocr>');
+  calls[2].resolve('fresh answer'); await nextTurn();
+  assert.deepEqual(sent, ['fresh answer']);
 });
 
-test('short comments and changed numbers remain distinct', () => {
-  const h = new CommentHistory();
-  h.extract(['午', '价格是15元', '价格是1.5元', '不变']);
-  assert.equal(h.extract(['牛', '价格是16元', '不变']), '牛\n价格是16元');
+test('failed judge does not fall back to raw OCR or advance baseline', async () => {
+  const errors = [], sent = [];
+  const h = new OcrTextJudge({ judge: async () => null, onText: text => sent.push(text), onError: error => errors.push(error) });
+  h.submit('raw screenshot text'); await nextTurn();
+  assert.equal(errors.length, 1);
+  assert.equal(h.previous, '');
+  assert.deepEqual(sent, []);
 });
 
-test('history expires, resets and has a hard entry bound', () => {
-  let now = 0;
-  const h = new CommentHistory({ limit: 2, ttlMs: 10, now: () => now });
-  h.extract(['A', 'B', 'C']);
-  assert.equal(h.entries.length, 2);
-  now = 11;
-  assert.equal(h.extract(['C']), 'C');
-  h.reset();
-  assert.equal(h.extract(['C']), 'C');
+test('judge loads saved custom prompt on each round and falls back when absent', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ocr-judge-prompt-test-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const promptPath = join(dir, 'judge.txt'), seen = [];
+  const h = new OcrTextJudge({ promptPath, judge: async prompt => {
+    seen.push(prompt); return '无新问题';
+  }, onText: () => assert.fail('skip signal must not reach reply') });
+  // Drain directly so asynchronous prompt IO is awaited deterministically.
+  const round = async text => { h.pending = { text, epoch: h.epoch }; await h.drain(); };
+  await round('first');
+  await writeFile(promptPath, '自定义判断规则');
+  await round('second');
+  await writeFile(promptPath, DEFAULT_OCR_JUDGE_PROMPT);
+  await round('third');
+  assert.deepEqual(seen, [DEFAULT_OCR_JUDGE_PROMPT, '自定义判断规则', DEFAULT_OCR_JUDGE_PROMPT]);
 });
 
 test('pixel comparison tolerates tiny noise but detects changed text and dimensions', () => {
