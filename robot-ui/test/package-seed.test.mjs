@@ -15,7 +15,7 @@ const manifest = JSON.parse(readFileSync(join(uiRoot, 'package.json')))
 
 test('installer retains app identity and synchronizes test version metadata', () => {
   const lock = JSON.parse(readFileSync(join(uiRoot, 'package-lock.json')))
-  assert.equal(manifest.version, '1.0.2-test.3')
+  assert.equal(manifest.version, '1.0.2-test.4')
   assert.equal(lock.version, manifest.version)
   assert.equal(lock.packages[''].version, manifest.version)
   assert.equal(manifest.name, 'robot-live-ui')

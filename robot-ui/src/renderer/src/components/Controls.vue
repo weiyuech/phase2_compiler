@@ -64,6 +64,15 @@
           </div>
           <p v-if="barrageEnabled" class="ocr-status" :class="{ ready: ocrReady }">{{ ocrStatusMsg }}</p>
           <div class="control-field">
+            <span>识别间隔</span>
+            <div class="cooldown-input">
+              <el-input-number v-model="barrageScanInterval" :min="1" :max="60" :precision="0" size="small"
+                controls-position="right" aria-label="识别间隔秒数"
+                @change="value => send('SET_BARRAGE_CONFIG', { scan_interval: value })" />
+              <span>秒</span>
+            </div>
+          </div>
+          <div class="control-field">
             <span>播报冷却</span>
             <div class="cooldown-input">
               <el-input-number
@@ -132,6 +141,7 @@ const ocrStatusMsg = computed(() => {
 })
 const currentCapturedText = ref('')
 const barrageCooldown = ref(0)
+const barrageScanInterval = ref(1)
 const repeatCount = ref(1)  // How many full passes through the tour list
 const currentIteration = ref(0)
 const canCaptureBarrage = Boolean(
@@ -182,11 +192,13 @@ function handleMessage(raw) {
         if (data.paused !== undefined) isPaused.value = data.paused
         break
       case 'BARRAGE_CONFIG':
+        barrageScanInterval.value = data?.scan_interval || 1
         if (data && data.cooldown !== undefined) {
           barrageCooldown.value = data.cooldown
         }
         break
       case 'BARRAGE_CONFIG_SAVED':
+        barrageScanInterval.value = data?.scan_interval || 1
         if (data && data.cooldown !== undefined) {
           barrageCooldown.value = data.cooldown
         }

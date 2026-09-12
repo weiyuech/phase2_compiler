@@ -29,13 +29,14 @@ export class BarrageProvider {
     try {
       const raw = await fs.readFile(this.configPath, 'utf8')
       const config = JSON.parse(raw)
+      config.scan_interval = Math.max(1, Math.min(60, Math.round(Number(config.scan_interval) || 1)))
       if (typeof config.cooldown !== 'number') {
         config.cooldown = 0
       }
       return config
     } catch (err) {
       console.error('[BarrageProvider] Failed to read config:', err.message)
-      return { mode: 'llm-strict', cooldown: 0 }
+      return { mode: 'llm-strict', cooldown: 0, scan_interval: 1 }
     }
   }
 
@@ -77,7 +78,8 @@ export class BarrageProvider {
       document_name: docName,
       priority_mode,
       random_reply,
-      cooldown: parsedCooldown
+      cooldown: parsedCooldown,
+      scan_interval: Math.max(1, Math.min(60, Math.round(Number(config.scan_interval) || 1)))
     }
     
     try {

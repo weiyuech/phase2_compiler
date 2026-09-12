@@ -9,6 +9,7 @@ import { Phase2Monitor } from './monitor.js';
 import { BarrageManager } from './barrage-manager.js';
 import path from 'path';
 import { BoundedOcrTextLog } from './ocr/text-log.js';
+import { CommentHistory } from './ocr/comment-history.js';
 
 // OCR 依赖 onnxruntime-node / sharp 两个 native 模块。静态 import 时，
 // 只要目标机器上加载失败（缺 VC++ 运行库、打包遗漏平台二进制…），
@@ -25,50 +26,6 @@ function loadOcr() {
     });
   }
   return _ocrModule;
-}
-
-function extractNewContent(prev, next) {
-  if (!prev) return next;
-  if (!next) return '';
-
-  const cleanPrev = prev.trim();
-  const cleanNext = next.trim();
-
-  if (cleanPrev === cleanNext) return '';
-
-  const maxLen = Math.min(cleanPrev.length, cleanNext.length);
-  let overlapLen = 0;
-
-  // Search for matching overlap of length 'len' from maxLen down to 2
-  for (let len = maxLen; len >= 2; len--) {
-    const suffix = cleanPrev.slice(-len);
-    const prefix = cleanNext.slice(0, len);
-    if (suffix === prefix) {
-      overlapLen = len;
-      break;
-    }
-  }
-
-  if (overlapLen > 0) {
-    return cleanNext.slice(overlapLen).trim();
-  }
-
-  return cleanNext;
-}
-
-function checkOverlap(prev, next) {
-  if (!prev || !next) return false;
-  const cleanPrev = prev.trim();
-  const cleanNext = next.trim();
-  if (cleanPrev === cleanNext) return true;
-
-  const maxLen = Math.min(cleanPrev.length, cleanNext.length);
-  for (let len = maxLen; len >= 2; len--) {
-    if (cleanPrev.slice(-len) === cleanNext.slice(0, len)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, checkGoalHandling, checkIsSpeaking, onBarrageSpeechStart, onBarrageSpeechEnd }) {
@@ -141,7 +98,7 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
   const ocrTextLog = new BoundedOcrTextLog({ filePath: logPath });
 
   let lastLoggedText = null;
-  let lastFullOcrText = null;
+  const commentHistory = new CommentHistory();
 
   function appendOcrLog(text) {
     if (!text || !text.trim()) return;
@@ -196,7 +153,7 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
     }
     console.log(`[Phase 2] Barrage OCR tracking STARTED on region:`, rect);
     lastLoggedText = null;
-    lastFullOcrText = null;
+    commentHistory.reset();
     barrageManager.isActive = true;
     barrageManager.mp3Count = 0;
     barrageManager.llmCount = 0;
@@ -222,10 +179,10 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
   uiBridge.on('onBarrageTextRead', (text) => {
     // Legacy fallback, in case UI sends text directly
     console.log(`[Phase 2] OCR Output (from UI):`, text);
-    if (text) {
-      appendOcrLog(text);
-    }
-    barrageManager.handleOcrText(text).catch(err => {
+    if (!barrageManager.isActive || checkIsSpeaking?.()) return;
+    const newText = commentHistory.extract(String(text || '').split(/\n/));
+    if (newText) appendOcrLog(newText);
+    barrageManager.handleOcrText(newText).catch(err => {
       console.error('[Phase 2] BarrageManager text processing failed:', err.message);
     });
   });
@@ -268,9 +225,12 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
         // Broadcast the raw full text to UI for current display box
         uiBridge.broadcast('BARRAGE_CURRENT_TEXT', { text });
 
-        const newText = extractNewContent(lastFullOcrText, text);
+        // Do not consume comments while the host blocks replies. The worker
+        // returns cached recognition for unchanged images after the host stops.
+        if (checkIsSpeaking?.()) return;
+        const newText = commentHistory.extract(result.lines || text.split(/\n/));
 
-        // Continuous 1Hz logging: log if there's new incremental text
+        // Log only newly observed comments.
         if (newText && newText.trim()) {
           console.log(`[Phase 2] [OCR Result - New]:`, newText);
           appendOcrLog(newText);
@@ -278,11 +238,10 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
         }
 
         // Playback Trigger: feed payload to BarrageManager if host is quiet.
-        // If host is speaking, we defer updating lastFullOcrText so the next quiet frame can catch and reply to it.
+        // The history above is only advanced while the host is quiet.
         const isHostSpeaking = checkIsSpeaking && checkIsSpeaking();
         if (!isHostSpeaking) {
-          const hasOverlap = checkOverlap(lastFullOcrText, text);
-          const playbackPayload = hasOverlap ? newText : text;
+          const playbackPayload = newText;
 
           if (playbackPayload && playbackPayload.trim()) {
             console.log(`[Phase 2] [Playback Trigger]: Feeding "${playbackPayload}" to BarrageManager`);
@@ -291,7 +250,6 @@ export function initPhase2({ robot, tour, llm, tts, uiBridge, transitAudio, chec
             });
           }
 
-          lastFullOcrText = text;
         }
       }
     } catch (err) {

@@ -177,6 +177,7 @@ export class OcrWorkerClient {
       this.worker.postMessage({
         type: 'RECOGNIZE',
         requestId: request.id,
+        generation: request.generation,
         image: request.image,
       });
     } catch (error) {

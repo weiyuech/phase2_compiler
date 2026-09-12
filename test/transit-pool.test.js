@@ -7,6 +7,32 @@ import { TransitAudioManager, normalizeTransitConfig } from '../src/transit/mana
 
 const nextTurn = () => new Promise(resolve => setImmediate(resolve))
 
+test('arrival retires prepared transit TTS after its sentence without starting another loop', async () => {
+  let finish, options, plays = 0, released = false
+  const tts = {
+    enabled: true, stop() {},
+    async prepareText() { return { release() { released = true } } },
+    speakPreparedText(_source, opts) {
+      plays++
+      options = opts
+      return new Promise(resolve => { finish = resolve })
+    },
+  }
+  const manager = new TransitAudioManager({ filePath: null, tts })
+  manager.saveConfig({ enabled: true, type: 'tts', text: '当前句。后续句。' })
+  await manager.start(tts, { rewrite: async () => ({ text: '当前句。后续句。' }) })
+  await nextTurn()
+  const finished = manager.finishCurrentSentence()
+  assert.equal(options.shouldFinish(), true)
+  assert.equal(options.signal.aborted, false)
+  assert.equal(manager.isRunning(), true)
+  finish({ ok: true })
+  await finished
+  assert.equal(plays, 1)
+  assert.equal(released, true)
+  assert.equal(manager.isRunning(), false)
+})
+
 function makeHarness(t, { random = () => 0, failing = new Set() } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'transit-pool-test-'))
   const files = ['a.mp3', 'b.mp3', 'c.mp3'].map(name => join(dir, name))

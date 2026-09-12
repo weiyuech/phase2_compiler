@@ -399,6 +399,30 @@ test('reused transit prepared text loops from sentence zero without another synt
   source.release()
 })
 
+for (const robot of [false, true]) {
+  test(`transit arrival finishes active sentence and discards prepared remainder (${robot ? 'robot' : 'local'})`, async t => {
+    const h = fixture(t, { role: 'transit', robot })
+    let arriving = false, ended = false
+    const playback = h.engine.speak('当前句子。剩余句子。', {
+      harvest: false, shouldFinish: () => arriving,
+    }).then(result => { ended = true; return result })
+    await nextTurn()
+    h.calls.forEach(call => call.ready())
+    await nextTurn()
+    assert.equal(h.plays.length, 1)
+    arriving = true
+    await nextTurn()
+    assert.equal(ended, false, 'arrival must not cut the active player')
+    assert.deepEqual(h.controls, [])
+    h.plays[0].done.resolve({ ok: true })
+    const result = await playback
+    assert.equal(result.ok, true)
+    assert.equal(result.completedSentences, 1)
+    assert.deepEqual(h.plays.map(play => play.text), ['当前句子。'])
+    assert.equal(h.coordinator.jobs.size, 0)
+  })
+}
+
 function ffmpeg(args, input) {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpegStatic, ['-hide_banner', '-loglevel', 'error', ...args], { stdio: ['pipe', 'pipe', 'ignore'] })

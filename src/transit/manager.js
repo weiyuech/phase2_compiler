@@ -99,7 +99,7 @@ export class TransitAudioManager {
     if (!cfg.enabled) return
 
     // 分配新的运行 ID，防止旧循环在异步挂起后"复活"
-    const runId = { controller: new AbortController() }
+    const runId = { controller: new AbortController(), type: cfg.type, finishSentence: false }
     this._runId = runId
 
     if (cfg.type === 'mp3') {
@@ -112,7 +112,7 @@ export class TransitAudioManager {
         this._runId = null
         return
       }
-      this._loopTts(text, tts, llm, runId)
+      runId.finished = this._loopTts(text, tts, llm, runId)
     }
   }
 
@@ -213,6 +213,7 @@ export class TransitAudioManager {
     }
 
     if (this._runId !== runId) return  // 在 LLM 期间被 stop() 或新的 start() 打断
+    if (runId.finishSentence) { this._runId = null; return }
 
     if (this._tts?.prepareText) {
       return this._loopPreparedTts(playText, runId)
@@ -270,7 +271,9 @@ export class TransitAudioManager {
         const started = this._now()
         const result = await this._tts.speakPreparedText(source, {
           signal: runId.controller.signal, harvest: false,
+          shouldFinish: () => runId.finishSentence,
         })
+        if (runId.finishSentence) break
         if (this._runId !== runId || result?.aborted) break
         if (result?.ok === false) throw result.error || new Error('过渡 TTS 播放失败')
         if (this._now() - started < 800) {
@@ -284,6 +287,13 @@ export class TransitAudioManager {
       source?.release()
       if (this._runId === runId) this._runId = null
     }
+  }
+
+  finishCurrentSentence() {
+    const run = this._runId
+    if (!run || run.type !== 'tts' || !this._tts?.prepareText) return Promise.resolve()
+    run.finishSentence = true
+    return run.finished || Promise.resolve()
   }
 
   stop() {

@@ -529,11 +529,16 @@ function handleMessage(raw) {
         break
 
       case 'BARRAGE_START':
+        send('GET_BARRAGE_CONFIG')
         barrageRegion.value = data
         addLog('system', `弹幕追踪已启动: ${data.width}x${data.height}`)
         if (ownsBarrageCapture) startBarrageLoop()
         break
-      
+      case 'BARRAGE_CONFIG':
+      case 'BARRAGE_CONFIG_SAVED':
+        barrageScanInterval = Math.max(1, Math.min(60, Number(data?.scan_interval) || 1))
+        break
+
       case 'BARRAGE_STOP':
         ownsBarrageCapture = false
         barrageRegion.value = null
@@ -655,12 +660,14 @@ async function startBarrageLoop() {
     canvasEl.width = region.width
     canvasEl.height = region.height
 
-    console.log('[Phase 2] Hot video stream ready. Starting 1000ms loop.')
+    console.log('[Phase 2] Hot video stream ready. Starting configurable scan loop.')
     send('LOG_MESSAGE', 'Hot stream ready. Starting interval.')
     ElMessage.success('弹幕识别已启动')
 
     let encodeInFlight = false
+    let lastScanAt = performance.now()
     barrageTimer = setInterval(() => {
+      if (performance.now() - lastScanAt < barrageScanInterval * 1000) return
       if (
         encodeInFlight ||
         generation !== barrageCaptureGeneration ||
@@ -684,6 +691,7 @@ async function startBarrageLoop() {
       const sh = region.height * scaleY
 
       // Instant hardware-accelerated crop
+      lastScanAt = performance.now()
       ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, region.width, region.height)
 
       // Convert to binary PNG blob and send
@@ -701,7 +709,7 @@ async function startBarrageLoop() {
           socket.send(blob)
         }
       }, 'image/png')
-    }, 1000) // 1 second interval to prevent piling up
+    }, 250) // Only crop/encode when the configured scan deadline is due.
   } catch (err) {
     if (generation !== barrageCaptureGeneration) {
       acquiredStream?.getTracks().forEach(track => track.stop())
@@ -777,6 +785,7 @@ onMounted(async () => {
 })
 
 let currentSocket = null
+let barrageScanInterval = 1
 watch(() => props.wsRef, (socket) => {
   if (currentSocket) currentSocket.removeEventListener('message', onMsg)
   if (socket) {

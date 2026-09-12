@@ -427,6 +427,7 @@ export class TTSEngine {
       fillWindow(0)
       for (let index = 0; index < source.length; index++) {
         if (!valid()) throw abortError()
+        if (opts.shouldFinish?.()) break
         source.get(index).catch(() => {}) // Promote queued speculative synthesis.
         const unit = prepare(index)
         const waitingAt = performance.now()
@@ -435,8 +436,9 @@ export class TTSEngine {
         diag('prepared', { sentenceIndex: index, waitMs: performance.now() - waitingAt, prepared: true })
         if (index === 0) opts.onPrepared?.({ utteranceId })
         if (!await wait()) throw abortError()
+        if (opts.shouldFinish?.()) break
         const onAudioStart = () => {
-          if (!valid() || !coordination.active) return false
+          if (!valid() || !coordination.active || opts.shouldFinish?.()) return false
           if (!started) {
             if (opts.onAudioStart?.() === false) return false
             started = true
@@ -466,6 +468,7 @@ export class TTSEngine {
         diag('boundary', { sentenceIndex: index })
         units.delete(index)
         source.releaseBefore(completed)
+        if (opts.shouldFinish?.()) break
         const remaining = completed < source.length
         coordination.boundary(remaining && units.get(completed)?.ready === true, { hold: remaining })
         if (remaining) fillWindow(completed)

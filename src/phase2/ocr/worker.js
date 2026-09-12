@@ -6,6 +6,7 @@ import sharp from 'sharp';
 import { preprocessForDetection, preprocessForRecognition } from './preprocess.js';
 import { CTCDecoder } from './decoder.js';
 import { extractTextLineBoxes } from './postprocess.js';
+import { imagesEquivalent } from './image-change.js';
 
 // Sharp has its own native thread pool. One worker is sufficient for the OCR
 // crop pipeline; ORT has a separately bounded inference pool below.
@@ -24,6 +25,9 @@ let recSession = null;
 let decoder = null;
 let debugImagePath = null;
 let lastDebugSave = 0;
+let previousImage = null;
+let previousResult = null;
+let imageGeneration = null;
 
 function serialiseError(error) {
   return {
@@ -123,6 +127,7 @@ async function recognize(imageBuffer) {
   if (results.length === 0) return null;
   return {
     text: results.map((result) => result.text).join(' '),
+    lines: results.map(result => result.text),
     score: results.reduce((sum, result) => sum + result.score, 0) / results.length,
     boxes: results.length,
   };
@@ -142,7 +147,20 @@ parentPort.on('message', async (message) => {
   if (message?.type !== 'RECOGNIZE') return;
   try {
     const imageBuffer = Buffer.from(message.image);
+    if (imageGeneration !== message.generation) {
+      imageGeneration = message.generation;
+      previousImage = null;
+      previousResult = null;
+    }
+    const { data, info } = await sharp(imageBuffer).greyscale().raw().toBuffer({ resolveWithObject: true });
+    const image = { data, width: info.width, height: info.height };
+    if (imagesEquivalent(previousImage, image)) {
+      parentPort.postMessage({ type: 'RESULT', requestId: message.requestId, result: previousResult });
+      return;
+    }
     const result = await recognize(imageBuffer);
+    previousImage = image;
+    previousResult = result;
     parentPort.postMessage({ type: 'RESULT', requestId: message.requestId, result });
   } catch (error) {
     parentPort.postMessage({

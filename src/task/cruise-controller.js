@@ -3,11 +3,11 @@ export class CruiseController {
   constructor({
     robot, tour, getSelectedMap, playPoint, stopSpeech, startTransit, stopTransit,
     isTransitRunning = () => false, syncAudioPause = () => {},
-    deferTransitUntilSpeech = () => false, broadcast,
+    deferTransitUntilSpeech = () => false, finishTransitSentence = () => Promise.resolve(), broadcast,
   }) {
     Object.assign(this, {
       robot, tour, getSelectedMap, playPoint, stopSpeech, startTransit, stopTransit,
-      isTransitRunning, syncAudioPause, deferTransitUntilSpeech, broadcast,
+      isTransitRunning, syncAudioPause, deferTransitUntilSpeech, finishTransitSentence, broadcast,
     })
     this._active = null
     this._phase = 'idle'
@@ -150,6 +150,7 @@ export class CruiseController {
         // A ready point acquires the speaker after any current TTS sentence.
         // The default hook remains false for standalone/legacy integrations.
         const deferredHandoff = this.deferTransitUntilSpeech()
+        const transitFinished = deferredHandoff ? this.finishTransitSentence() : Promise.resolve()
         if (!deferredHandoff) this.stopTransit()
         this._phase = 'arrived'
         this.broadcast('POINT_ARRIVED', point)
@@ -174,6 +175,7 @@ export class CruiseController {
               return true
             },
           })
+          await transitFinished
         } finally {
           // A tour run spans several points. Retire THIS point's callbacks too.
           speech.abort()

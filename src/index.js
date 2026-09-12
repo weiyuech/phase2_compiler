@@ -147,6 +147,7 @@ const cruise = new CruiseController({
   isTransitRunning: () => transitAudio.isRunning(),
   syncAudioPause: updateCruisingDucking,
   deferTransitUntilSpeech: () => true,
+  finishTransitSentence: () => transitAudio.finishCurrentSentence(),
   broadcast: (type, data) => uiBridge.broadcast(type, data),
 })
 
@@ -433,7 +434,7 @@ uiBridge.on('onSetBarrageConfig', async (newConfig) => {
     const currentConfig = await barrageProvider.getConfig()
     const mergedConfig = { ...currentConfig, ...newConfig }
     await barrageProvider.saveConfig(mergedConfig)
-    uiBridge.broadcast('BARRAGE_CONFIG_SAVED', mergedConfig)
+    uiBridge.broadcast('BARRAGE_CONFIG_SAVED', await barrageProvider.getConfig())
   } catch (err) {
     uiBridge.broadcast('ERROR', { message: `弹幕设置保存失败: ${err.message}` })
   }
