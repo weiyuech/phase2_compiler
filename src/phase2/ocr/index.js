@@ -49,6 +49,17 @@ export class OcrWorkerClient {
     this.nextRequestId = 1;
     this.activeRequest = null;
     this.pendingRequest = null;
+    this._observations = [];
+  }
+
+  // Snapshots are observations, never judge output. Return defensive copies so
+  // callers cannot accidentally rewrite the paired PNG/raw-text history.
+  get observations() {
+    return Object.freeze(this._observations.map(observation => Object.freeze({
+      ...observation,
+      image: Buffer.from(observation.image),
+      lines: Object.freeze([...observation.lines]),
+    })));
   }
 
   init() {
@@ -90,6 +101,7 @@ export class OcrWorkerClient {
     this.generation += 1;
     this.sessionActive = true;
     this.paused = false;
+    this._clearObservations();
     this._discardPending();
     return this.generation;
   }
@@ -98,6 +110,7 @@ export class OcrWorkerClient {
     this.generation += 1;
     this.sessionActive = false;
     this.paused = false;
+    this._clearObservations();
     this._discardPending();
     return this.generation;
   }
@@ -107,7 +120,11 @@ export class OcrWorkerClient {
     if (!this.paused) this._pump();
   }
 
-  async recognize(imageBuffer, { generation = this.generation } = {}) {
+  async recognize(imageBuffer, { generation = this.generation, capturedAt = null } = {}) {
+    // Current binary PNG messages carry no capture timestamp. Do not label the
+    // backend's receipt time as the camera's capture time.
+    const receivedAt = Date.now();
+    const captureTime = Number.isFinite(capturedAt) && capturedAt >= 0 ? capturedAt : null;
     if (this.shuttingDown) return null;
     if (!this.sessionActive || generation !== this.generation) return null;
     await this.init();
@@ -121,6 +138,8 @@ export class OcrWorkerClient {
       const request = {
         id: this.nextRequestId++,
         generation,
+        receivedAt,
+        capturedAt: captureTime,
         image,
         resolve,
         reject,
@@ -138,6 +157,7 @@ export class OcrWorkerClient {
     this.shuttingDown = true;
     this.sessionActive = false;
     this.generation += 1;
+    this._clearObservations();
     this._discardPending();
     const rejectInit = this.rejectInit;
     this.resolveInit = null;
@@ -189,8 +209,48 @@ export class OcrWorkerClient {
 
   _discardPending() {
     if (!this.pendingRequest) return;
+    this.pendingRequest.image = null;
     this.pendingRequest.resolve(null);
     this.pendingRequest = null;
+  }
+
+  _clearObservations() {
+    this._observations = [];
+    // The worker already owns its in-flight clone. Keep only the request token
+    // until that native call settles; release this session's original PNG now.
+    if (this.activeRequest) this.activeRequest.image = null;
+  }
+
+  _completeObservation(request, result) {
+    const lines = Array.isArray(result?.lines)
+      ? result.lines.map(line => String(line))
+      : (result?.text ? [String(result.text)] : []);
+    const metadata = {
+      id: request.id,
+      snapshotId: request.id,
+      generation: request.generation,
+      receivedAt: request.receivedAt,
+      capturedAt: request.capturedAt,
+    };
+    const normalized = {
+      text: '', lines: [], boxes: 0, score: 0,
+      ...result,
+      lines,
+      unchanged: Boolean(result?.unchanged),
+      ...metadata,
+    };
+    this._observations.push(Object.freeze({
+      ...metadata,
+      image: request.image,
+      rawText: lines.join('\n'),
+      lines: Object.freeze([...lines]),
+      unchanged: normalized.unchanged,
+      boxes: normalized.boxes,
+      score: normalized.score,
+    }));
+    if (this._observations.length > 2) this._observations.shift();
+    request.image = null;
+    return normalized;
   }
 
   _onMessage(worker, message) {
@@ -224,7 +284,7 @@ export class OcrWorkerClient {
     } else if (message.error) {
       request.reject(toError(message.error, 'OCR recognition failed'));
     } else {
-      request.resolve(message.result ?? null);
+      request.resolve(this._completeObservation(request, message.result));
     }
     this._pump();
   }
@@ -234,6 +294,7 @@ export class OcrWorkerClient {
     if (this.fatalError) return;
     this.fatalError = markFatal(error);
     this.ready = false;
+    this._clearObservations();
 
     const reject = this.rejectInit;
     this.resolveInit = null;

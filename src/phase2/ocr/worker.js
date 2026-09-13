@@ -85,7 +85,7 @@ async function recognize(imageBuffer) {
   const detOutputTensor = detOutputs[detSession.outputNames[0]];
   const boxes = extractTextLineBoxes(detOutputTensor, imageInfo);
 
-  if (boxes.length === 0) return null;
+  if (boxes.length === 0) return { text: '', lines: [], boxes: 0, score: 0 };
 
   // Deliberately serial: Promise.all previously let every detected row enter
   // Sharp and the native ORT pool together, multiplying CPU pressure.
@@ -124,7 +124,7 @@ async function recognize(imageBuffer) {
     return a.left - b.left;
   });
 
-  if (results.length === 0) return null;
+  if (results.length === 0) return { text: '', lines: [], boxes: 0, score: 0 };
   return {
     text: results.map((result) => result.text).join(' '),
     lines: results.map(result => result.text),
@@ -155,13 +155,13 @@ parentPort.on('message', async (message) => {
     const { data, info } = await sharp(imageBuffer).greyscale().raw().toBuffer({ resolveWithObject: true });
     const image = { data, width: info.width, height: info.height };
     if (imagesEquivalent(previousImage, image)) {
-      parentPort.postMessage({ type: 'RESULT', requestId: message.requestId, result: previousResult ? { ...previousResult, unchanged: true } : null });
+      parentPort.postMessage({ type: 'RESULT', requestId: message.requestId, result: { ...previousResult, unchanged: true } });
       return;
     }
     const result = await recognize(imageBuffer);
     previousImage = image;
     previousResult = result;
-    parentPort.postMessage({ type: 'RESULT', requestId: message.requestId, result });
+    parentPort.postMessage({ type: 'RESULT', requestId: message.requestId, result: { ...result, unchanged: false } });
   } catch (error) {
     parentPort.postMessage({
       type: 'RESULT',

@@ -144,3 +144,29 @@ test('manual-test button is bound to its safety predicate with the exact active-
   assert.match(descriptor.template.content, /<el-button :disabled="!canTestSpeech" @click="sendTestSpeech">发送播报<\/el-button>/)
   assert.match(descriptor.template.content, /<p v-if="tourIsActive" class="hint">请先停止巡游，再进行手动播报测试<\/p>/)
 })
+
+test('cooldown editor rounds to nearest interval multiple and never saves zero cooldown', t => {
+  const h = fixture(t)
+  h.socket.reply('BARRAGE_CONFIG', { scan_interval: 3, cooldown: 9 })
+  for (const [input, expected] of [[10, 9], [2, 3], [0, 3], [11, 12]]) {
+    h.state.onCooldownChange(input)
+    assert.equal(h.state.barrageCooldown.value, expected)
+    assert.deepEqual(h.socket.sent.at(-1), { type: 'SET_BARRAGE_CONFIG', data: { cooldown: expected, scan_interval: 3 } })
+  }
+  const sent = h.socket.sent.length
+  for (const invalid of [null, undefined, NaN, -1, 3001, 2.5]) h.state.onCooldownChange(invalid)
+  assert.equal(h.socket.sent.length, sent)
+})
+
+test('changing interval saves both normalized settings atomically and reconnect reflects server values', t => {
+  const h = fixture(t)
+  h.socket.reply('BARRAGE_CONFIG', { scan_interval: 1, cooldown: 10 })
+  h.state.onScanIntervalChange(3)
+  assert.deepEqual(h.socket.sent.at(-1), { type: 'SET_BARRAGE_CONFIG', data: { cooldown: 9, scan_interval: 3 } })
+  assert.equal(h.state.barrageCooldown.value, 9)
+  h.socket.reply('BARRAGE_CONFIG_SAVED', { scan_interval: 6, cooldown: 12 })
+  assert.equal(h.state.barrageCooldown.value, 12)
+  assert.equal(h.state.barrageScanInterval.value, 6)
+  assert.match(descriptor.template.content, /:step="barrageScanInterval"/)
+  assert.doesNotMatch(descriptor.template.content, /step-strictly/)
+})

@@ -98,11 +98,11 @@
               </div>
             </div>
             <el-input v-model="judgePromptText" type="textarea" :rows="3" class="prompt-textarea" :disabled="!customJudgeEnabled" />
-            <p class="panel-note">“无新问题”跳过本轮，其他文本交给弹幕问答。</p>
+            <p class="panel-note">仅用于 TTS：冷却到点时比较上次判断与当前 OCR；“无新问题”跳过本轮。</p>
           </div>
 
           <div class="row-actions" style="margin-top: auto; padding-top: 16px;">
-            <el-button type="primary" :loading="savingPrompt" @click="savePrompt">保存全部提示词</el-button>
+            <el-button type="primary" :loading="savingPrompt" :disabled="!promptLoaded" @click="savePrompt">保存全部提示词</el-button>
             <span v-if="promptSavedOk" class="ok-text">已保存，后端已重载</span>
           </div>
         </div>
@@ -390,6 +390,7 @@ const barrageNameText = ref('')
 const barrageGeneralText = ref('')
 const savingPrompt = ref(false)
 const promptSavedOk = ref(false)
+const promptLoaded = ref(false)
 
 // Constants for default system prompts
 const DEFAULT_CRUISE = '你是一名直播讲解员，请将讲解文本改写为口播版本，语言自然流畅。'
@@ -432,6 +433,7 @@ function isDefaultMatch(savedText, defaultText) {
 
 async function loadPrompt() {
   if (!window.api) return
+  promptLoaded.value = false
   try {
     const judge = await window.api.readBarragePromptJudge()
     if (!judge.ok) throw new Error(judge.error || '判断提示词读取失败')
@@ -439,6 +441,7 @@ async function loadPrompt() {
     customJudgeEnabled.value = !isDefaultMatch(judge.text, DEFAULT_OCR_JUDGE_PROMPT)
     if (customJudgeEnabled.value) customJudgeText.value = judge.text
     const res = await window.api.readLlmPrompt()
+    if (!res.ok) throw new Error(res.error || '导播提示词读取失败')
     if (res.ok) {
       const text = res.text
       if (isDefaultMatch(text, DEFAULT_CRUISE)) {
@@ -452,6 +455,7 @@ async function loadPrompt() {
     }
     
     const resName = await window.api.readBarragePromptName()
+    if (!resName.ok) throw new Error(resName.error || '精准回答提示词读取失败')
     if (resName.ok) {
       const text = resName.text
       if (isDefaultMatch(text, DEFAULT_BARRAGE_NAME)) {
@@ -465,6 +469,7 @@ async function loadPrompt() {
     }
     
     const resGen = await window.api.readBarragePromptGeneral()
+    if (!resGen.ok) throw new Error(resGen.error || '常规问答提示词读取失败')
     if (resGen.ok) {
       const text = resGen.text
       if (isDefaultMatch(text, DEFAULT_BARRAGE_GENERAL)) {
@@ -476,7 +481,8 @@ async function loadPrompt() {
         barrageGeneralText.value = text
       }
     }
-  } catch {}
+    promptLoaded.value = true
+  } catch (e) { ElMessage.error(e.message || '提示词读取失败，请重新进入设置页后再试') }
 }
 
 function handleCruiseSwitch(val) {
@@ -524,7 +530,9 @@ watch(barrageGeneralText, (newVal) => {
 
 async function savePrompt() {
   if (!window.api) return
+  if (!promptLoaded.value) { ElMessage.error('提示词尚未完整加载，请重新进入设置页后再试'); return }
   savingPrompt.value = true
+  promptSavedOk.value = false
   try {
     const judge = await window.api.writeBarragePromptJudge(judgePromptText.value)
     if (!judge.ok) throw new Error(judge.error || '判断提示词保存失败')

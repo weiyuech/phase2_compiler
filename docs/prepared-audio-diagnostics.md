@@ -18,9 +18,11 @@ invented sentence boundaries.
 Tour pause blocks point/transit, not otherwise eligible barrage. Host speech
 blocks all automated audio. A ready barrage waiting for a boundary is discarded
 on host interruption, preserving the existing host override. Barrage keeps one
-current job plus one replaceable latest OCR event, with immutable OCR input and
-the configured cooldown. Preparation between barrage actions does not mute point
-audio. A skipped point cannot start later from a stale callback.
+current reply job. Recurring cooldown opportunities use the latest raw OCR;
+busy opportunities are skipped, not queued or replayed after playback. Preparation
+between barrage actions does not mute point audio. A skipped point cannot start
+later from a stale callback. See [barrage-cooldown-design.md](barrage-cooldown-design.md)
+for TTS judge baselines, MP3 matching and interval/cooldown rules.
 
 TTS starts with the first complete sentence; only the current sentence plus the
 next two are prefetched. Across all three engines, at most two synthesis requests
@@ -56,6 +58,13 @@ can introduce sentence gaps: this is not a sample-gapless guarantee.
 - Send 640-byte PCM frames every 20 ms using one monotonic-clock timer, preserving
   deadline catch-up/rebase behavior. The last packet can be shorter. Completion
   includes the calculated remaining PCM duration after late/catch-up sends.
+- New/resumed robot speakers share a connection-scoped packet boundary: wait for
+  the last sent packet's remaining PCM duration (at most 20 ms), then anchor the
+  incoming schedule to its actual first send. Start hooks cannot compress packets
+  one and two; host/stop cancellation still clears pending sends immediately.
+  Boundary waits/gaps are recorded separately from within-clip packet statistics.
+  This is minimum send spacing, not confirmation that the robot buffer is empty
+  or that audible stuttering is resolved. Existing within-clip catch-up remains.
 - Do not upload an entire clip in advance. Keep the existing robot socket and JSON
   protocol, continuous sequence within an utterance, pause/resume position and
   source-session conventions. No Python runtime, second audio socket or invented
@@ -71,9 +80,10 @@ can introduce sentence gaps: this is not a sample-gapless guarantee.
 OCR image processing runs in one persistent worker with bounded ONNX/Sharp native
 parallelism. It executes one frame at a time and retains at most one newer waiting
 frame; repeated region selection, stop and reconnect use generation guards so stale
-results and capture loops cannot restart. OCR pauses new inference while a barrage
-reply is audibly playing, and its downloadable text log uses bounded asynchronous
-writes rather than blocking the robot packet scheduler.
+results and capture loops cannot restart. Interval OCR and its raw text log remain
+independent of reply preparation/playback. Similar images reuse cached OCR; busy
+cooldown slots skip reply work, not observation. The downloadable raw text log uses
+bounded asynchronous writes rather than blocking the robot packet scheduler.
 
 `onnxruntime-node` is intentionally pinned to `1.23.2`: later published packages
 omit the prebuilt macOS Intel (`darwin/x64`) binding. The same N-API package retains

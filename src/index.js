@@ -434,7 +434,9 @@ uiBridge.on('onSetBarrageConfig', async (newConfig) => {
     const currentConfig = await barrageProvider.getConfig()
     const mergedConfig = { ...currentConfig, ...newConfig }
     await barrageProvider.saveConfig(mergedConfig)
-    uiBridge.broadcast('BARRAGE_CONFIG_SAVED', await barrageProvider.getConfig())
+    const savedConfig = await barrageProvider.getConfig()
+    phase2.configureBarrage(savedConfig)
+    uiBridge.broadcast('BARRAGE_CONFIG_SAVED', savedConfig)
   } catch (err) {
     uiBridge.broadcast('ERROR', { message: `弹幕设置保存失败: ${err.message}` })
   }

@@ -16,7 +16,7 @@ async function readDocumentContent(filePath) {
 }
 
 export class BarrageManager {
-  constructor({ tts, llm, tour, uiBridge, checkGoalHandling, checkIsSpeaking, onBarrageSpeechStart, onBarrageSpeechEnd }) {
+  constructor({ tts, llm, tour, uiBridge, checkGoalHandling, checkIsSpeaking, onBarrageSpeechStart, onBarrageSpeechEnd, onCancel }) {
     this.tts = tts;
     this.llm = llm;
     this.tour = tour;
@@ -25,6 +25,7 @@ export class BarrageManager {
     this.checkIsSpeaking = checkIsSpeaking;
     this.onBarrageSpeechStart = onBarrageSpeechStart;
     this.onBarrageSpeechEnd = onBarrageSpeechEnd;
+    this.onCancel = onCancel;
 
     this.isPlaying = false;         // A sequence is "in flight" (generating OR playing)
     this._isActuallyPlaying = false; // Real audio is coming out of the speaker RIGHT NOW
@@ -48,9 +49,15 @@ export class BarrageManager {
     this.configDir = USER_DATA ? path.join(USER_DATA, 'config') : './config';
   }
 
-  async handleOcrText(text) {
+  canAcceptReply() {
+    return this.isActive && !this.isPlaying && !this.isSleeping
+      && !this.tts.player.isPlaying() && !this.checkIsSpeaking?.();
+  }
+
+  async handleOcrText(text, { config: suppliedConfig, isCurrent = () => true, requireReady = false, externalCadence = false } = {}) {
     if (!this.isActive) return;
     if (!text || !text.trim()) return;
+    if (!isCurrent() || (requireReady && !this.canAcceptReply())) return;
 
     // Abandon/drop new replies immediately if host is currently speaking
     if (this.checkIsSpeaking && this.checkIsSpeaking()) {
@@ -66,7 +73,7 @@ export class BarrageManager {
     const eventId = ++this._eventCounter;
 
     // 1. Fetch current global mode
-    const config = await barrageProvider.getConfig();
+    const config = suppliedConfig || await barrageProvider.getConfig();
     const mode = config.mode || 'llm-strict';
 
     let actions = [];
@@ -132,21 +139,26 @@ export class BarrageManager {
 
     if (actions.length === 0) return;
 
-    if (!this.isActive || generation !== this._generation || eventId < this._latestHandledEvent) return;
+    if (!this.isActive || !isCurrent() || this.checkIsSpeaking?.()
+      || generation !== this._generation || eventId < this._latestHandledEvent) return;
     this._latestHandledEvent = eventId;
-    const event = { id: eventId, text, actions };
+    const event = { id: eventId, text, actions, externalCadence };
 
     // 4. Busy Check
     const isPlayerPlaying = this.tts.player.isPlaying();
     const isBusy = isPlayerPlaying || this.isPlaying || this.isSleeping;
 
     if (isBusy) {
+      // Scheduled TTS and MP3 never turn a raced result into an old queued
+      // reply. The legacy direct-call path retains its latest-only contract.
+      if (requireReady) return;
       // Zero-latency latest-only buffer: overwrite existing queued actions
       console.log(`[BarrageManager] Robot is busy/sleeping. Buffering latest actions for matched concepts.`);
       this.latestBarrageEvent = event;
     } else {
       // Play immediately
-      this.playActionSequence(event);
+      if (requireReady) return this.playActionSequence(event);
+      void this.playActionSequence(event);
     }
   }
 
@@ -207,7 +219,7 @@ export class BarrageManager {
                   return true;
                 },
               });
-              if (valid() && result?.ok !== false) this.mp3Count++;
+              if (valid() && didStart && result?.ok !== false) this.mp3Count++;
               if (valid() && result?.ok === false && !result.aborted) {
                 this.uiBridge.broadcast('ERROR', { message: '弹幕音频播放失败: ' + (result.error?.message || '未知错误') });
               }
@@ -272,11 +284,13 @@ export class BarrageManager {
             if (!valid()) break;
             if (!resultText || !resultText.trim()) {
               console.log('[BarrageManager] ⚠️ 大模型调用失败或未返回有效文本，本次播放已跳过。');
+              this.uiBridge.broadcast('ERROR', { message: '弹幕回答未返回有效文本，本轮已跳过。' });
               continue;
             }
             replyText = resultText.trim();
           } catch (err) {
             console.error('[BarrageManager] LLM 调用出错:', err.message);
+            if (valid()) this.uiBridge.broadcast('ERROR', { message: '弹幕回答生成失败，本轮已跳过。' });
             continue;
           }
 
@@ -312,12 +326,12 @@ export class BarrageManager {
             } else if (res && res.ok === false) {
               console.error('[BarrageManager] 对话合成播放失败:', res.error?.message ?? res.error);
               if (valid()) this.uiBridge.broadcast('ERROR', { message: '弹幕语音准备/播放失败: ' + (res.error?.message || '未知错误') });
-            } else if (valid()) {
+            } else if (valid() && didFireStart) {
               this.llmCount++;
             }
           } catch (err) {
             console.error('[BarrageManager] 对话合成播放出错:', err.message);
-            if (valid()) this.uiBridge.broadcast('ERROR', { message: '弹幕语音准备/播放失败: ' + err.message });
+            if (valid() && err.name !== 'AbortError') this.uiBridge.broadcast('ERROR', { message: '弹幕语音准备/播放失败: ' + err.message });
           } finally {
             if (valid() && didFireStart) this.uiBridge.broadcast('SPEECH_END', { utteranceId, source: 'barrage' });
             if (valid()) { this._replyReady = false; this._captionId = null; }
@@ -334,6 +348,13 @@ export class BarrageManager {
       this._isActuallyPlaying = false;
       if (startedSpeech) {
         this.onBarrageSpeechEnd?.();
+      }
+      if (event.externalCadence) {
+        // The shared decision clock already owns future opportunities. Do not
+        // add a second cooldown measured from playback completion.
+        this._sequence = null;
+        this.isPlaying = false;
+        return;
       }
 
       // 2. Finished the current sequence. Check if we need to enter a cooldown sleep period.
@@ -381,8 +402,9 @@ export class BarrageManager {
     }
   }
 
-  cancelPendingSpeech() {
+  cancelPendingSpeech(reason = 'cancelled') {
     this._generation++;
+    this.onCancel?.(reason);
     const run = this._sequence;
     this._sequence = null;
     run?.controller.abort();
@@ -409,6 +431,6 @@ export class BarrageManager {
     // A generating reply may continue; its final gate drops it if host speech
     // persists. A prepared boundary-waiting reply must not replay after host end.
     if (!this._isActuallyPlaying && !this._replyReady) return;
-    this.cancelPendingSpeech();
+    this.cancelPendingSpeech('host');
   }
 }

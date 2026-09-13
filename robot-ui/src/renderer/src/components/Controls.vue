@@ -68,7 +68,7 @@
             <div class="cooldown-input">
               <el-input-number v-model="barrageScanInterval" :min="1" :max="60" :precision="0" size="small"
                 controls-position="right" aria-label="识别间隔秒数"
-                @change="value => send('SET_BARRAGE_CONFIG', { scan_interval: value })" />
+                @change="onScanIntervalChange" />
               <span>秒</span>
             </div>
           </div>
@@ -76,13 +76,15 @@
             <span>播报冷却</span>
             <div class="cooldown-input">
               <el-input-number
-                v-model="barrageCooldown" :min="0" :max="3000" :precision="0" :step="1"
+                v-model="barrageCooldown" :min="barrageScanInterval" :max="Math.floor(3000 / barrageScanInterval) * barrageScanInterval"
+                :precision="0" :step="barrageScanInterval"
                 size="small" controls-position="right" aria-label="播报冷却时间"
                 @change="onCooldownChange"
               />
               <span>秒</span>
             </div>
           </div>
+          <p class="hint">冷却时间自动取最接近的识别间隔倍数，至少一个间隔。</p>
           <div v-if="barrageEnabled && barrageRegion" class="hint">
             当前截取区域: X:{{ barrageRegion.x }} Y:{{ barrageRegion.y }} W:{{ barrageRegion.width }} H:{{ barrageRegion.height }}
           </div>
@@ -140,7 +142,7 @@ const ocrStatusMsg = computed(() => {
   return '请选择识别区域'
 })
 const currentCapturedText = ref('')
-const barrageCooldown = ref(0)
+const barrageCooldown = ref(1)
 const barrageScanInterval = ref(1)
 const repeatCount = ref(1)  // How many full passes through the tour list
 const currentIteration = ref(0)
@@ -341,20 +343,36 @@ function sendTestSpeech() {
   testText.value = ''
 }
 
+function onScanIntervalChange(val) {
+  const interval = Number(val)
+  if (!Number.isInteger(interval) || interval < 1 || interval > 60) return
+  // Save the coupled values together. Never leave an invalid intermediate
+  // configuration when the operator changes the scan interval.
+  const cooldown = Math.max(interval, Math.min(Math.floor(3000 / interval) * interval,
+    Math.round(barrageCooldown.value / interval) * interval))
+  barrageScanInterval.value = interval
+  barrageCooldown.value = cooldown
+  send('SET_BARRAGE_CONFIG', { scan_interval: interval, cooldown })
+}
+
 function onCooldownChange(val) {
   if (val === null || val === undefined || isNaN(val)) {
     ElMessage.error('请输入有效的冷却时间')
     return
   }
   
-  const num = parseInt(val, 10)
-  if (num < 0 || num > 3000) {
+  const num = Number(val)
+  if (!Number.isInteger(num) || num < 0 || num > 3000) {
     ElMessage.error('冷却时间必须在 0 到 3000 秒之间')
     return
   }
+  const interval = barrageScanInterval.value
+  const rounded = Math.max(interval, Math.min(Math.floor(3000 / interval) * interval,
+    Math.round(num / interval) * interval))
+  barrageCooldown.value = rounded
 
   send('SET_BARRAGE_CONFIG', {
-    cooldown: num
+    cooldown: rounded, scan_interval: interval
   })
 }
 

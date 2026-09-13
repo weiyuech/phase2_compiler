@@ -1,6 +1,7 @@
 import fs from 'fs/promises'
 import path from 'path'
 import { safeJoin } from '../safe-path.js'
+import { normalizeBarrageTiming } from '../phase2/barrage-timing.js'
 
 export class BarrageProvider {
   constructor({ dir = './data/barrage' } = {}) {
@@ -33,15 +34,22 @@ export class BarrageProvider {
       if (typeof config.cooldown !== 'number') {
         config.cooldown = 0
       }
-      return config
+      // Older installations may contain non-multiples. Normalize only the
+      // returned settings; reading must never overwrite installed user files.
+      return { ...config, ...normalizeBarrageTiming(config) }
     } catch (err) {
       console.error('[BarrageProvider] Failed to read config:', err.message)
-      return { mode: 'llm-strict', cooldown: 0, scan_interval: 1 }
+      return { mode: 'llm-strict', ...normalizeBarrageTiming() }
     }
   }
 
   async saveConfig(config) {
     const { mode, document_name = '', document_path = '', priority_mode = false, random_reply = false, cooldown = 0 } = config
+    const parsedCooldown = Number(cooldown)
+    if (!Number.isInteger(parsedCooldown) || parsedCooldown < 0 || parsedCooldown > 3000) {
+      throw new Error('冷却时间必须是 0 到 3000 秒之间的整数')
+    }
+    const timing = normalizeBarrageTiming(config)
     let docName = document_name
     
     if (document_path) {
@@ -66,20 +74,13 @@ export class BarrageProvider {
       }
     }
 
-    let parsedCooldown = parseInt(cooldown, 10)
-    if (isNaN(parsedCooldown) || parsedCooldown < 0) {
-      parsedCooldown = 0
-    } else if (parsedCooldown > 3000) {
-      parsedCooldown = 3000
-    }
     
     const configData = {
       mode,
       document_name: docName,
       priority_mode,
       random_reply,
-      cooldown: parsedCooldown,
-      scan_interval: Math.max(1, Math.min(60, Math.round(Number(config.scan_interval) || 1)))
+      ...timing
     }
     
     try {

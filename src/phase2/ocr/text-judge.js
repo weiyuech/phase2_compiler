@@ -1,49 +1,57 @@
 import { readFile } from 'node:fs/promises';
-import { DEFAULT_OCR_JUDGE_PROMPT } from './judge-prompt.js';
+import { DEFAULT_OCR_JUDGE_PROMPT, resolveOcrJudgePrompt } from './judge-prompt.js';
 
-// Keep OCR text from closing or creating input delimiters.
 const escapeText = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 
-// One in-flight judge and one replaceable newest capture. Reset invalidates
-// callbacks without allowing an old session to change the new comparison text.
+// Only the cooldown scheduler calls decide(). Scans and raw logging do not.
+// The checkpoint is raw OCR from the last successful judge response (including
+// 无新问题). Busy slots and failures never advance it.
 export class OcrTextJudge {
-  constructor({ judge, promptPath, onText, onError }) {
-    Object.assign(this, { judge, promptPath, onText, onError });
+  constructor({ judge, promptPath }) {
+    Object.assign(this, { judge, promptPath });
     this.epoch = 0;
-    this.previous = '';
-    this.pending = null;
-    this.running = false;
+    this.decisionSnapshot = null;
   }
-  reset() { this.epoch++; this.previous = ''; this.pending = null; }
-  submit(text) {
-    this.pending = { text: String(text || '').slice(0, 16000), epoch: this.epoch };
-    if (!this.running) void this.drain();
+
+  get previous() { return this.decisionSnapshot?.text || ''; }
+
+  reset() {
+    this.epoch++;
+    this.decisionSnapshot = null;
   }
-  async drain() {
-    this.running = true;
-    try {
-      while (this.pending) {
-        const item = this.pending;
-        this.pending = null;
-        try {
-          let prompt = DEFAULT_OCR_JUDGE_PROMPT;
-          if (this.promptPath) {
-            try { prompt = (await readFile(this.promptPath, 'utf8')).trim() || prompt; }
-            catch (error) { if (error.code !== 'ENOENT') throw error; }
-          }
-          if (item.epoch !== this.epoch) continue;
-          const input = `<previous_ocr>\n${escapeText(this.previous)}\n</previous_ocr>\n<current_ocr>\n${escapeText(item.text)}\n</current_ocr>`;
-          const output = await this.judge(prompt, input);
-          if (item.epoch !== this.epoch) continue;
-          if (typeof output !== 'string' || !output.trim()) throw new Error('新增问题判断未返回有效文本');
-          this.previous = item.text;
-          // Only this exact signal (apart from surrounding whitespace) skips.
-          // Do not reinterpret explanations, JSON, punctuation or model intent.
-          if (output.trim() !== '无新问题') await this.onText(output.trim());
-        } catch (error) {
-          if (item.epoch === this.epoch) this.onError?.(error);
-        }
-      }
-    } finally { this.running = false; }
+
+  _commitSnapshot(observation) {
+    this.decisionSnapshot = Object.freeze({
+      text: String(observation.text || '').slice(0, 16000),
+      snapshotId: observation.snapshotId ?? null,
+      receivedAt: observation.receivedAt ?? null,
+      capturedAt: observation.capturedAt ?? null,
+    });
+  }
+
+  async decide(observation, { isCurrent = () => true } = {}) {
+    const epoch = this.epoch;
+    const valid = () => epoch === this.epoch && isCurrent();
+    const snapshot = Object.freeze({
+      text: String(observation.text || '').slice(0, 16000),
+      snapshotId: observation.snapshotId ?? null,
+      receivedAt: observation.receivedAt ?? null,
+      capturedAt: observation.capturedAt ?? null,
+    });
+    const previousText = this.previous;
+    let prompt = DEFAULT_OCR_JUDGE_PROMPT;
+    if (this.promptPath) {
+      try { prompt = resolveOcrJudgePrompt(await readFile(this.promptPath, 'utf8')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    if (!valid()) return { ok: false, cancelled: true };
+    const input = '<previous_ocr>\n' + escapeText(previousText.slice(0, 10000))
+      + '\n</previous_ocr>\n<current_ocr>\n' + escapeText(snapshot.text.slice(0, 10000)) + '\n</current_ocr>';
+    const output = await this.judge(prompt, input);
+    if (!valid()) return { ok: false, cancelled: true };
+    if (typeof output !== 'string' || !output.trim()) throw new Error('新增问题判断未返回有效文本');
+    this._commitSnapshot(snapshot);
+    const text = output.trim();
+    return { ok: true, skipped: text === '无新问题', text: text === '无新问题' ? null : text };
   }
 }

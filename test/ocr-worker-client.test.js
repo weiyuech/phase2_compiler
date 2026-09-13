@@ -69,14 +69,14 @@ test('OCR queue executes one frame and retains only the newest pending frame', a
 
   const firstId = recognitionMessages(worker)[0].requestId;
   worker.result(firstId, { text: 'one' });
-  assert.deepEqual(await first, { text: 'one' });
+  assert.equal((await first).text, 'one');
   await turn();
 
   assert.equal(recognitionMessages(worker).length, 2);
   assert.equal(recognitionMessages(worker)[1].image.toString(), 'newest');
   const newestId = recognitionMessages(worker)[1].requestId;
   worker.result(newestId, { text: 'three' });
-  assert.deepEqual(await newest, { text: 'three' });
+  assert.equal((await newest).text, 'three');
   await client.shutdown();
 });
 
@@ -102,7 +102,7 @@ test('stopped-session results are stale and restart waits behind the old native 
   assert.equal(recognitionMessages(worker)[1].image.toString(), 'current');
 
   worker.result(recognitionMessages(worker)[1].requestId, { text: 'current-result' });
-  assert.deepEqual(await current, { text: 'current-result' });
+  assert.equal((await current).text, 'current-result');
   await client.shutdown();
 });
 
@@ -120,7 +120,7 @@ test('paused OCR performs no new inference and resumes only its latest screensho
   assert.equal(recognitionMessages(worker).length, 1);
   assert.equal(recognitionMessages(worker)[0].image.toString(), 'while-speaking-2');
   worker.result(recognitionMessages(worker)[0].requestId, { text: 'latest' });
-  assert.deepEqual(await latest, { text: 'latest' });
+  assert.equal((await latest).text, 'latest');
   await client.shutdown();
 });
 

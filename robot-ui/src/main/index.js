@@ -5,7 +5,7 @@ import { scryptSync, randomBytes, timingSafeEqual } from 'crypto'
 import { RollingLog } from '../../../src/diagnostics/rolling-log.js'
 import { createDiagnosticsReport } from '../../../src/diagnostics/report.js'
 import { seedPackagedUserData } from '../../../src/packaging/seed-user-data.js'
-import { DEFAULT_OCR_JUDGE_PROMPT } from '../../../src/phase2/ocr/judge-prompt.js'
+import { DEFAULT_OCR_JUDGE_PROMPT, resolveOcrJudgePrompt } from '../../../src/phase2/ocr/judge-prompt.js'
 
 // ─── PROJECT_ROOT ─────────────────────────────────────────────────────────────
 // dev:      src/main/ → src/ → robot-ui/ → robot-live-system/  (3 levels up)
@@ -812,7 +812,7 @@ ipcMain.handle('read-barrage-prompt-general', () => {
 })
 
 ipcMain.handle('read-barrage-prompt-judge', () => {
-  try { return { ok: true, text: readFileSync(BARRAGE_PROMPT_JUDGE_PATH, 'utf-8') } }
+  try { return { ok: true, text: resolveOcrJudgePrompt(readFileSync(BARRAGE_PROMPT_JUDGE_PATH, 'utf-8')) } }
   catch (e) {
     return e.code === 'ENOENT' ? { ok: true, text: DEFAULT_OCR_JUDGE_PROMPT } : { ok: false, error: e.message }
   }
