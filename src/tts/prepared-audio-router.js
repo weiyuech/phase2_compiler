@@ -38,6 +38,7 @@ export class PreparedAudioOutputRouter {
     this._generation = 0
     this._destroyed = false
     this._active = null
+    this._lastPacket = null
     this._sessions = new Set()
     this._legacy = new Set()
     this._preparations = new Set()
@@ -47,8 +48,14 @@ export class PreparedAudioOutputRouter {
       directory: cacheDirectory || (filePath ? join(dirname(filePath), 'robot-pcm-cache') : undefined),
       memoryBytes: cacheMemoryBytes, diskBytes: cacheDiskBytes, decodeConcurrency, diagnostics,
     })
-    this._onDisconnected = () => { if (this.isRobotDestination()) this._invalidate(new Error('机器人连接已断开，音频任务已失效')) }
-    this._onConnected = () => { if (this.isRobotDestination()) this._invalidate(new Error('机器人连接已更换，音频任务已失效')) }
+    this._onDisconnected = () => {
+      this._lastPacket = null
+      if (this.isRobotDestination()) this._invalidate(new Error('机器人连接已断开，音频任务已失效'))
+    }
+    this._onConnected = () => {
+      this._lastPacket = null
+      if (this.isRobotDestination()) this._invalidate(new Error('机器人连接已更换，音频任务已失效'))
+    }
     robot.on('disconnected', this._onDisconnected)
     robot.on('connected', this._onConnected)
   }
@@ -280,6 +287,7 @@ export class PreparedAudioOutputRouter {
     const adjusted = this._applyRobotGain(chunk)
     const diagnosticFields = { ...fields, robotVolumePercent: this._config.robotVolumePercent,
       clippedSamples: adjusted.clippedSamples }
+    const sentAt = this._now()
     this.robot.sendAudioFrame(adjusted.buffer, seq, {
       generation: session.connectionGeneration,
       onComplete: (err, metrics) => {
@@ -290,7 +298,18 @@ export class PreparedAudioOutputRouter {
         }))
       },
     })
+    if (session.connectionGeneration === this.robot.connectionGeneration) {
+      // Stopping a session does not retract PCM already written to this socket.
+      // Store only IDs/times, not a reference retaining the old prepared asset.
+      this._lastPacket = { sessionId: session.id, connectionGeneration: session.connectionGeneration,
+        sentAt, notBefore: sentAt + chunk.length / BYTES_PER_MS }
+    }
     return diagnosticFields
+  }
+  _boundaryPacket(session) {
+    const packet = this._lastPacket
+    if (!packet || packet.connectionGeneration !== session.connectionGeneration) return null
+    return session._needsWireBoundary || packet.sessionId !== session.id ? packet : null
   }
   playFile(owner, filePath) { this._assertReady(); return new LegacyPreparationSession(this, owner, filePath) }
   startMp3Stream(owner) { this._assertReady(); return new LegacyPreparationSession(this, owner, null) }
@@ -337,6 +356,9 @@ class PreparedPcmSession {
     this._estimatedEnd = null
     this._startedAt = null
     this._activated = false
+    this._startNotified = false
+    this._needsWireBoundary = true
+    this._boundaryWaitLogged = false
     this._tailRemaining = 0
     this.promise = new Promise((resolve, reject) => { this._resolve = resolve; this._reject = reject })
     this.ready = new Promise((resolve, reject) => { this._readyResolve = resolve; this._readyReject = reject })
@@ -374,6 +396,8 @@ class PreparedPcmSession {
     if (!this.active) return
     this._pauseReasons.delete(reason)
     if (this.paused) return
+    this._needsWireBoundary = true
+    this._boundaryWaitLogged = false
     if (this._activated && this.router._active !== this) this.router._activate(this)
     this._nextAt = this.router._now() + this._tailRemaining
     this._tailRemaining = 0
@@ -394,8 +418,33 @@ class PreparedPcmSession {
       this.router._assertReady(this.generation)
       if (!this._activated) {
         if (this.opts.beforePlay?.() === false || this.opts.signal?.aborted) { this.stop(); return }
-        if (this.opts.onAudioStart?.() === false) { this.stop(); return }
+        // Claim/pause the old sender before waiting; otherwise an unmanaged
+        // sender could keep moving the shared deadline and starve its successor.
+        // Captions/start hooks still wait until the first packet can be sent.
+        this.router._activate(this)
+      }
+      const boundary = this._offset < this.entry.byteLength ? this.router._boundaryPacket(this) : null
+      if (boundary) {
+        const now = this.router._now()
+        // Rebase packet one too: merely delaying its callback would make packet
+        // two immediately catch up on the old session-local schedule.
+        this._nextAt = Math.max(now, boundary.notBefore)
+        if (now < boundary.notBefore) {
+          if (!this._boundaryWaitLogged) {
+            this._boundaryWaitLogged = true
+            this.router.diagnostics?.event?.('waiting', this._metadata({ reason: 'boundary', waitMs: boundary.notBefore - now }))
+          }
+          this._schedule()
+          return
+        }
+      }
+      if (!this._activated) {
+        if (!this._startNotified) {
+          if (this.opts.onAudioStart?.() === false) { this.stop(); return }
+          this._startNotified = true
+        }
         if (!this.active || this.opts.signal?.aborted || this.generation !== this.router.generation) { this.stop(); return }
+        if (this.paused) return
         this.router._activate(this)
         this._activated = true
         this._startedAt = this.router._now()
@@ -412,12 +461,17 @@ class PreparedPcmSession {
       const latenessMs = Math.max(0, now - this._nextAt)
       // Rebase BEFORE adding this frame's duration. Rebasing only in the next
       // scheduling call would immediately send a second frame after a stall.
-      if (latenessMs > 200) this._nextAt = now
+      // Start hooks can themselves take time. Anchor the new/resumed speaker's
+      // first deadline to its actual send, not to the time before those hooks.
+      if (this._needsWireBoundary || boundary || latenessMs > 200) this._nextAt = now
       const seq = this.sequenceState.nextSeq
       const fields = this._metadata({ seq, bytes: size, gapMs: this._lastAt === null ? null : now - this._lastAt,
         latenessMs, generation: this.generation })
       const sentFields = this.router._sendFrame(this, chunk, seq, fields)
       if (!this.active) return
+      if (boundary) this.router.diagnostics?.event?.('handoff', this._metadata({ reason: 'boundary', gapMs: now - boundary.sentAt }))
+      this._needsWireBoundary = false
+      this._boundaryWaitLogged = false
       this.sequenceState.nextSeq++
       this._offset += size
       this._lastAt = now

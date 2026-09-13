@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -13,6 +13,9 @@ import { TTSEngine } from '../src/tts/index.js'
 import { SpeechCoordinator } from '../src/tts/speech-coordinator.js'
 import { SentenceBufferCache, SynthesisScheduler } from '../src/tts/sentence-preparation.js'
 import { PreparedAudioCache } from '../src/tts/prepared-audio-cache.js'
+import { BarrageManager } from '../src/phase2/barrage-manager.js'
+import { barrageProvider } from '../src/knowledge/barrage-provider.js'
+import { createPointNarrator } from '../src/task/point-narrator.js'
 
 function deferred() {
   let resolve, reject
@@ -92,6 +95,172 @@ function coordinatedEngine(t, router, coordinator, role) {
   return engine
 }
 
+test('same prepared audio is byte-identical through cruise TTS and real barrage-manager TTS', async t => {
+  const clock = fakeClock()
+  const h = await harness(t, clock)
+  const generated = spawnSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=713:duration=0.3',
+    '-ac', '2', '-ar', '24000', '-f', 'mp3', 'pipe:1'])
+  assert.equal(generated.status, 0)
+  const originalConfig = barrageProvider.getConfig
+  barrageProvider.getConfig = async () => ({ mode: 'llm-strict', cooldown: 0 })
+  t.after(() => { barrageProvider.getConfig = originalConfig })
+  const coordinator = new SpeechCoordinator()
+  const make = role => {
+    const engine = new TTSEngine({ audioOutput: h.router, coordinator, role, harvest: false,
+      sentenceCache: new SentenceBufferCache({ maxBytes: 65536 }), synthesisScheduler: new SynthesisScheduler() })
+    engine.enabled = true
+    engine.wsClient.synthesizeStream = (_text, chunk, done) => {
+      queueMicrotask(() => { chunk(generated.stdout); done() })
+      return { abort() {} }
+    }
+    t.after(() => engine.destroy())
+    return engine
+  }
+  const cruise = make('cruise'), barrage = make('barrage')
+  async function complete(promise) {
+    let settled = false
+    const result = promise.finally(() => { settled = true })
+    const deadline = performance.now() + 3000
+    while (!settled) {
+      assert.ok(performance.now() < deadline, 'audio flow did not complete')
+      clock.advance(20)
+      await delay(1)
+    }
+    return result
+  }
+  assert.equal((await complete(cruise.speak('测试。'))).ok, true)
+  const cruiseFrames = h.robot.frames.splice(0)
+  let startHooks = 0, endHooks = 0
+  const manager = new BarrageManager({ tts: barrage, llm: { rewriteBarrage: async () => '测试。' },
+    uiBridge: { broadcast() {} }, checkIsSpeaking: () => false,
+    onBarrageSpeechStart: () => { startHooks++ }, onBarrageSpeechEnd: () => { endHooks++ } })
+  manager.configDir = h.directory
+  manager.isActive = true
+  await complete(manager.playActionSequence({ text: '提问', actions: [{ type: 'llm', mode: 'llm-strict' }] }))
+  const toSamples = frames => frames.map(f => ({ seq: f.seq, buffer: f.buffer }))
+  assert.deepEqual(toSamples(h.robot.frames), toSamples(cruiseFrames))
+  // The injected fake clock controls the sender. Exact pacing equivalence is
+  // asserted from diagnostics, not wall-clock time spent awaiting preparation.
+  const scheduled = h.packets.filter(p => p.stage === 'scheduled_send')
+  const gaps = role => scheduled.filter(p => p.source === role).map(p => p.gapMs)
+  assert.deepEqual(gaps('barrage'), gaps('point'))
+  assert.equal(startHooks, 1)
+  assert.equal(endHooks, 1)
+  manager.stop()
+})
+
+test('same MP3 through point narrator and repeated barrage takeovers preserves wire bytes and exclusive pacing', async t => {
+  const clock = fakeClock()
+  const robot = new RobotListener() // Never start/connect: capture the actual JSON encoder locally.
+  const wire = []
+  robot._socket = { readyState: 1, bufferedAmount: 0, send(payload, options, done) {
+    wire.push({ payload, time: clock.now(), options })
+    done(null)
+  } }
+  const h = await harness(t, { ...clock, robot })
+  const generated = spawnSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=713:duration=0.6',
+    '-ac', '2', '-ar', '24000', '-f', 'mp3', 'pipe:1'])
+  assert.equal(generated.status, 0)
+  const pointDirectory = join(h.directory, 'cruising-audio', 'map', 'path', '1')
+  const barrageDirectory = join(h.directory, 'barrage-audio', 'test-concept')
+  for (const directory of [pointDirectory, barrageDirectory]) {
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, 'same.mp3'), generated.stdout)
+  }
+  const originalConfig = barrageProvider.getConfig
+  barrageProvider.getConfig = async () => ({ mode: 'mp3', cooldown: 0 })
+  t.after(() => { barrageProvider.getConfig = originalConfig })
+  const coordinator = new SpeechCoordinator()
+  const cruise = coordinatedEngine(t, h.router, coordinator, 'cruise')
+  const barrage = coordinatedEngine(t, h.router, coordinator, 'barrage')
+  // Neither path may use synthesis for a supplied file.
+  for (const engine of [cruise, barrage]) engine.wsClient.synthesizeStream = () => assert.fail('MP3 invoked TTS')
+  const uiEvents = []
+  const broadcast = (type, data) => uiEvents.push({ type, ...data })
+  const narrate = createPointNarrator({
+    kb: { getContent: async () => ({ body: '' }) }, tts: cruise, dataDir: h.directory, broadcast,
+  })
+  const point = () => narrate({ play_mode: 'mp3' }, { map_name: 'map', path_file: 'path', goal_id: 1 })
+  const hooks = []
+  const manager = new BarrageManager({ tts: barrage, uiBridge: { broadcast }, checkIsSpeaking: () => false,
+    onBarrageSpeechStart: () => {
+      hooks.push('start')
+      // Same coordinator updates as production's updateCruisingDucking().
+      coordinator.setPauseReason('host', ['cruise', 'transit', 'barrage'], false)
+      coordinator.setPauseReason('tour', ['cruise', 'transit'], false)
+    },
+    onBarrageSpeechEnd: () => {
+      hooks.push('end')
+      coordinator.setPauseReason('host', ['cruise', 'transit', 'barrage'], false)
+      coordinator.setPauseReason('tour', ['cruise', 'transit'], false)
+    },
+  })
+  manager.audioDir = join(h.directory, 'barrage-audio')
+  manager.isActive = true
+  t.after(() => manager.stop())
+  const reply = () => manager.playActionSequence({ text: 'test-concept', actions: [{ type: 'mp3', conceptName: 'test-concept' }] })
+  async function complete(promise) {
+    let settled = false
+    const result = promise.finally(() => { settled = true })
+    const deadline = performance.now() + 5000
+    while (!settled) {
+      assert.ok(performance.now() < deadline, 'MP3 flow did not complete')
+      clock.advance(1)
+      await delay(1)
+    }
+    return result
+  }
+  const packets = () => h.packets.filter(p => p.stage === 'scheduled_send')
+  const sourceWire = source => wire.filter((_frame, i) => packets()[i].source === source)
+  const clearTrace = () => { wire.length = 0; h.packets.length = 0; h.events.length = 0 }
+  await complete(point())
+  const reference = wire.map(frame => frame.payload)
+  assert.ok(reference.length > 20)
+  const assertBarrage = () => {
+    const frames = sourceWire('barrage')
+    assert.deepEqual(frames.map(frame => frame.payload), reference)
+    assert.ok(frames.every(frame => frame.options.compress === false))
+    assert.ok(frames.slice(1).every((frame, i) => frame.time - frames[i].time === 20))
+    assert.equal(h.events.filter(event => event.type === 'pause' && event.source === 'barrage').length, 0)
+    const indexes = wire.map((_frame, i) => i).filter(i => packets()[i].source === 'barrage')
+    assert.equal(indexes.at(-1) - indexes[0] + 1, indexes.length, 'other source sent during barrage')
+  }
+  clearTrace()
+  await complete(reply())
+  assertBarrage()
+  // Reuse the same engine instances/cache for later replies, with cruise paused
+  // halfway through its file. This is the real manager MP3 path, not speak().
+  for (let round = 0; round < 3; round++) {
+    clearTrace()
+    const narration = point()
+    await until(() => coordinator.active?.role === 'cruise' && clock.pending() === 1)
+    clock.advance(180)
+    const pointPrefix = sourceWire('point').length
+    assert.ok(pointPrefix > 1 && pointPrefix < reference.length)
+    const answer = reply()
+    await until(() => coordinator.active?.role === 'barrage' && clock.pending() === 1)
+    assert.equal(cruise.player._remoteSession.paused, true)
+    assert.equal(clock.pending(), 1, 'paused cruise retained a send timer')
+    await complete(answer)
+    assertBarrage()
+    await complete(narration)
+    assert.deepEqual(sourceWire('point').map(frame => frame.payload), reference, 'cruise cursor changed across handoff')
+    // Check the whole wire too: a new speaker must respect the already-sent
+    // packet's duration, not only its own subsequent packet intervals.
+    const firstReply = packets().findIndex(packet => packet.source === 'barrage')
+    const lastReply = packets().findLastIndex(packet => packet.source === 'barrage')
+    const entryGapMs = wire[firstReply].time - wire[firstReply - 1].time
+    const exitGapMs = wire[lastReply + 1].time - wire[lastReply].time
+    assert.equal(entryGapMs, 20, 'cached MP3 takeover respects the previous sender packet duration')
+    assert.ok(exitGapMs >= packets()[lastReply].bytes / 32, 'completion waits for final packet duration')
+    assert.equal(coordinator.jobs.size, 0)
+    assert.equal(clock.pending(), 0)
+  }
+  assert.equal(manager.mp3Count, 4)
+  assert.deepEqual(hooks, ['start', 'end', 'start', 'end', 'start', 'end', 'start', 'end'])
+  assert.equal(uiEvents.filter(event => event.type === 'ERROR').length, 0)
+})
+
 test('real engine/coordinator/router hand off TTS at sentence boundary and retain utterance sequence', async t => {
   const clock = fakeClock()
   const h = await harness(t, clock)
@@ -127,6 +296,174 @@ test('real engine/coordinator/router hand off TTS at sentence boundary and retai
   assert.equal(coordinator.jobs.size, 0)
 })
 
+for (const offset of [0, 7, 19.5]) {
+  test(`robot takeover at ${offset}ms waits for the shared packet deadline and rebases packet two`, async t => {
+    const clock = fakeClock(), h = await harness(t, clock)
+    fakeDecode(h.router, 1920)
+    const clip = await h.router.prepareBuffer(Buffer.from('cadence'))
+    t.after(() => clip.release())
+    const lower = h.router.playPrepared({}, clip, { managed: true, source: 'point' })
+    await lower.ready; clock.advance(0)
+    clock.advance(offset); lower.pause()
+    let starts = 0
+    const upper = h.router.playPrepared({}, clip, { managed: true, source: 'barrage', onAudioStart: () => { starts++ } })
+    await upper.ready; clock.advance(0)
+    assert.equal(starts, 0, 'start hook/caption cannot precede the eligible first send')
+    assert.equal(h.robot.frames.length, 1)
+    clock.advance(19.75 - offset)
+    assert.equal(h.robot.frames.length, 1)
+    clock.advance(0.25)
+    assert.equal(starts, 1)
+    assert.equal(h.robot.frames.length, 2)
+    clock.advance(19)
+    assert.equal(h.robot.frames.length, 2, 'packet two must not catch up immediately after the gate')
+    clock.advance(1)
+    assert.equal(h.robot.frames.length, 3)
+    assert.equal(h.events.filter(e => e.type === 'handoff' && e.reason === 'boundary')[0].gapMs, 20)
+    clock.advance(40)
+    assert.equal((await upper.promise).ok, true)
+    lower.stop()
+  })
+}
+
+test('cross-session gate uses the actual short final packet duration, even for the same source role', async t => {
+  const clock = fakeClock(), h = await harness(t, clock)
+  h.router._decode = async (source, write) => write(Buffer.alloc(source.buffer.toString() === 'short' ? 650 : 1280))
+  const short = await h.router.prepareBuffer(Buffer.from('short'))
+  const full = await h.router.prepareBuffer(Buffer.from('full'))
+  t.after(() => { short.release(); full.release() })
+  const lower = h.router.playPrepared({}, short, { managed: true, source: 'barrage' })
+  await lower.ready; clock.advance(20); lower.stop()
+  const upper = h.router.playPrepared({}, full, { managed: true, source: 'barrage' })
+  await upper.ready; clock.advance(0.25)
+  assert.equal(h.robot.frames.length, 2)
+  clock.advance(0.0625)
+  assert.equal(h.robot.frames.length, 3, '10-byte tail needs 0.3125ms, not a padded 20ms')
+  clock.advance(40)
+  assert.equal((await upper.promise).ok, true)
+})
+
+test('slow start hook cannot move the takeover burst into barrage packets one and two', async t => {
+  const clock = fakeClock()
+  let hookDelay = 0
+  const h = await harness(t, { ...clock, now: () => clock.now() + hookDelay })
+  fakeDecode(h.router, 1920)
+  const clip = await h.router.prepareBuffer(Buffer.from('slow-hook'))
+  t.after(() => clip.release())
+  const lower = h.router.playPrepared({}, clip, { managed: true, source: 'point' })
+  await lower.ready; clock.advance(0); lower.pause()
+  const upper = h.router.playPrepared({}, clip, { managed: true, source: 'barrage', onAudioStart: () => { hookDelay += 25 } })
+  await upper.ready; clock.advance(20)
+  assert.equal(h.robot.frames.length, 2, 'only barrage packet one sends after the delayed start hook')
+  clock.advance(19)
+  assert.equal(h.robot.frames.length, 2)
+  clock.advance(1)
+  assert.equal(h.robot.frames.length, 3)
+  const sent = h.packets.filter(packet => packet.stage === 'scheduled_send' && packet.source === 'barrage')
+  assert.equal(sent[1].gapMs, 20)
+  clock.advance(40)
+  assert.equal((await upper.promise).ok, true)
+  lower.stop()
+})
+
+test('cancelled unmanaged takeover restores the previous speaker without a compressed packet gap', async t => {
+  const clock = fakeClock(), h = await harness(t, clock)
+  fakeDecode(h.router, 1920)
+  const clip = await h.router.prepareBuffer(Buffer.from('cancel-before-send'))
+  t.after(() => clip.release())
+  const lower = h.router.playPrepared({}, clip)
+  await lower.ready; clock.advance(0)
+  let starts = 0
+  const upper = h.router.playPrepared({}, clip, { onAudioStart: () => { starts++ } })
+  await upper.ready; clock.advance(0)
+  assert.equal(lower.paused, true, 'legacy sender must stop advancing the shared deadline')
+  clock.advance(5); upper.stop()
+  assert.equal((await upper.promise).aborted, true)
+  assert.equal(lower.paused, false)
+  clock.advance(14)
+  assert.equal(h.robot.frames.length, 1)
+  clock.advance(1)
+  assert.equal(h.robot.frames.length, 2)
+  assert.equal(starts, 0)
+  clock.advance(40)
+  assert.equal((await lower.promise).ok, true)
+  assert.deepEqual(h.robot.frames.map(frame => frame.seq), [1, 2, 3])
+})
+
+test('host pause at robot start sends nothing and cannot repeat the start callback on resume', async t => {
+  const clock = fakeClock(), h = await harness(t, clock)
+  fakeDecode(h.router)
+  const clip = await h.router.prepareBuffer(Buffer.from('host-at-start'))
+  t.after(() => clip.release())
+  let starts = 0
+  const session = h.router.playPrepared({}, clip, { managed: true, onAudioStart: () => {
+    starts++
+    session.pause('host')
+  } })
+  await session.ready; clock.advance(100)
+  assert.equal(starts, 1)
+  assert.equal(h.robot.frames.length, 0)
+  assert.equal(clock.pending(), 0)
+  session.resume('host'); clock.advance(40)
+  assert.equal((await session.promise).ok, true)
+  assert.equal(starts, 1)
+  assert.equal(h.robot.frames.length, 2)
+})
+
+test('point eligibility lost while waiting at a robot boundary cannot start stale audio or captions', async t => {
+  const clock = fakeClock(), h = await harness(t, clock)
+  fakeDecode(h.router, 1920)
+  const clip = await h.router.prepareBuffer(Buffer.from('stale-point-boundary'))
+  t.after(() => clip.release())
+  const lower = h.router.playPrepared({}, clip, { source: 'transit' })
+  await lower.ready; clock.advance(0)
+  let current = true, starts = 0
+  const point = h.router.playPrepared({}, clip, { source: 'point', beforePlay: () => current,
+    onAudioStart: () => { starts++ } })
+  await point.ready; clock.advance(0)
+  current = false
+  clock.advance(20)
+  assert.equal((await point.promise).aborted, true)
+  assert.equal(starts, 0)
+  assert.equal(lower.paused, false)
+  assert.deepEqual(h.robot.frames.map(frame => frame.seq), [1, 2])
+  clock.advance(40)
+  assert.equal((await lower.promise).ok, true)
+})
+
+for (const change of ['same-socket-output-roundtrip', 'socket-replacement']) {
+  test(`${change} cancels a waiting barrage with connection-scoped deadline handling`, async t => {
+    const clock = fakeClock(), h = await harness(t, clock)
+    fakeDecode(h.router)
+    const clip = await h.router.prepareBuffer(Buffer.from('connection-gate'))
+    t.after(() => clip.release())
+    const lower = h.router.playPrepared({}, clip, { managed: true })
+    const lowerFailure = assert.rejects(lower.promise)
+    await lower.ready; clock.advance(0); lower.pause()
+    let staleStarts = 0
+    const upper = h.router.playPrepared({}, clip, { managed: true, onAudioStart: () => { staleStarts++ } })
+    const upperFailure = assert.rejects(upper.promise)
+    await upper.ready; clock.advance(0)
+    if (change === 'same-socket-output-roundtrip') {
+      h.router.setConfig({ destination: 'local' })
+      h.router.setConfig({ destination: 'robot' })
+    } else {
+      h.robot.connectionGeneration++
+      h.robot.emit('connected')
+    }
+    await Promise.all([lowerFailure, upperFailure])
+    const replacementClip = await h.router.prepareBuffer(Buffer.from('connection-gate'))
+    t.after(() => replacementClip.release())
+    const next = h.router.playPrepared({}, replacementClip, { managed: true })
+    await next.ready; clock.advance(0)
+    assert.equal(h.robot.frames.length, change === 'socket-replacement' ? 2 : 1)
+    clock.advance(60)
+    assert.equal((await next.promise).ok, true)
+    assert.equal(staleStarts, 0)
+    assert.equal(h.robot.frames.length, 3)
+  })
+}
+
 test('real engine/router preserve MP3 packet cursor through host pause and aborted barrage', async t => {
   const clock = fakeClock()
   const h = await harness(t, clock)
@@ -152,7 +489,9 @@ test('real engine/router preserve MP3 packet cursor through host pause and abort
   abort.abort()
   assert.equal((await barrageResult).aborted, true)
   await until(() => coordinator.active?.role === 'cruise' && clock.pending() === 1)
-  clock.advance(60)
+  clock.advance(19)
+  assert.equal(h.robot.frames.length, 2, 'aborting barrage cannot retract its already-sent packet')
+  clock.advance(61)
   assert.equal((await cruiseResult).ok, true)
   assert.deepEqual(h.robot.frames.map(frame => frame.buffer[0]), [5, 6, 5, 5, 5])
   assert.deepEqual(h.robot.frames.filter(frame => frame.buffer[0] === 5).map(frame => frame.seq), [1, 2, 3, 4])
@@ -708,7 +1047,9 @@ test('abort listener order cannot prevent managed lower-source resumption', asyn
   signal.abort()
   assert.equal((await upper.promise).aborted, true)
   assert.equal(resumeError, undefined)
-  clock.advance(40) // Two lower-source packets sent at the same clock instant.
+  clock.advance(19)
+  assert.equal(h.robot.frames.length, 1)
+  clock.advance(21) // Restored lower packet keeps the original 20ms spacing.
   assert.equal((await lower.promise).ok, true)
   clip.release()
 })
