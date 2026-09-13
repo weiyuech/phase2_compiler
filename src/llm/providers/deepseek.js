@@ -44,12 +44,13 @@ export class DeepseekProvider {
     return this._extractText(data)
   }
 
-  async rewriteCustom(system, user) {
+  async rewriteCustom(system, user, { signal } = {}) {
     if (!this.apiKey) {
       throw new Error('DeepSeek 未配置，请检查 DEEPSEEK_API_KEY')
     }
 
     const res = await fetch(API_URL, {
+      signal,
       method: 'POST',
       headers: {
         'Content-Type':  'application/json',

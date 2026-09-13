@@ -44,12 +44,13 @@ export class DoubaoProvider {
     return this._extractText(data)
   }
 
-  async rewriteCustom(system, user) {
+  async rewriteCustom(system, user, { signal } = {}) {
     if (!this.apiKey || !this.model) {
       throw new Error('豆包未配置，请检查 DOUBAO_API_KEY 和 DOUBAO_MODEL')
     }
 
     const res = await fetch(API_URL, {
+      signal,
       method: 'POST',
       headers: {
         'Content-Type':  'application/json',

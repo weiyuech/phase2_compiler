@@ -72,16 +72,18 @@ export class LLMRewriter {
   }
 
   async _tryProviderCustom(provider, system, user) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(new Error('timeout')), this.timeoutMs)
     try {
-      const text = await Promise.race([
-        provider.rewriteCustom(system, user),
-        this._timeout()
-      ])
+      // Both custom providers propagate this signal through fetch/body reads.
+      // Await cancellation before fallback/retry; Promise.race alone left the
+      // previous HTTP request alive after the decision clock became available.
+      const text = await provider.rewriteCustom(system, user, { signal: controller.signal })
       return { text, provider: provider.name }
     } catch (err) {
       console.error(`[LLM] Custom rewrite with ${provider.name} failed:`, err.message)
       return null
-    }
+    } finally { clearTimeout(timer) }
   }
 
   _timeout() {

@@ -63,7 +63,10 @@ selection. A persistent matching screen may play again at a later free slot.
 Stop/reselection, output/connection cancellation and mode changes invalidate
 stale work. Host interruption invalidates prepared playback while retaining
 the successful baseline and recurring clock. Old external requests cannot
-overlap another paid request, commit a fresh-session baseline or start old audio.
+overlap another client request, commit a fresh-session baseline or start old audio.
+Judge/answer timeouts abort the underlying HTTP request before fallback/retry;
+successful calls clear their timeout. Client cancellation cannot guarantee that
+the remote provider stops computation or waives charges for an accepted request.
 
 ## Verification
 
@@ -77,7 +80,7 @@ overlap another paid request, commit a fresh-session baseline or start old audio
   /path/to/settings.local.json --rounds 1 --report /tmp/judge-results.json.
   Explicitly calls the real judge API; answer LLM/audio remain stubs.
 
-Local verification: 302 backend tests, 84 renderer tests and all 13 native OCR
+Local verification: 306 backend tests, 84 renderer tests and all 13 native OCR
 workflow checks passed; UI build passed. This is not Windows hardware or
 audible robot verification. Controlled judge responses do not prove perfect
 semantic classification by a real model.

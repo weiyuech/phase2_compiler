@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { LLMRewriter } from '../src/llm/index.js';
 import { OcrTextJudge } from '../src/phase2/ocr/text-judge.js';
 import { DEFAULT_OCR_JUDGE_PROMPT } from '../src/phase2/ocr/judge-prompt.js';
@@ -111,8 +110,7 @@ async function main() {
 }
 
 try {
-  // The application's Promise.race timeout timers outlive successful calls;
-  // all actual requests/report writes have finished before this CLI exits.
+  // All actual requests/report writes have finished before this CLI exits.
   process.exit(await main());
 } catch {
   process.stderr.write('Live judge evaluation failed before completion; no credentials or provider response body were printed.\n');
