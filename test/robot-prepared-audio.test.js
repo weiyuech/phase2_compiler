@@ -205,7 +205,10 @@ test('same MP3 through point narrator and repeated barrage takeovers preserves w
     const deadline = performance.now() + 5000
     while (!settled) {
       assert.ok(performance.now() < deadline, 'MP3 flow did not complete')
-      clock.advance(1)
+      // Advance a packet duration per real yield. Hundreds of nominal 1 ms
+      // sleeps can exceed the watchdog on Windows without advancing the fake
+      // playback clock far enough. advance() still visits every due deadline.
+      clock.advance(20)
       await delay(1)
     }
     return result

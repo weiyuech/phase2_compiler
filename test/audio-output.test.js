@@ -133,7 +133,13 @@ test('streaming TTS audio stops sending while paused and resumes in place', asyn
     }
     session.end()
 
-    await delay(100)
+    // Preparation is asynchronous and can exceed 100 ms on Windows. This test
+    // exercises pausing active transmission, not pausing before packet one.
+    const deadline = performance.now() + 5000
+    while (robot.frames.length < 2) {
+      assert.ok(performance.now() < deadline, 'prepared audio never started sending')
+      await delay(5)
+    }
     await session.pause()
     const beforePause = robot.frames.length
     await delay(220)
