@@ -8,14 +8,17 @@
 
 ### 开发模式
 
+首次运行从本文件开始；[开发维护与交接](docs/maintainer-guide.md) 说明代码入口、行为约定、测试和多工作目录更新方法，[界面开发说明](robot-ui/README.md) 补充 Electron 相关内容。
+使用 Node.js 22。需要两个终端：保留后端终端，再打开另一个终端启动界面；`Ctrl+C` 停止对应程序。不要同时从两个工作目录启动应用。
+
 ```bash
-# 后端（根目录）
-npm install
+# 后端（先进入项目根目录）
+npm ci
 npm start
 
-# 前端（另开终端）
+# 前端（另开终端，也先进入项目根目录）
 cd robot-ui
-npm install
+npm ci
 npm run dev
 
 # 机器人音频传输测试器（可选，另开终端）
@@ -25,12 +28,26 @@ python3 robot_audio_transport_test.py
 py robot_audio_transport_test.py
 ```
 
+### 本地验证
+
+```bash
+# 在项目根目录运行；不会调用付费 LLM 或向实体机器人发送命令
+npm run test:all   # 后端 + UI 自动化回归（部分测试绑定本机临时端口）
+npm run test:ocr   # 真实 OCR 模型识别固定测试图，不截屏、不播放音频
+npm --prefix robot-ui run build
+```
+
+`test:ocr` 只有识别出 `ROBOT 12345` 且置信度达标才显示 `[OCR check] PASS`；失败或超时以非零状态退出，并释放识别 worker。它验证本机原生依赖与模型，不验证操作系统截屏权限、Windows 安装包或机器人实际发声。
+
+`onnxruntime-node` 当前固定为 **1.23.2**，与已验证的锁文件一致。遇到原生库缺失时，先核对 `node -p "process.platform + '/' + process.arch"`，再在正确的工作目录执行 `npm ci` 和 `npm run test:ocr`。不要从旧目录复制 `node_modules` 或仅为解决本机问题回退已验证的依赖版本。
+
 ### 打包安装包
 
 ```bash
+# 仅在 Windows x64 构建环境本地试打包
 cd robot-ui
-npm install
-npm run package   # 产出项目根目录 release/ 下的 .dmg / .exe / .AppImage
+npm ci
+npm run package   # 产出项目根目录 release/ 下的 .exe
 ```
 
 Windows 测试安装包通过精确版本标签构建，完成回归、音频解码、OCR 和应用启动检查后，仅上传到新建的草稿发布。不会合并 `main`、公开发布或覆盖已有安装包。详见 [Windows 测试安装包与验收](docs/windows-test-installer.md)。
@@ -43,12 +60,14 @@ Windows 测试安装包通过精确版本标签构建，完成回归、音频解
 robot-live-system/
 ├── src/
 │   ├── index.js               # 后端主入口
-│   ├── robot/listener.js      # 机器人 WebSocket（port 8765）
+│   ├── robot/listener.js      # 机器人 WebSocket（远程客户端 / 本地监听）
 │   ├── task/manager.js        # 巡游清单驱动
 │   ├── knowledge/             # 知识库（flatfile / sqlite）
 │   ├── llm/                   # LLM 改写（豆包主 + DeepSeek 备）
 │   ├── tts/                   # TTS 合成 + AudioPlayer
 │   ├── transit/manager.js     # 过渡音频管理
+│   ├── phase2/                # 弹幕 OCR、冷却调度与回复（生产功能）
+│   ├── diagnostics/           # 有界音频诊断与后台日志
 │   ├── ui-bridge.js           # 控制面板 WebSocket（port 3001）
 │   └── tunnel.js              # ngrok 内网穿透（可选）
 ├── robot-ui/                  # Electron 控制面板（Vue 3）
@@ -60,6 +79,14 @@ robot-live-system/
 │   └── banned-words.txt       # 违禁词列表（每行一个，# 注释）
 └── .env                       # API Key 等配置
 ```
+
+## 弹幕识别与播报
+
+识别间隔控制截屏/识别频率，播报冷却控制回复机会；两者独立。冷却取最接近的识别间隔倍数，至少一个间隔。准备或播放弹幕时跳过该次回复机会，不在结束后补播；原始 OCR 日志仍可更新。
+
+TTS 在空闲回复机会比较「上次成功判断的原始 OCR」与「当前原始 OCR」，仅将判断器返回的新增问题送入回答 LLM。严格返回 `无新问题` 时不回答、不播放，但更新成功判断基线；失败或忙碌跳过不更新。MP3 不调用 LLM，按当前 OCR 匹配素材，同样遵守冷却和优先级。
+
+完整状态与保留规则见 [弹幕冷却与原始 OCR 所有权](docs/barrage-cooldown-design.md)。早期评估文档仅作历史记录，不能代替当前规则。
 
 ---
 

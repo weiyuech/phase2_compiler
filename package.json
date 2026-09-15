@@ -6,7 +6,10 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test test/*.test.js",
+    "test": "node scripts/run-tests.mjs backend",
+    "test:all": "node scripts/run-tests.mjs all",
+    "test:ui": "node scripts/run-tests.mjs ui",
+    "test:ocr": "node scripts/check-ocr.mjs",
     "test:audio-output": "node --test test/audio-output.test.js",
     "test:tts-v3": "node --test test/tts-v3-client.test.js"
   },

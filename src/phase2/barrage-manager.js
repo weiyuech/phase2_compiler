@@ -28,7 +28,7 @@ export class BarrageManager {
     this.onCancel = onCancel;
 
     this.isPlaying = false;         // A sequence is "in flight" (generating OR playing)
-    this._isActuallyPlaying = false; // Real audio is coming out of the speaker RIGHT NOW
+    this._isActuallyPlaying = false; // Player/sender active; not a robot audible-playback acknowledgment.
     this.isActive = false;
     this.isSleeping = false;
     this.cooldownTimer = null;
@@ -54,6 +54,9 @@ export class BarrageManager {
       && !this.tts.player.isPlaying() && !this.checkIsSpeaking?.();
   }
 
+  // Production phase2/index.js sets both flags: the decision clock skips busy
+  // slots and owns cooldown. Default flags retain legacy direct-call behavior;
+  // its latestBarrageEvent queue is not the production scheduling policy.
   async handleOcrText(text, { config: suppliedConfig, isCurrent = () => true, requireReady = false, externalCadence = false } = {}) {
     if (!this.isActive) return;
     if (!text || !text.trim()) return;

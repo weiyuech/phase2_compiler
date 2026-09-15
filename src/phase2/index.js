@@ -1,8 +1,7 @@
 /**
- * Phase 2 Sandbox Entry Point
- * 
- * This module allows for non-intrusive extension of Phase 1 functionality.
- * It hooks into events and provides a dedicated space for experimental logic.
+ * Production barrage/OCR integration ("phase2" is the historical directory name).
+ * Raw observation/logging and cooldown reply decisions are independent paths.
+ * See docs/barrage-cooldown-design.md before changing snapshot or timing rules.
  */
 
 import { Phase2Monitor } from './monitor.js';
