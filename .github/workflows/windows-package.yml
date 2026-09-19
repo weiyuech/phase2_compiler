@@ -24,7 +24,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          # Node 22 can corrupt test-runner messages containing Chinese logs.
+          # Node 24 includes nodejs/node#64706; retain all logs and assertions.
+          node-version: 24
           cache: 'npm'
           cache-dependency-path: |
             package-lock.json
