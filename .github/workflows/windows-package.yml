@@ -50,8 +50,11 @@ jobs:
         run: |
           cd robot-ui
           node scripts/gen-icon.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/prepare-backend.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npx electron-vite build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npx electron-builder --win --x64 --publish never
 
       - name: Verify packaged clean defaults and resource allowlist

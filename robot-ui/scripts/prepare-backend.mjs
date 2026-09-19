@@ -84,13 +84,20 @@ if (process.platform === 'win32') {
     })
     if (!res.ok) throw new Error(`vc_redist download failed: HTTP ${res.status}`)
     writeFileSync(downloadPath, Buffer.from(await res.arrayBuffer()))
+    // CI runs in PowerShell 7. Do not pass its module search path to Windows
+    // PowerShell 5, which cannot load the newer Security module assemblies.
+    const signatureEnv = { ...process.env, ROBOT_VC_REDIST_PATH: downloadPath }
+    for (const key of Object.keys(signatureEnv)) {
+      if (key.toLowerCase() === 'psmodulepath') delete signatureEnv[key]
+    }
     execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
       $ErrorActionPreference = 'Stop'
+      Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"
       $signature = Get-AuthenticodeSignature -LiteralPath $env:ROBOT_VC_REDIST_PATH
       if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(^|,\\s*)O=Microsoft Corporation(,|$)') {
         throw 'VC++ runtime must have a valid Microsoft signature'
       }
-    `], { stdio: 'inherit', env: { ...process.env, ROBOT_VC_REDIST_PATH: downloadPath } })
+    `], { stdio: 'inherit', env: signatureEnv })
     renameSync(downloadPath, vcRedistPath)
   } finally {
     rmSync(downloadPath, { force: true })
