@@ -1,11 +1,12 @@
 import { app, BrowserWindow, ipcMain, dialog, utilityProcess, systemPreferences, desktopCapturer, shell, Tray, Menu, nativeImage } from 'electron'
 import { join, resolve }                        from 'path'
-import { readFileSync, writeFileSync, existsSync, cpSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, cpSync, renameSync, rmSync } from 'fs'
 import { scryptSync, randomBytes, timingSafeEqual } from 'crypto'
 import { RollingLog } from '../../../src/diagnostics/rolling-log.js'
 import { createDiagnosticsReport } from '../../../src/diagnostics/report.js'
 import { seedPackagedUserData } from '../../../src/packaging/seed-user-data.js'
 import { DEFAULT_OCR_JUDGE_PROMPT, resolveOcrJudgePrompt } from '../../../src/phase2/ocr/judge-prompt.js'
+import { speechProfileKeys, speechProfileMigration, selectSpeechProfileChanges } from '../../../src/config/speech-profiles.js'
 
 // ─── PROJECT_ROOT ─────────────────────────────────────────────────────────────
 // dev:      src/main/ → src/ → robot-ui/ → robot-live-system/  (3 levels up)
@@ -40,6 +41,10 @@ function seedUserData() {
   const result = seedPackagedUserData({ packaged: app.isPackaged, projectRoot: PROJECT_ROOT, userDataDir: USER_DATA_DIR })
   if (result.dataCreated) console.log('[main] 首次启动，已初始化空白用户数据目录')
   if (result.environmentCreated) console.log('[main] 首次启动，已初始化空白连接配置')
+  if (app.isPackaged && existsSync(ENV_PATH)) {
+    const migration = speechProfileMigration(parseEnv(readFileSync(ENV_PATH, 'utf8')))
+    if (Object.keys(migration).length) saveEnvironmentChanges(migration)
+  }
 }
 
 const BANNED_WORDS_PATH = join(CONFIG_DIR, 'banned-words.txt')
@@ -51,6 +56,7 @@ const ADMIN_PATH        = join(CONFIG_DIR, 'admin.json')
 const ENV_PATH          = app.isPackaged ? join(USER_DATA_DIR, '.env') : join(PROJECT_ROOT, '.env')
 
 const PUBLIC_ENV_KEYS   = [
+  ...speechProfileKeys('transit'),
   'KB_PROVIDER', 'DOUBAO_MODEL', 'DEEPSEEK_MODEL', 'TTS_VOICE_TYPE', 'TTS_CLUSTER', 'TTS_RESOURCE_ID', 'TTS_AUTH_MODE',
   'DUCK_VOLUME', 'DUCK_FADE_MS', 'LLM_TIMEOUT_MS', 'LLM_MAX_TOKENS', 'TTS_TIMEOUT_MS', 'ROBOT_PORT', 'ROBOT_URL',
   'DUCK_NOISE_DB', 'DUCK_DURATION', 'BANNED_WORDS_FILE',
@@ -58,6 +64,7 @@ const PUBLIC_ENV_KEYS   = [
   'BARRAGE_TTS_RESOURCE_ID', 'BARRAGE_TTS_AUTH_MODE', 'BARRAGE_TTS_TIMEOUT_MS', 'BARRAGE_LLM_TIMEOUT_MS', 'BARRAGE_LLM_MAX_TOKENS'
 ]
 const SENSITIVE_ENV_KEYS = [
+  ...speechProfileKeys('transit', { secrets: true }),
   'DOUBAO_API_KEY', 'DEEPSEEK_API_KEY', 'QWEN_API_KEY',
   'TTS_APP_ID', 'TTS_ACCESS_TOKEN', 'TTS_API_KEY',
   'NGROK_AUTHTOKEN',
@@ -120,6 +127,22 @@ function writeEnvFields(raw, changes) {
 }
 
 // ─── Password helpers ─────────────────────────────────────────────────────────
+
+function readEnvironment() {
+  const raw = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf8') : ''
+  const env = parseEnv(raw)
+  return { ...env, ...speechProfileMigration(env) }
+}
+
+function saveEnvironmentChanges(changes) {
+  const raw = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf8') : ''
+  const updated = writeEnvFields(raw, { ...speechProfileMigration(parseEnv(raw)), ...changes })
+  const temporary = `${ENV_PATH}.${randomBytes(8).toString('hex')}.tmp`
+  try {
+    writeFileSync(temporary, updated, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+    renameSync(temporary, ENV_PATH)
+  } finally { rmSync(temporary, { force: true }) }
+}
 
 function hashPassword(pwd) {
   const salt = randomBytes(16).toString('hex')
@@ -903,8 +926,7 @@ ipcMain.handle('admin-change-password', (_, oldPwd, newPwd) => {
 
 ipcMain.handle('read-public-env', () => {
   try {
-    const raw = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf-8') : ''
-    const all = parseEnv(raw)
+    const all = readEnvironment()
     const env = {}
     for (const key of PUBLIC_ENV_KEYS) env[key] = all[key] ?? ''
     return { ok: true, env }
@@ -917,9 +939,7 @@ ipcMain.handle('write-public-env', (_, changes) => {
     for (const key of PUBLIC_ENV_KEYS) {
       if (key in changes) safe[key] = changes[key]
     }
-    const raw     = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf-8') : ''
-    const updated = writeEnvFields(raw, safe)
-    writeFileSync(ENV_PATH, updated, 'utf-8')
+    saveEnvironmentChanges(safe)
     return { ok: true }
   } catch (e) { return { ok: false, error: e.message } }
 })
@@ -931,8 +951,7 @@ ipcMain.handle('read-sensitive-env', (_, pwd) => {
     if (!existsSync(ADMIN_PATH)) return { ok: false, error: '未设置管理员密码' }
     const { hash, salt } = JSON.parse(readFileSync(ADMIN_PATH, 'utf-8'))
     if (!verifyPassword(pwd, hash, salt)) return { ok: false, error: '密码错误' }
-    const raw = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf-8') : ''
-    const all = parseEnv(raw)
+    const all = readEnvironment()
     const env = {}
     for (const key of SENSITIVE_ENV_KEYS) env[key] = all[key] ?? ''
     return { ok: true, env }
@@ -948,9 +967,18 @@ ipcMain.handle('write-sensitive-env', (_, pwd, changes) => {
     for (const key of SENSITIVE_ENV_KEYS) {
       if (key in changes) safe[key] = changes[key]
     }
-    const raw     = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf-8') : ''
-    const updated = writeEnvFields(raw, safe)
-    writeFileSync(ENV_PATH, updated, 'utf-8')
+    saveEnvironmentChanges(safe)
+    return { ok: true }
+  } catch (e) { return { ok: false, error: e.message } }
+})
+
+// Save one complete speech profile, including voice/model parameters, in one write.
+ipcMain.handle('write-speech-profile', (_, pwd, profile, changes) => {
+  try {
+    if (!existsSync(ADMIN_PATH)) return { ok: false, error: '未设置管理员密码' }
+    const { hash, salt } = JSON.parse(readFileSync(ADMIN_PATH, 'utf8'))
+    if (!verifyPassword(pwd, hash, salt)) return { ok: false, error: '密码错误' }
+    saveEnvironmentChanges(selectSpeechProfileChanges(profile, changes))
     return { ok: true }
   } catch (e) { return { ok: false, error: e.message } }
 })

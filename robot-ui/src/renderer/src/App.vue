@@ -9,9 +9,8 @@
       <div class="topbar-center">
         <span class="ws-dot" :class="wsStatus" />
         <span class="ws-label" :title="wsDetail">{{ wsLabel }}</span>
-        <!-- 连接失败过就一直显示：用户报障时我们让他点这个按钮 -->
+        <!-- Playback/configuration failures also need diagnostics while connected. -->
         <button
-          v-if="wsEverFailed && wsStatus !== 'connected'"
           class="ws-log-btn"
           title="把排障需要的信息导出成一个文件，发给技术支持"
           @click="exportDiagnostics"
@@ -195,7 +194,12 @@ async function connectWS() {
     }
 
     socket.addEventListener('message', (e) => {
-      // Logic handled in child components via props/events
+      try {
+        const { type, data } = JSON.parse(e.data)
+        if (type === 'ERROR' && data?.message) {
+          ElMessage.error({ message: data.message, duration: 8000, showClose: true })
+        }
+      } catch { /* Ignore non-JSON frames. */ }
     })
 
     socket.onclose = () => {

@@ -35,3 +35,6 @@ robot_audio_diagnostics/
 # OS cache
 .DS_Store
 Thumbs.db
+
+# Downloaded Microsoft prerequisite (embedded by NSIS)
+robot-ui/build/vc_redist.*.exe*

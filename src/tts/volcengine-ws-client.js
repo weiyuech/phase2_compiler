@@ -142,19 +142,19 @@ export function parseV3Frame(input) {
 
 export class VolcengineTTSWSClient {
   constructor(config = {}) {
-    this.apiKey = config.TTS_API_KEY || process.env.TTS_API_KEY || ''
-    this.appId = config.TTS_APP_ID || process.env.TTS_APP_ID || ''
-    this.accessKey = config.TTS_ACCESS_TOKEN || process.env.TTS_ACCESS_TOKEN || ''
-    this.authMode = config.TTS_AUTH_MODE || process.env.TTS_AUTH_MODE || 'api-key'
-    this.voiceType = config.TTS_VOICE_TYPE || process.env.TTS_VOICE_TYPE || ''
-    this.cluster = config.TTS_CLUSTER || process.env.TTS_CLUSTER || 'volcano_tts'
-    this.resourceId = config.TTS_RESOURCE_ID || process.env.TTS_RESOURCE_ID || inferV3ResourceId(this.cluster)
-    this.speedRatio = Number.parseFloat(config.TTS_SPEED || process.env.TTS_SPEED || '1.0')
-    this.volumeRatio = Number.parseFloat(config.TTS_VOLUME || process.env.TTS_VOLUME || '1.0')
-    this.sampleRate = parsePositiveInt(config.TTS_SAMPLE_RATE || process.env.TTS_SAMPLE_RATE, 24000)
-    this.baseTimeoutMs = parsePositiveInt(config.TTS_TIMEOUT_MS || process.env.TTS_TIMEOUT_MS, 30000)
-    this.maxTimeoutMs = parsePositiveInt(config.TTS_MAX_TIMEOUT_MS || process.env.TTS_MAX_TIMEOUT_MS, 600000)
-    this.url = config.TTS_WS_URL || process.env.TTS_WS_URL || DEFAULT_V3_URL
+    this.apiKey = (config.TTS_API_KEY ?? process.env.TTS_API_KEY) || ''
+    this.appId = (config.TTS_APP_ID ?? process.env.TTS_APP_ID) || ''
+    this.accessKey = (config.TTS_ACCESS_TOKEN ?? process.env.TTS_ACCESS_TOKEN) || ''
+    this.authMode = (config.TTS_AUTH_MODE ?? process.env.TTS_AUTH_MODE) || 'api-key'
+    this.voiceType = (config.TTS_VOICE_TYPE ?? process.env.TTS_VOICE_TYPE) || ''
+    this.cluster = (config.TTS_CLUSTER ?? process.env.TTS_CLUSTER) || 'volcano_tts'
+    this.resourceId = (config.TTS_RESOURCE_ID ?? process.env.TTS_RESOURCE_ID) || inferV3ResourceId(this.cluster)
+    this.speedRatio = Number.parseFloat((config.TTS_SPEED ?? process.env.TTS_SPEED) || '1.0')
+    this.volumeRatio = Number.parseFloat((config.TTS_VOLUME ?? process.env.TTS_VOLUME) || '1.0')
+    this.sampleRate = parsePositiveInt((config.TTS_SAMPLE_RATE ?? process.env.TTS_SAMPLE_RATE), 24000)
+    this.baseTimeoutMs = parsePositiveInt((config.TTS_TIMEOUT_MS ?? process.env.TTS_TIMEOUT_MS), 30000)
+    this.maxTimeoutMs = parsePositiveInt((config.TTS_MAX_TIMEOUT_MS ?? process.env.TTS_MAX_TIMEOUT_MS), 600000)
+    this.url = (config.TTS_WS_URL ?? process.env.TTS_WS_URL) || DEFAULT_V3_URL
   }
 
   isConfigured() {

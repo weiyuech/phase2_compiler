@@ -5,9 +5,9 @@ const API_URL = 'https://api.deepseek.com/chat/completions'
 export class DeepseekProvider {
   constructor(config = {}) {
     this.name   = 'deepseek'
-    this.apiKey = config.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY
-    this.model  = config.DEEPSEEK_MODEL   || process.env.DEEPSEEK_MODEL || 'deepseek-chat'
-    const configuredMax = Number.parseInt(config.LLM_MAX_TOKENS || process.env.LLM_MAX_TOKENS || '4096', 10)
+    this.apiKey = (config.DEEPSEEK_API_KEY ?? process.env.DEEPSEEK_API_KEY)
+    this.model  = (config.DEEPSEEK_MODEL ?? process.env.DEEPSEEK_MODEL) || 'deepseek-chat'
+    const configuredMax = Number.parseInt((config.LLM_MAX_TOKENS ?? process.env.LLM_MAX_TOKENS) || '4096', 10)
     this.maxTokens = Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : 4096
   }
 

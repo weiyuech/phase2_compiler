@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('api', {
   // Sensitive .env params (password-protected)
   readSensitiveEnv:  (pwd)         => ipcRenderer.invoke('read-sensitive-env', pwd),
   writeSensitiveEnv: (pwd, changes) => ipcRenderer.invoke('write-sensitive-env', pwd, changes),
+  writeSpeechProfile: (pwd, profile, changes) => ipcRenderer.invoke('write-speech-profile', pwd, profile, changes),
 
   // Restart backend (picks up new .env without quitting the app)
   restartBackend: () => ipcRenderer.invoke('restart-backend'),

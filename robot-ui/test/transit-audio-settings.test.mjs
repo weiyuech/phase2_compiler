@@ -138,7 +138,7 @@ test('saving is rejected until the initial configuration response is received', 
   assert.deepEqual(ws.sent, [{ type: 'GET_TRANSIT_CONFIG' }])
   assert.match(h.messages.at(-1).message, /尚未加载/)
   assert.equal(h.state.savingTransit.value, false)
-  assert.equal(h.timers.size, 0)
+  assert.deepEqual([...h.timers.values()].map(timer => timer.delay), [2000])
   ws.reply(config())
   await h.state.saveTransitConfig()
   assert.equal(ws.sent.at(-1).type, 'SET_TRANSIT_CONFIG')
@@ -204,7 +204,7 @@ test('socket replacement cancels old load/open/save listeners and preserves draf
   const replacement = new FakeSocket()
   await h.replaceSocket(replacement)
   assert.equal(first.listenerCount(), 0)
-  assert.equal(h.timers.size, 0)
+  assert.deepEqual([...h.timers.values()].map(timer => timer.delay), [2000])
   assert.equal(h.state.savingTransit.value, false)
   assert.equal(h.state.loadedSocket, null)
   first.reply(config({ text: 'Late obsolete acknowledgment' }))
@@ -252,4 +252,42 @@ test('audio picker keeps supported files, deduplicates and selects the next reta
   h.state.removeTransitMp3('/audio/first.mp3')
   assert.equal(h.state.transitConfig.mp3_file, '/audio/second.WAV')
   assert.deepEqual([...h.state.transitConfig.mp3_files], ['/audio/second.WAV'])
+})
+
+test('lost initial transit query retries and becomes saveable after the response', async t => {
+  const ws = new FakeSocket()
+  const h = harness(t, ws)
+  assert.equal(h.state.configLoaded.value, false)
+  const retry = [...h.timers.values()][0]
+  assert.equal(retry.delay, 2000)
+  retry.callback()
+  assert.equal(ws.sent.filter(m => m.type === 'GET_TRANSIT_CONFIG').length, 2)
+  ws.reply(config({ enabled: true, text: '正在前往下一个展区' }))
+  assert.equal(h.state.configLoaded.value, true)
+  assert.equal(h.timers.size, 0)
+  await h.state.saveTransitConfig()
+  assert.equal(ws.sent.at(-1).type, 'SET_TRANSIT_CONFIG')
+})
+
+test('persistent nonresponse stops loading after bounded retries and manual retry retains drafts', t => {
+  const ws = new FakeSocket()
+  const h = harness(t, ws)
+  h.state.transitConfig.text = 'unsaved draft'
+  for (let attempt = 0; attempt < 5; attempt++) {
+    assert.equal(h.timers.size, 1)
+    const [id, timer] = [...h.timers][0]
+    h.timers.delete(id)
+    timer.callback()
+  }
+  assert.equal(ws.sent.length, 5)
+  assert.equal(h.timers.size, 0)
+  assert.equal(ws.listenerCount('message'), 0)
+  assert.match(h.state.configLoadError.value, /加载超时/)
+  h.state.loadTransitConfig(ws)
+  assert.equal(ws.sent.length, 6)
+  assert.equal(h.state.configLoadError.value, '')
+  ws.reply(config({ text: 'server copy' }))
+  assert.equal(h.state.configLoaded.value, true)
+  assert.equal(h.state.transitConfig.text, 'unsaved draft')
+  assert.equal(h.timers.size, 0)
 })

@@ -18,14 +18,24 @@ export function registerTourControls({ uiBridge, tour, tts, logger = console }) 
       uiBridge.broadcast('ERROR', { message: MANUAL_SPEECH_BLOCKED })
       return
     }
+    const status = (state, message) => {
+      logger.log(`[系统] 手动播报测试: ${state}`)
+      uiBridge.broadcast('TEST_SPEECH_STATUS', { state, message })
+    }
+    status('preparing', '后端已收到，正在准备语音…')
     try {
-      const result = await tts.speak(text)
+      if (typeof text !== 'string' || !text.trim()) throw new Error('请输入测试播报文本')
+      const result = await tts.speak(text, {
+        onAudioStart: () => { status('playing', '正在播放测试语音') },
+      })
       if (result?.ok === false && !result.aborted) {
-        uiBridge.broadcast('ERROR', { message: `手动播报测试失败: ${result.error?.message || '语音播放失败'}` })
-      }
+        throw result.error || new Error('语音播放失败')
+      } else if (result?.aborted) status('cancelled', '测试播报已取消')
+      else status('completed', '测试播报已完成')
     } catch (error) {
       const message = error?.message || '语音播放失败'
       logger.error('[系统] 手动播报测试失败:', message)
+      status('failed', `测试播报失败: ${message}`)
       uiBridge.broadcast('ERROR', { message: `手动播报测试失败: ${message}` })
     }
   })

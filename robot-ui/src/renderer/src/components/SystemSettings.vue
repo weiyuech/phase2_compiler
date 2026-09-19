@@ -57,7 +57,7 @@
         <div class="panel-body panel-body--stretch" style="gap: 20px">
           <div>
             <div class="prompt-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-              <span class="section-sub-title" style="color: var(--text); font-size: 13px; font-weight: 600;">导播提示词</span>
+              <span class="section-sub-title" style="color: var(--text); font-size: 13px; font-weight: 600;">巡游与过渡改写提示词</span>
               <div style="display: flex; align-items: center; gap: 6px;">
                 <span style="font-size: 12px; color: var(--text-dim)">自定义</span>
                 <el-switch v-model="customCruiseEnabled" size="small" @change="handleCruiseSwitch" />
@@ -109,12 +109,14 @@
       </template>
 
       <!-- ── 导播设置 ─────────────────────────────────────────────────────── -->
-      <template v-else-if="activeSection === 'cruise'">
-        <div class="panel-header">导播设置</div>
+      <template v-else-if="['cruise', 'transit', 'barrage'].includes(activeSection)">
+        <div class="panel-header">{{ speechProfileTitles[activeSection] }}</div>
         <div class="panel-body">
+          <p class="panel-note">{{ speechProfileDescriptions[activeSection] }}</p>
+          <p class="panel-note">三组配置独立保存；可以填写相同凭据，留空不会自动使用其他组的凭据。使用旧版配置升级时，已复制原有有效配置。</p>
           <div class="section-sub-title" style="margin-bottom: 12px; color: var(--text); font-size: 13px; font-weight: 600;">运行参数</div>
           <div class="params-grid">
-            <template v-for="item in cruisePublicEnvDef" :key="item.key">
+            <template v-for="item in currentPublicEnvDef()" :key="item.key">
               <span class="param-label">{{ item.label }}</span>
               <el-select v-if="item.options" v-model="publicEnv[item.key]" size="small" style="width: 200px">
                 <el-option v-for="o in item.options" :key="o" :label="o" :value="o" />
@@ -123,7 +125,7 @@
             </template>
           </div>
           <div class="row-actions" style="margin-top: 16px; margin-bottom: 32px">
-            <el-button type="primary" :loading="savingPublic" @click="savePublicEnv">保存并重启</el-button>
+            <el-button type="primary" :loading="savingPublic" @click="savePublicEnv">保存本组参数并重启</el-button>
             <span v-if="publicSavedOk" class="ok-text">{{ restartMsg }}</span>
           </div>
 
@@ -152,8 +154,8 @@
           <!-- 已锁定 -->
           <template v-else-if="!sensitiveUnlocked">
             <div class="masked-rows">
-              <div v-for="key in cruiseSensitiveKeys" :key="key" class="masked-row">
-                <span class="key-name">{{ key }}</span>
+              <div v-for="key in currentSensitiveKeys()" :key="key" class="masked-row">
+                <span class="key-name">{{ credentialLabel(key) }}</span>
                 <span class="key-mask">••••••••••••••••</span>
               </div>
             </div>
@@ -167,102 +169,17 @@
           <!-- 已解锁 -->
           <template v-else>
             <div class="key-form">
-              <template v-for="key in cruiseSensitiveKeys" :key="key">
-                <span class="param-label key-name-label">{{ key }}</span>
-                <el-input v-model="sensitiveEnv[key]" type="password" show-password size="small" style="width: 320px" :placeholder="key" />
+              <template v-for="key in currentSensitiveKeys()" :key="key">
+                <span class="param-label key-name-label">{{ credentialLabel(key) }}</span>
+                <el-input v-model="sensitiveEnv[key]" type="password" show-password size="small" style="width: 320px" :placeholder="credentialLabel(key)" />
               </template>
             </div>
             <div class="row-actions" style="margin-top: 20px">
-              <el-button type="primary" :loading="savingSensitive" @click="saveSensitiveEnv">保存并重启</el-button>
+              <el-button type="primary" :loading="savingSensitive" @click="saveSensitiveEnv">保存本组全部设置并重启</el-button>
               <el-button plain @click="lockSensitive">取消</el-button>
               <span v-if="sensitiveSavedOk" class="ok-text">{{ restartMsg }}</span>
             </div>
           </template>
-        </div>
-      </template>
-
-      <!-- ── 弹幕设置 ─────────────────────────────────────────────────────── -->
-      <template v-else-if="activeSection === 'barrage'">
-        <div class="panel-header">弹幕设置</div>
-        <div class="panel-body">
-          <div class="section-sub-title" style="margin-bottom: 12px; color: var(--text); font-size: 13px; font-weight: 600;">运行参数</div>
-          <div class="params-grid">
-            <template v-for="item in barragePublicEnvDef" :key="item.key">
-              <span class="param-label">{{ item.label }}</span>
-              <el-select v-if="item.options" v-model="publicEnv[item.key]" size="small" style="width: 200px">
-                <el-option v-for="o in item.options" :key="o" :label="o" :value="o" />
-              </el-select>
-              <el-input v-else v-model="publicEnv[item.key]" :placeholder="item.placeholder || ''" size="small" style="width: 200px" />
-            </template>
-          </div>
-          <div class="row-actions" style="margin-top: 16px; margin-bottom: 32px">
-            <el-button type="primary" :loading="savingPublic" @click="savePublicEnv">保存并重启</el-button>
-            <span v-if="publicSavedOk" class="ok-text">{{ restartMsg }}</span>
-          </div>
-
-          <div class="section-sub-title" style="margin-bottom: 12px; color: var(--text); font-size: 13px; font-weight: 600;">
-            API 密钥
-            <span class="lock-chip" :class="{ unlocked: sensitiveUnlocked }">
-              {{ sensitiveUnlocked ? '已解锁' : '已锁定' }}
-            </span>
-          </div>
-          
-          <!-- 首次使用：设置密码 -->
-          <template v-if="!hasPassword">
-            <p class="panel-note" style="margin-bottom: 16px">请先设置管理员密码以保护 API 密钥</p>
-            <div class="key-form">
-              <span class="param-label">新密码</span>
-              <el-input v-model="setupPwd1" type="password" show-password size="small" style="width: 240px" placeholder="至少 4 位" />
-              <span class="param-label">确认密码</span>
-              <el-input v-model="setupPwd2" type="password" show-password size="small" style="width: 240px" @keyup.enter="doSetPassword" />
-            </div>
-            <div class="row-actions" style="margin-top: 16px">
-              <el-button type="primary" :loading="settingPwd" :disabled="!setupPwd1 || !setupPwd2" @click="doSetPassword">设置密码</el-button>
-              <span v-if="pwdError" class="err-text">{{ pwdError }}</span>
-            </div>
-          </template>
-
-          <!-- 已锁定 -->
-          <template v-else-if="!sensitiveUnlocked">
-            <div class="masked-rows">
-              <div v-for="key in barrageSensitiveKeys" :key="key" class="masked-row">
-                <span class="key-name">{{ key }}</span>
-                <span class="key-mask">••••••••••••••••</span>
-              </div>
-            </div>
-            <div class="row-actions" style="margin-top: 16px">
-              <el-button :disabled="cooldownLeft > 0" @click="doUnlock">
-                {{ cooldownLeft > 0 ? `解锁（${cooldownLeft}s）` : '解锁' }}
-              </el-button>
-              <el-button plain @click="doChangePassword">修改密码</el-button>
-              <span v-if="unlockError" class="err-text">{{ unlockError }}</span>
-            </div>
-          </template>
-
-          <!-- 已解锁 -->
-          <template v-else>
-            <div class="key-form">
-              <template v-for="key in barrageSensitiveKeys" :key="key">
-                <span class="param-label key-name-label">{{ key }}</span>
-                <el-input
-                  v-model="sensitiveEnv[key]"
-                  type="password"
-                  show-password
-                  size="small"
-                  style="width: 320px"
-                  :placeholder="key"
-                />
-              </template>
-            </div>
-            <div class="row-actions" style="margin-top: 20px">
-              <el-button type="primary" :loading="savingSensitive" @click="saveSensitiveEnv">
-                保存并重启
-              </el-button>
-              <el-button plain @click="lockSensitive">取消</el-button>
-              <span v-if="sensitiveSavedOk" class="ok-text">{{ restartMsg }}</span>
-            </div>
-          </template>
-
         </div>
       </template>
 
@@ -329,14 +246,33 @@ import { DEFAULT_OCR_JUDGE_PROMPT } from '../../../../../src/phase2/ocr/judge-pr
 const props = defineProps({ wsRef: Object })
 
 const navItems = [
-  { key: 'cruise',  label: '导播设置'  },
-  { key: 'barrage', label: '弹幕设置'  },
+  { key: 'cruise',  label: '巡游讲解' },
+  { key: 'transit', label: '过渡音频与手动播报' },
+  { key: 'barrage', label: '弹幕回复' },
   { key: 'prompt',  label: '改写提示词' },
   { key: 'banned',  label: '违禁词管理'   },
   { key: 'audio',   label: '音频输出'  },
   { key: 'diagnostics', label: '音频诊断' },
 ]
 const activeSection = ref('cruise')
+const speechProfileTitles = { cruise: '巡游讲解', transit: '过渡音频与手动播报', barrage: '弹幕回复' }
+const speechProfileDescriptions = {
+  cruise: '用于机器人到达点位后的讲解：文字改写和语音合成。',
+  transit: '用于过渡音频的文字改写与语音合成，以及手动播报测试的语音合成。过渡文字、音频文件和启用开关在“播报控制 → 过渡音频”设置。',
+  barrage: '用于弹幕问题判断、回复生成和回复语音合成。',
+}
+function currentPublicEnvDef() {
+  return activeSection.value === 'transit' ? transitPublicEnvDef : activeSection.value === 'barrage' ? barragePublicEnvDef : cruisePublicEnvDef
+}
+function currentSensitiveKeys() {
+  return activeSection.value === 'transit' ? transitSensitiveKeys : activeSection.value === 'barrage' ? barrageSensitiveKeys : cruiseSensitiveKeys
+}
+function credentialLabel(key) {
+  return {
+    DOUBAO_API_KEY: '豆包 API 密钥', DEEPSEEK_API_KEY: 'DeepSeek API 密钥', QWEN_API_KEY: 'Qwen API 密钥（预留）',
+    TTS_API_KEY: 'TTS API 密钥', TTS_APP_ID: 'TTS App ID（旧版鉴权）', TTS_ACCESS_TOKEN: 'TTS Access Token（旧版鉴权）',
+  }[key.replace(/^(TRANSIT_|BARRAGE_)/, '')] || key
+}
 
 // ── 违禁词 ─────────────────────────────────────────────────────────────────────
 const bannedWords  = ref([])
@@ -570,6 +506,9 @@ const cruisePublicEnvDef = [
   { key: 'ROBOT_URL',      label: '机器人 WS 连接地址', placeholder: '空为监听模式 / 填写如 ws://192.168.1.100:8765' },
 ]
 
+const transitPublicEnvDef = cruisePublicEnvDef.filter(item => !item.key.startsWith('ROBOT_'))
+  .map(item => ({ ...item, key: 'TRANSIT_' + item.key }))
+
 const barragePublicEnvDef = [
   { key: 'BARRAGE_DOUBAO_MODEL',   label: '豆包模型 ID',    placeholder: 'ep-xxxxxxxx' },
   { key: 'BARRAGE_DEEPSEEK_MODEL', label: 'DeepSeek 模型',  placeholder: 'deepseek-chat' },
@@ -583,6 +522,7 @@ const barragePublicEnvDef = [
 ]
 
 const publicEnv    = reactive({})
+const publicEnvLoaded = ref(false)
 const savingPublic = ref(false)
 const publicSavedOk = ref(false)
 
@@ -590,15 +530,17 @@ async function loadPublicEnv() {
   if (!window.api) return
   try {
     const res = await window.api.readPublicEnv()
-    if (res.ok) Object.assign(publicEnv, res.env)
+    if (res.ok) { Object.assign(publicEnv, res.env); publicEnvLoaded.value = true }
   } catch {}
 }
 
 async function savePublicEnv() {
   if (!window.api) return
+  if (!publicEnvLoaded.value) { ElMessage.error('设置尚未加载，请稍后重试'); return }
   savingPublic.value = true
   try {
-    const res = await window.api.writePublicEnv({ ...publicEnv })
+    const changes = Object.fromEntries(currentPublicEnvDef().map(({ key }) => [key, publicEnv[key] ?? '']))
+    const res = await window.api.writePublicEnv(changes)
     if (!res.ok) { ElMessage.error(res.error || '保存失败'); return }
     publicSavedOk.value = true
     await triggerRestart()
@@ -631,6 +573,8 @@ const cruiseSensitiveKeys = [
   'TTS_APP_ID', 'TTS_ACCESS_TOKEN', 'TTS_API_KEY',
   // 'NGROK_AUTHTOKEN',
 ]
+
+const transitSensitiveKeys = cruiseSensitiveKeys.map(key => 'TRANSIT_' + key)
 
 const barrageSensitiveKeys = [
   'BARRAGE_DOUBAO_API_KEY', 'BARRAGE_DEEPSEEK_API_KEY', 'BARRAGE_QWEN_API_KEY',
@@ -676,9 +620,10 @@ async function doSetPassword() {
   // Auto-unlock: skip redundant re-entry of password
   try {
     const envRes = await window.api.readSensitiveEnv(setupPwd1.value)
+    if (!envRes.ok) { pwdError.value = envRes.error || '密钥加载失败，请重新解锁'; return }
     _sessionPwd = setupPwd1.value
-    if (envRes.ok) Object.assign(sensitiveEnv, envRes.env)
-  } catch {}
+    Object.assign(sensitiveEnv, envRes.env)
+  } catch (error) { pwdError.value = error.message; return }
   setupPwd1.value = setupPwd2.value = ''
   sensitiveUnlocked.value = true
 }
@@ -745,9 +690,14 @@ async function doChangePassword() {
 
 async function saveSensitiveEnv() {
   if (!window.api) return
+  if (!publicEnvLoaded.value || !sensitiveUnlocked.value) { ElMessage.error('请先加载设置并解锁 API 密钥'); return }
   savingSensitive.value = true
   try {
-    const res = await window.api.writeSensitiveEnv(_sessionPwd, { ...sensitiveEnv })
+    const changes = Object.fromEntries([
+      ...currentPublicEnvDef().map(({ key }) => [key, publicEnv[key] ?? '']),
+      ...currentSensitiveKeys().map(key => [key, sensitiveEnv[key] ?? '']),
+    ])
+    const res = await window.api.writeSpeechProfile(_sessionPwd, activeSection.value, changes)
     if (!res.ok) { ElMessage.error(res.error || '保存失败'); return }
     sensitiveSavedOk.value = true
     lockSensitive()
@@ -765,6 +715,7 @@ function lockSensitive() {
   _sessionPwd = ''
   for (const k of cruiseSensitiveKeys) sensitiveEnv[k] = ''
   for (const k of barrageSensitiveKeys) sensitiveEnv[k] = ''
+  for (const k of transitSensitiveKeys) sensitiveEnv[k] = ''
 }
 
 // ── 音频输出 ─────────────────────────────────────────────────────────────────
@@ -871,8 +822,8 @@ onBeforeUnmount(() => {
 
 /* ── Left nav ── */
 .settings-nav {
-  width: 148px;
-  min-width: 148px;
+  width: 190px;
+  min-width: 190px;
   border-right: 1px solid var(--border);
   padding: 12px 0;
   background: var(--bg2);

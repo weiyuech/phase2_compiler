@@ -57,7 +57,8 @@ export function normalizeTransitConfig(value = {}) {
 }
 
 export class TransitAudioManager {
-  constructor({ filePath, audioOutput = null, player = null, tts = null, random = Math.random, now = Date.now }) {
+  constructor({ filePath, audioOutput = null, player = null, tts = null, random = Math.random, now = Date.now, onError = () => {} }) {
+    this._onError = onError
     this._filePath = filePath
     this._tts = tts
     this._player   = player || tts?.player || new AudioPlayer({ outputRouter: audioOutput })
@@ -65,6 +66,11 @@ export class TransitAudioManager {
     this._now      = now
     this._runId    = null   // unique object per run; null = stopped
     this._config   = this._load()
+  }
+
+  _reportError(message) {
+    console.error('[过渡音频]', message)
+    this._onError(`过渡音频失败: ${message}`)
   }
 
   _load() {
@@ -106,9 +112,9 @@ export class TransitAudioManager {
       this._loopMp3(cfg, runId)
     } else {
       const text = cfg.text?.trim()
-      if (!text) { this._runId = null; return }
+      if (!text) { this._runId = null; this._reportError('请输入过渡播报文字并保存'); return }
       if (!tts.enabled) {
-        console.log('[过渡音频] TTS 未启用，跳过')
+        this._reportError('TTS 未配置，请在“系统设置 → 过渡音频与手动播报”填写语音凭据和音色，再保存并重启后端')
         this._runId = null
         return
       }
@@ -166,7 +172,7 @@ export class TransitAudioManager {
     while (this._runId === runId) {
       const filePath = this._nextMp3(state)
       if (!filePath) {
-        console.warn('[过渡音频] 没有可播放的音频，已停止本次循环')
+        this._reportError('没有可播放的音频，请检查素材池文件是否存在且可播放')
         break
       }
       const start = this._now()
@@ -177,7 +183,7 @@ export class TransitAudioManager {
           if (result?.ok === false) throw result.error || new Error('过渡音频播放失败')
         } else await this._player.playFile(filePath)
       } catch (err) {
-        if (this._runId === runId) console.error('[过渡音频] 音频播放出错:', err.message)
+        if (this._runId === runId) this._reportError(`音频播放出错: ${err.message}`)
         state.failed.add(filePath)
         continue
       }
@@ -224,7 +230,7 @@ export class TransitAudioManager {
     try {
       buffer = await tts.synthesizeBuffer(playText)
     } catch (err) {
-      console.error('[过渡音频] TTS 合成出错:', err.message)
+      if (this._runId === runId) this._reportError(`TTS 合成出错: ${err.message}`)
       if (this._runId === runId) this._runId = null
       return
     }
@@ -244,7 +250,7 @@ export class TransitAudioManager {
       try {
         await this._player.play(buffer)
       } catch (err) {
-        if (this._runId === runId) console.error('[过渡音频] 播放出错:', err.message)
+        if (this._runId === runId) this._reportError(`播放出错: ${err.message}`)
         break
       }
       if (this._runId !== runId) break
@@ -282,7 +288,7 @@ export class TransitAudioManager {
         } else fastCount = 0
       }
     } catch (err) {
-      if (this._runId === runId) console.error('[过渡音频] 准备/播放失败:', err.message)
+      if (this._runId === runId) this._reportError(`准备/播放失败: ${err.message}`)
     } finally {
       source?.release()
       if (this._runId === runId) this._runId = null

@@ -75,6 +75,14 @@ function hasFfplay() {
 
 let _instanceCounter = 0
 
+// Drain stderr continuously so failures explain missing DLLs/devices/decoders,
+// without retaining an unbounded player log or blocking a full stderr pipe.
+function playbackFailure(child) {
+  let tail = ''
+  child.stderr?.on('data', chunk => { tail = (tail + chunk.toString()).slice(-4096) })
+  return code => new Error(`ffplay 播放失败 (${code})${tail.trim() ? ': ' + tail.trim() : ''}`)
+}
+
 export class AudioPlayer {
   constructor({ outputRouter = null, spawnProcess = spawn, resolvePlaybackPath = getFfplayPath } = {}) {
     this.currentProcess = null
@@ -124,11 +132,12 @@ export class AudioPlayer {
     const ffplay = this._spawnProcess(ffplayPath, [
       '-nodisp',
       '-autoexit',
-      '-loglevel', 'quiet',
+      '-loglevel', 'error',
       '-infbuf',
       '-f', 'mp3',
       '-'
-    ])
+    ], { windowsHide: true })
+    const failure = playbackFailure(ffplay)
 
     this.currentProcess = ffplay
     this._paused = wasPaused
@@ -158,7 +167,7 @@ export class AudioPlayer {
 
       ffplay.on('close', (code) => {
         if (this.currentProcess === ffplay) this.currentProcess = null
-        if (code != null && code !== 0) reject(new Error(`ffplay 播放失败 (${code})`))
+        if (code != null && code !== 0) reject(failure(code))
         else resolve()
       })
     })
@@ -325,11 +334,13 @@ export class AudioPlayer {
         // acquire before launch and still recheck/cancel/pause at child startup.
         const pipeInput = gated && extname(filePath).toLowerCase() !== '.m4a'
         const ffplay = this._spawnProcess(ffplayPath, [
-          '-nodisp', '-autoexit', '-loglevel', 'quiet',
+          '-nodisp', '-autoexit', '-loglevel', 'error',
           // Shared transit pools also accept WAV/OGG/M4A. Let ffplay probe the
           // input container rather than incorrectly declaring every file MP3.
           ...(pipeInput ? ['-i', 'pipe:0'] : [filePath]),
-        ])
+        ], { windowsHide: true })
+        const failure = playbackFailure(ffplay)
+        ffplay.stdout?.resume()
         this.currentProcess = ffplay
         let started = false
         let source = null
@@ -390,7 +401,7 @@ export class AudioPlayer {
         ffplay.once('close', (code) => {
           cleanUp()
           if (this.currentProcess === ffplay) this.currentProcess = null
-          if (!cancelled() && code != null && code !== 0) reject(new Error(`ffplay 播放失败 (${code})`))
+          if (!cancelled() && code != null && code !== 0) reject(failure(code))
           else resolve(cancelled() ? { ok: false, aborted: true } : undefined)
         })
       })

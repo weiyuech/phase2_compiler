@@ -19,8 +19,7 @@ process.env.BANNED_WORDS_FILE = join(CONFIG_DIR, 'banned-words.txt')
 
 import { reloadPrompt }               from './llm/prompt.js'
 import { createKnowledgeBaseProvider } from './knowledge/index.js'
-import { LLMRewriter }                 from './llm/index.js'
-import { TTSEngine }                   from './tts/index.js'
+import { createSpeechServices }        from './config/speech-services.js'
 import { AudioOutputRouter }           from './tts/audio-output-router.js'
 import { applyAudioOutputConfig }      from './tts/audio-output-config.js'
 import { SpeechCoordinator }           from './tts/speech-coordinator.js'
@@ -43,7 +42,6 @@ import { safeJoin }                    from './safe-path.js'
 const diagnosticsDirectory = process.env.USER_DATA_DIR || join(process.cwd(), 'data')
 const backendLogCapture = startBackendLogCapture({ directory: diagnosticsDirectory })
 const audioDiagnostics = new AudioDiagnostics({ directory: diagnosticsDirectory })
-uiBridge.start()
 
 const kb = await createKnowledgeBaseProvider({
   KB_FLATFILE_DIR: join(DATA_DIR, 'flatfiles'),
@@ -59,9 +57,6 @@ await barrageProvider.initialize()
 const healthy = await kb.healthCheck()
 if (!healthy) process.exit(1)
 
-const llm = new LLMRewriter()
-await llm.init()
-
 const robot = new RobotListener(
   process.env.ROBOT_URL
     ? { url: process.env.ROBOT_URL }
@@ -76,40 +71,16 @@ const audioOutput = new AudioOutputRouter({
 audioDiagnostics.event('runtime', { ...audioOutput.getConfig(), connected: robot.isConnected() })
 
 const speechCoordinator = new SpeechCoordinator({ diagnostics: audioDiagnostics })
-const tts = new TTSEngine({ audioOutput, coordinator: speechCoordinator, role: 'cruise', diagnostics: audioDiagnostics })
-
-// -- Separate Barrage (弹幕) LLM & TTS Clients --
-const barrageLlm = new LLMRewriter({
-  DOUBAO_API_KEY: process.env.BARRAGE_DOUBAO_API_KEY,
-  DOUBAO_MODEL: process.env.BARRAGE_DOUBAO_MODEL,
-  DEEPSEEK_API_KEY: process.env.BARRAGE_DEEPSEEK_API_KEY,
-  DEEPSEEK_MODEL: process.env.BARRAGE_DEEPSEEK_MODEL,
-  LLM_TIMEOUT_MS: process.env.BARRAGE_LLM_TIMEOUT_MS,
-  LLM_MAX_TOKENS: process.env.BARRAGE_LLM_MAX_TOKENS,
-  BANNED_WORDS_FILE: process.env.BANNED_WORDS_FILE || './config/banned-words.txt'
+const { llm, tts, barrageLlm, barrageTts, transitLlm, transitTts, manualTts } = createSpeechServices({
+  audioOutput, coordinator: speechCoordinator, diagnostics: audioDiagnostics,
 })
-await barrageLlm.init()
+await Promise.all([llm.init(), barrageLlm.init(), transitLlm.init()])
 
-const barrageTts = new TTSEngine({
-  audioOutput,
-  coordinator: speechCoordinator,
-  role: 'barrage',
-  diagnostics: audioDiagnostics,
-  TTS_APP_ID: process.env.BARRAGE_TTS_APP_ID,
-  TTS_ACCESS_TOKEN: process.env.BARRAGE_TTS_ACCESS_TOKEN,
-  TTS_API_KEY: process.env.BARRAGE_TTS_API_KEY,
-  TTS_AUTH_MODE: process.env.BARRAGE_TTS_AUTH_MODE,
-  TTS_VOICE_TYPE: process.env.BARRAGE_TTS_VOICE_TYPE,
-  TTS_CLUSTER: process.env.BARRAGE_TTS_CLUSTER,
-  TTS_RESOURCE_ID: process.env.BARRAGE_TTS_RESOURCE_ID,
-  TTS_TIMEOUT_MS: process.env.BARRAGE_TTS_TIMEOUT_MS
-})
-
-const transitTts = new TTSEngine({ audioOutput, coordinator: speechCoordinator, role: 'transit', diagnostics: audioDiagnostics })
 const transitAudio = new TransitAudioManager({
   filePath: join(DATA_DIR, 'transit-audio.json'),
   audioOutput,
   tts: transitTts,
+  onError: message => uiBridge.broadcast('ERROR', { message }),
 })
 
 // Speaking state driven by renderer mic detection (via DUCK_START / DUCK_END commands on ws:3001)
@@ -142,7 +113,7 @@ let lastHeartbeat  = null   // most recent heartbeat, used for same-map short-ci
 const cruise = new CruiseController({
   robot, tour, getSelectedMap: () => currentMap, playPoint,
   stopSpeech: () => tts.stop(),
-  startTransit: () => transitAudio.start(transitTts, llm),
+  startTransit: () => transitAudio.start(transitTts, transitLlm),
   stopTransit: () => { transitAudio.stop(); transitTts.stop() },
   isTransitRunning: () => transitAudio.isRunning(),
   syncAudioPause: updateCruisingDucking,
@@ -187,7 +158,7 @@ uiBridge.on('onNewClient', (sendTo) => {
 
 // ── UI Bridge commands ────────────────────────────────────────────────────────
 
-registerTourControls({ uiBridge, tour, tts })
+registerTourControls({ uiBridge, tour, tts: manualTts })
 uiBridge.on('onPause', () => speechCoordinator.setPauseReason('operator', ['cruise', 'transit', 'barrage'], true))
 uiBridge.on('onResume', () => speechCoordinator.setPauseReason('operator', [], false))
 uiBridge.on('onDuckStart', () => {
@@ -767,6 +738,9 @@ robot.on('reply', ({ type, data }) => {
   }
 })
 
+// Accept UI connections only after all state queries and controls are registered.
+// Otherwise an early GET_TOUR_STATE is silently lost and manual speech stays disabled.
+uiBridge.start()
 robot.start()
 
 // ── ngrok tunnel (optional) ───────────────────────────────────────────────

@@ -5,9 +5,9 @@ const API_URL = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions'
 export class DoubaoProvider {
   constructor(config = {}) {
     this.name   = 'doubao'
-    this.apiKey = config.DOUBAO_API_KEY || process.env.DOUBAO_API_KEY
-    this.model  = config.DOUBAO_MODEL   || process.env.DOUBAO_MODEL
-    const configuredMax = Number.parseInt(config.LLM_MAX_TOKENS || process.env.LLM_MAX_TOKENS || '4096', 10)
+    this.apiKey = (config.DOUBAO_API_KEY ?? process.env.DOUBAO_API_KEY)
+    this.model  = (config.DOUBAO_MODEL ?? process.env.DOUBAO_MODEL)
+    const configuredMax = Number.parseInt((config.LLM_MAX_TOKENS ?? process.env.LLM_MAX_TOKENS) || '4096', 10)
     this.maxTokens = Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : 4096
   }
 

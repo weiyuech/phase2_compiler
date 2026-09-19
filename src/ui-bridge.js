@@ -181,11 +181,17 @@ function listen(port, isFallback) {
           dispatch(msg)
         } catch (err) {
           console.error('[UI] 处理消息失败:', err?.stack || err)
+          broadcast('ERROR', { message: `处理 ${msg?.type || '消息'} 失败: ${err?.message || String(err)}` })
         }
       }
 
       function dispatch(msg) {
         const { type, data: msgData } = msg ?? {}
+
+        // Keep operator actions observable without logging text, credentials or frames.
+        if (['START_TOUR', 'PAUSE_TOUR', 'RESUME_TOUR', 'STOP_TOUR', 'TEST_SPEECH'].includes(type)) {
+          console.log(`[UI] 收到控制指令: ${type}`)
+        }
 
         if (DEBUG_WS && type !== 'BARRAGE_IMAGE') {
           console.log('[DEBUG] [WS Incoming]:', type, JSON.stringify(msgData))
@@ -376,12 +382,26 @@ function listen(port, isFallback) {
 }
 
 export function broadcast(type, data = {}) {
+  // A UI event alone never reached backend.log, and vanished when no UI was connected.
+  if (type === 'ERROR') console.error('[UI ERROR]', data.message || '未知错误')
   if (!wss) return
   const msg = JSON.stringify({ type, data, ts: Date.now() })
   wss.clients.forEach((c) => { if (c.readyState === 1) c.send(msg) })
 }
 
-export function on(event, fn)  { handlers[event] = fn }
+export function on(event, fn) {
+  handlers[event] = (...args) => {
+    const fail = error => {
+      broadcast('ERROR', { message: `处理 ${event} 失败: ${error?.message || String(error)}` })
+    }
+    try {
+      const result = fn(...args)
+      // The WebSocket dispatcher does not await handlers. Observe rejections here.
+      if (result?.then) return Promise.resolve(result).catch(fail)
+      return result
+    } catch (error) { fail(error) }
+  }
+}
 export function isPaused()     { return paused }
 export function getDuckVolume(){ return duckVolume }
 export function getFadeMs()    { return fadeMs }

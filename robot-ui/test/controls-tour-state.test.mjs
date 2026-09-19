@@ -66,7 +66,8 @@ test('page entry requests a tour snapshot and withholds manual testing until it 
   assert.equal(h.state.canTestSpeech.value, true)
   h.state.sendTestSpeech()
   assert.deepEqual(h.socket.sent.at(-1), { type: 'TEST_SPEECH', data: { text: 'Test sentence.' } })
-  assert.equal(h.state.testText.value, '')
+  assert.equal(h.state.testText.value, 'Test sentence.')
+  assert.match(h.state.testSpeechStatus.value, /等待后端确认/)
 })
 
 for (const paused of [false, true]) {
@@ -169,4 +170,20 @@ test('changing interval saves both normalized settings atomically and reconnect 
   assert.equal(h.state.barrageScanInterval.value, 6)
   assert.match(descriptor.template.content, /:step="barrageScanInterval"/)
   assert.doesNotMatch(descriptor.template.content, /step-strictly/)
+})
+
+test('lost initial state response is retried, then unlocks the populated test button', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = fixture(t)
+  h.state.testText.value = '测试播报'
+  assert.match(h.state.testSpeechDisabledReason.value, /同步巡游状态/)
+  t.mock.timers.tick(2000)
+  assert.equal(h.socket.sent.filter(m => m.type === 'GET_TOUR_STATE').length, 2)
+  h.socket.reply('TOUR_STATE', tourState())
+  assert.equal(h.state.canTestSpeech.value, true)
+  t.mock.timers.tick(4000)
+  assert.equal(h.socket.sent.filter(m => m.type === 'GET_TOUR_STATE').length, 2)
+  h.socket.reply('TEST_SPEECH_STATUS', { state: 'failed', message: '测试播报失败: TTS 未配置' })
+  assert.match(h.state.testSpeechStatus.value, /TTS 未配置/)
+  assert.equal(h.state.testText.value, '测试播报')
 })

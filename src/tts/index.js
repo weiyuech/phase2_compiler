@@ -29,6 +29,7 @@ export class TTSEngine {
     this.audioOutput = config.audioOutput
     this.coordinator = config.coordinator
     this.role = config.role || 'cruise'
+    this.settingsSection = { cruise: '巡游讲解', transit: '过渡音频与手动播报', barrage: '弹幕回复' }[this.role]
     this.diagnostics = config.diagnostics
     this.harvest = config.harvest !== false
     this._harvests = new Set()
@@ -48,7 +49,7 @@ export class TTSEngine {
       throw new Error('TTS 合成文本为空')
     }
     if (!this.enabled) {
-      throw new Error('TTS 未配置，无法合成音频')
+      throw new Error(`TTS 未配置，请在“系统设置 → ${this.settingsSection}”填写语音凭据和音色，再保存并重启后端`)
     }
 
     this.stop()
@@ -124,8 +125,7 @@ export class TTSEngine {
     if (!cleanedText) return
 
     if (!this.enabled) {
-      console.log(`[TTS] 测试模式 — 播报内容: "${cleanedText}"`)
-      return
+      throw new Error(`TTS 未配置，请在“系统设置 → ${this.settingsSection}”填写语音凭据和音色，再保存并重启后端`)
     }
 
     this.stop()
@@ -306,7 +306,7 @@ export class TTSEngine {
   async prepareText(text, opts = {}) {
     const cleanedText = filterTtsText(text)
     if (!cleanedText) throw new Error('TTS 合成文本为空')
-    if (!this.enabled) throw new Error('TTS 未配置，无法合成音频')
+    if (!this.enabled) throw new Error(`TTS 未配置，请在“系统设置 → ${this.settingsSection}”填写语音凭据和音色，再保存并重启后端`)
     const generation = this.audioOutput?.generation
     const source = new PreparedTextSource(cleanedText, this.wsClient, {
       ...this._sentenceOptions, ...opts, role: this.role, diagnostics: this.diagnostics,

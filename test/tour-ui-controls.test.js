@@ -15,7 +15,8 @@ function fixture(source = bridgeSource) {
   class FakeServer extends EventEmitter {
     constructor() { super(); this.clients = new Set(); server = this }
   }
-  const logger = { log() {}, error() {}, warn() {} }
+  const logs = []
+  const logger = { log(...args) { logs.push(args.join(' ')) }, error(...args) { logs.push(args.join(' ')) }, warn() {} }
   const context = vm.createContext({
     WebSocketServer: FakeServer, Buffer, console: logger,
     process: { env: {} }, writeSync() {},
@@ -39,7 +40,7 @@ function fixture(source = bridgeSource) {
   server.emit('connection', socket)
   socket.messages.length = 0
   return {
-    tour, tts, calls, socket,
+    tour, tts, calls, socket, bridge, logs,
     async send(type, data = {}) {
       socket.emit('message', Buffer.from(JSON.stringify({ type, data })), false)
       await new Promise(resolve => setImmediate(resolve))
@@ -78,14 +79,14 @@ test('manual playback remains available outside a tour', async () => {
   const h = fixture()
   await h.send('TEST_SPEECH', { text: 'Test sentence.' })
   assert.deepEqual(h.calls, ['Test sentence.'])
-  assert.deepEqual(h.socket.messages, [])
+  assert.deepEqual(h.socket.messages.map(m => m.data.state), ['preparing', 'completed'])
 })
 
 test('normal manual-test cancellation is not reported as an error', async () => {
   const h = fixture()
   h.tts.speak = async () => ({ ok: false, aborted: true })
   await h.send('TEST_SPEECH', { text: 'Cancelled test.' })
-  assert.deepEqual(h.socket.messages, [])
+  assert.deepEqual(h.socket.messages.map(m => m.data.state), ['preparing', 'cancelled'])
 })
 
 test('manual playback failures retain useful messages and tolerate missing error details', async () => {
@@ -133,4 +134,31 @@ test('late-joining clients also receive a tour snapshot from the application hoo
   hook((type, data) => sent.push({ type, data }))
   assert.deepEqual(sent.find(message => message.type === 'TOUR_STATE').data,
     { running: true, paused: false, repeatCount: 3, currentIteration: 2 })
+})
+
+test('operator failures are recorded in backend output as well as UI events', async () => {
+  const h = fixture()
+  h.tts.speak = async () => ({ ok: false, error: new Error('Missing audio device') })
+  await h.send('TEST_SPEECH', { text: 'private draft' })
+  assert.ok(h.logs.some(line => line.includes('收到控制指令: TEST_SPEECH')))
+  assert.ok(h.logs.some(line => line.includes('[UI ERROR]') && line.includes('Missing audio device')))
+  assert.equal(h.logs.some(line => line.includes('private draft')), false)
+  assert.equal(h.socket.messages.at(-1).type, 'ERROR')
+})
+
+test('sync and async command exceptions reach the UI instead of being lost', async () => {
+  const h = fixture()
+  for (const handler of [() => { throw new Error('sync failure') }, async () => { throw new Error('async failure') }]) {
+    h.bridge.on('onStartTour', handler)
+    await h.send('START_TOUR', { repeatCount: 1 })
+    assert.equal(h.socket.messages.at(-1).type, 'ERROR')
+    assert.match(h.socket.messages.at(-1).data.message, /failure/)
+  }
+})
+
+test('manual playback reports preparation, actual playback and completion', async () => {
+  const h = fixture()
+  h.tts.speak = async (_text, options) => { options.onAudioStart(); return { ok: true } }
+  await h.send('TEST_SPEECH', { text: 'hello' })
+  assert.deepEqual(h.socket.messages.map(m => m.data.state), ['preparing', 'playing', 'completed'])
 })

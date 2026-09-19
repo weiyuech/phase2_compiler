@@ -258,6 +258,17 @@ export async function verifyPackagedRuntime({ backendRoot, localPreflight = fals
     assert.match(output.stdout.toString('utf8'), /^ffplay version /, 'Packaged player did not identify as ffplay')
     return { version: output.stdout.toString('utf8').split(/\r?\n/)[0], executable: 'ffplay.exe' }
   })
+  await check('windows-pause-resume', async () => {
+    const resolved = await dependency('process-suspend')
+    assert.equal(typeof resolved.module.suspend, 'function')
+    assert.equal(typeof resolved.module.resume, 'function')
+    if (process.platform !== 'win32' && localPreflight) return { notRun: true, reason: 'Windows native pause/resume requires Windows' }
+    // This optional npm dependency can be missing despite npm ci succeeding.
+    const native = await dependency('ntsuspend')
+    assert.equal(typeof native.module.suspend, 'function')
+    assert.equal(typeof native.module.resume, 'function')
+    return { packageVersion: native.version, modulePath: native.modulePath }
+  })
   await check('sharp', async () => {
     const resolved = await dependency('sharp')
     sharp = resolved.module

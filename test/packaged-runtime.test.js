@@ -87,7 +87,7 @@ test('missing packaged OCR/native assets produce a failed report even in local p
     const report = await verifyPackagedRuntime({ backendRoot: directory, localPreflight: true, reportPath })
     assert.equal(report.status, 'failed')
     assert.deepEqual(report.checks.map(check => check.name), [
-      'runtime', 'packaged-layout', 'ffmpeg-pcm', 'ffplay', 'sharp', 'onnx-models', 'ocr-pipeline', 'packaged-native-bindings',
+      'runtime', 'packaged-layout', 'ffmpeg-pcm', 'ffplay', 'windows-pause-resume', 'sharp', 'onnx-models', 'ocr-pipeline', 'packaged-native-bindings',
     ])
     assert.equal(report.checks.find(check => check.name === 'onnx-models').status, 'failed')
     assert.equal(report.checks.find(check => check.name === 'ocr-pipeline').status, 'failed')

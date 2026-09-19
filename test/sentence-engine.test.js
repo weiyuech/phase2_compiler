@@ -465,3 +465,27 @@ test('successful independent sentence MP3s harvest once as a decodable complete 
   assert.ok(pcm.length > 9600, 'both independently encoded sentences survived container-safe re-encoding')
   assert.equal(await readFile(join(cache, `${hash}.txt`), 'utf8'), text)
 })
+
+test('local player retains bounded decoder/device stderr in playback failures', async () => {
+  const h = childPlayer()
+  // Add stderr before AudioPlayer subscribes to the new process.
+  const spawn = h.player._spawnProcess
+  h.player._spawnProcess = (...args) => {
+    const child = spawn(...args)
+    child.stderr = new PassThrough()
+    return child
+  }
+  const stream = h.player.startStream()
+  const child = h.children[0]
+  assert.equal(child.args[child.args.indexOf('-loglevel') + 1], 'error')
+  const failed = assert.rejects(stream.promise, error => {
+    assert.match(error.message, /No audio device/)
+    assert.ok(error.message.length < 4200)
+    return true
+  })
+  child.emit('spawn')
+  child.stderr.write('x'.repeat(10000))
+  child.stderr.write('\nNo audio device\n')
+  child.emit('close', 1)
+  await failed
+})

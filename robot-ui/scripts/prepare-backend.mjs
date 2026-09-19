@@ -5,10 +5,10 @@
  *
  * Usage: node scripts/prepare-backend.mjs
  */
-import { execSync }                  from 'child_process'
+import { execSync, execFileSync }                  from 'child_process'
 import { join, dirname }             from 'path'
 import { fileURLToPath }             from 'url'
-import { cpSync, mkdirSync, rmSync, existsSync } from 'fs'
+import { cpSync, mkdirSync, rmSync, existsSync, writeFileSync, renameSync } from 'fs'
 import { preparePackageSeed } from './prepare-package-seed.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -70,23 +70,29 @@ if (existsSync(ortBinDir)) {
   }
 }
 
-// Windows 专属：下载 Visual C++ 2022 运行库，供 NSIS 安装脚本静默安装
-// @ngrok/ngrok 是 Rust 编译的 native 模块，运行依赖 VCRUNTIME140.dll
-/*
+// ONNX Runtime needs the MSVC runtime even when ngrok is disabled. Bundle it
+// for offline installation; never let a cached or partial download bypass trust checks.
 if (process.platform === 'win32') {
-  const buildDir     = join(__dirname, '../build')
+  const buildDir = join(__dirname, '../build')
   const vcRedistPath = join(buildDir, 'vc_redist.x64.exe')
+  const downloadPath = vcRedistPath + '.download.exe'
   mkdirSync(buildDir, { recursive: true })
-  if (!existsSync(vcRedistPath)) {
-    console.log('[prepare-backend] 下载 Visual C++ 2022 运行库 (vc_redist.x64.exe)...')
-    // fetch 在 Node 18+ 内置，自动跟随重定向
-    const res = await fetch('https://aka.ms/vs/17/release/vc_redist.x64.exe')
-    if (!res.ok) throw new Error(`vc_redist 下载失败: HTTP ${res.status}`)
-    const { writeFileSync } = await import('fs')
-    writeFileSync(vcRedistPath, Buffer.from(await res.arrayBuffer()))
-    console.log('[prepare-backend] vc_redist.x64.exe 已保存至', vcRedistPath)
-  } else {
-    console.log('[prepare-backend] vc_redist.x64.exe 已存在，跳过下载')
+  console.log('[prepare-backend] downloading Microsoft Visual C++ x64 runtime...')
+  try {
+    const res = await fetch('https://aka.ms/vs/17/release/vc_redist.x64.exe', {
+      signal: AbortSignal.timeout(120_000),
+    })
+    if (!res.ok) throw new Error(`vc_redist download failed: HTTP ${res.status}`)
+    writeFileSync(downloadPath, Buffer.from(await res.arrayBuffer()))
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+      $ErrorActionPreference = 'Stop'
+      $signature = Get-AuthenticodeSignature -LiteralPath $env:ROBOT_VC_REDIST_PATH
+      if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(^|,\\s*)O=Microsoft Corporation(,|$)') {
+        throw 'VC++ runtime must have a valid Microsoft signature'
+      }
+    `], { stdio: 'inherit', env: { ...process.env, ROBOT_VC_REDIST_PATH: downloadPath } })
+    renameSync(downloadPath, vcRedistPath)
+  } finally {
+    rmSync(downloadPath, { force: true })
   }
 }
-*/

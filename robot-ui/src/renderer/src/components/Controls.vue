@@ -98,11 +98,14 @@
 
         <section class="control-card test-card" aria-label="手动播报测试">
           <div class="control-heading"><div class="card-title">手动播报测试</div></div>
+          <p class="hint">使用“系统设置 → 过渡音频与手动播报”的 TTS 凭据和音色。</p>
           <el-input v-model="testText" placeholder="输入测试文本..." type="textarea" :rows="3" />
           <div class="btn-row test-actions">
             <el-button :disabled="!canTestSpeech" @click="sendTestSpeech">发送播报</el-button>
           </div>
           <p v-if="tourIsActive" class="hint">请先停止巡游，再进行手动播报测试</p>
+          <p v-else-if="testSpeechDisabledReason" class="hint" role="status">{{ testSpeechDisabledReason }}</p>
+          <p v-if="testSpeechStatus" class="hint" role="status">{{ testSpeechStatus }}</p>
         </section>
       </div>
     </div>
@@ -154,28 +157,42 @@ const canCaptureBarrage = Boolean(
 
 // --- WebSocket ---
 const wsConnected = ref(false)
-const canTestSpeech = computed(() => wsConnected.value && tourStateKnown.value && !tourIsActive.value && !!testText.value.trim())
+const testSpeechStatus = ref('')
+const testSpeechDisabledReason = computed(() => {
+  if (!wsConnected.value) return '后端未连接，请等待连接后再测试'
+  if (!tourStateKnown.value) return '正在同步巡游状态，暂不能测试播报；将自动重试'
+  if (tourIsActive.value) return '请先停止巡游，再进行手动播报测试'
+  if (!testText.value.trim()) return '请先输入测试文本'
+  return ''
+})
+const canTestSpeech = computed(() => !testSpeechDisabledReason.value)
 
 function send(type, data = {}) {
   const socket = props.wsRef?.value || props.wsRef;
   if (!socket || socket.readyState !== 1) {
     console.error('[WebSocket Error] Socket not ready. State:', socket?.readyState, 'Type:', type);
-    return;
+    ElMessage.error('后端未连接，指令未发送，请等待重新连接')
+    return false;
   }
   console.log('[WebSocket Send]', type, data);
   socket.send(JSON.stringify({ type, data }));
+  return true;
 }
 
 function handleMessage(raw) {
   try {
     const { type, data } = JSON.parse(raw)
     switch (type) {
+      case 'TEST_SPEECH_STATUS':
+        testSpeechStatus.value = data?.message || ''
+        break
       case 'TOUR_STATE':
         if (typeof data?.running !== 'boolean' || typeof data?.paused !== 'boolean') break
         tourStatus.value = data.running ? (data.paused ? 'paused' : 'running') : 'idle'
         if (typeof data.repeatCount === 'number') repeatCount.value = data.repeatCount
         if (typeof data.currentIteration === 'number') currentIteration.value = data.currentIteration
         tourStateKnown.value = true
+        clearTimeout(tourStateRetry)
         break
       case 'TOUR_STARTED':
         tourStatus.value = 'running'
@@ -223,7 +240,6 @@ function handleMessage(raw) {
       case 'ERROR':
         if (/OCR|弹幕识别/.test(data?.message || '')) {
           barrageStartPending.value = false
-          ElMessage.error(data.message)
         }
         break
 
@@ -232,16 +248,24 @@ function handleMessage(raw) {
 }
 
 let currentSocket = null
+let tourStateRetry = null
 function detachSocket() {
+  clearTimeout(tourStateRetry)
   currentSocket?.removeEventListener('message', onMsg)
   currentSocket?.removeEventListener('open', onSocketOpen)
   currentSocket?.removeEventListener('close', onSocketClose)
+}
+function requestTourState() {
+  clearTimeout(tourStateRetry)
+  if (!wsConnected.value || tourStateKnown.value) return
+  send('GET_TOUR_STATE')
+  tourStateRetry = setTimeout(requestTourState, 2000)
 }
 function onSocketOpen() {
   wsConnected.value = currentSocket?.readyState === 1
   if (!wsConnected.value) return
   tourStateKnown.value = false
-  send('GET_TOUR_STATE')
+  requestTourState()
   send('GET_BARRAGE_CONFIG')
   // The backend process does not persist the selected screen rectangle. If it
   // restarted while this renderer/capture survived, restore the active OCR
@@ -251,6 +275,7 @@ function onSocketOpen() {
   }
 }
 function onSocketClose() {
+  clearTimeout(tourStateRetry)
   wsConnected.value = false
   tourStateKnown.value = false
 }
@@ -338,9 +363,9 @@ function sendTestSpeech() {
     return
   }
   if (!canTestSpeech.value) return
-  send('TEST_SPEECH', { text: testText.value.trim() })
-  ElMessage.info('已发送测试播报')
-  testText.value = ''
+  if (send('TEST_SPEECH', { text: testText.value.trim() })) {
+    testSpeechStatus.value = '指令已发送，等待后端确认…'
+  }
 }
 
 function onScanIntervalChange(val) {

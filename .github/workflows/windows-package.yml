@@ -97,7 +97,11 @@ jobs:
             "$root/ffplay.exe",
             "$root/node_modules/ffmpeg-static/ffmpeg.exe",
             "$root/node_modules/ws",
-            "$root/node_modules/onnxruntime-node/bin/napi-v6/win32/x64",
+            "$root/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime_binding.node",
+            "$root/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime.dll",
+            "$root/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/DirectML.dll",
+            "$root/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxcompiler.dll",
+            "$root/node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxil.dll",
             "$root/node_modules/sharp"
           )
           $missing = @()

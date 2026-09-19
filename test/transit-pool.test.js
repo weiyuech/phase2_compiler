@@ -271,3 +271,26 @@ test('TTS still synthesizes once and loops the same cached buffer', async t => {
   assert.equal(h.played.length, 3)
   for (const played of h.played) assert.equal(played, buffer)
 })
+
+test('enabled transit reports missing TTS configuration through the UI error hook', async () => {
+  const errors = []
+  const tts = { enabled: false, stop() {} }
+  const manager = new TransitAudioManager({ filePath: null, tts, onError: message => errors.push(message) })
+  manager.saveConfig({ enabled: true, type: 'tts', text: '下一展区' })
+  await manager.start(tts, {})
+  assert.equal(manager.isRunning(), false)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], /TTS 未配置/)
+})
+
+test('prepared transit failures surface to the UI and release their run', async () => {
+  const errors = []
+  const tts = { enabled: true, stop() {}, async prepareText() { throw new Error('decoder unavailable') } }
+  const manager = new TransitAudioManager({ filePath: null, tts, onError: message => errors.push(message) })
+  manager.saveConfig({ enabled: true, type: 'tts', text: '下一展区' })
+  await manager.start(tts, { rewrite: async ({ body }) => ({ text: body }) })
+  await nextTurn()
+  assert.equal(manager.isRunning(), false)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], /decoder unavailable/)
+})

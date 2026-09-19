@@ -8,6 +8,13 @@
       </label>
     </div>
     <div class="panel-body">
+      <div v-if="configLoadError" role="alert">
+        <p class="param-hint">{{ configLoadError }}</p>
+        <el-button size="small" @click="loadTransitConfig(props.wsRef)">重新加载</el-button>
+      </div>
+      <p v-else-if="!props.wsRef || props.wsRef.readyState !== 1" class="param-hint" role="status">后端未连接，连接后会自动加载过渡音频设置。</p>
+      <p v-else-if="!configLoaded" class="param-hint" role="status">正在加载过渡音频设置；未收到回复时将自动重试。</p>
+      <p v-else-if="!transitConfig.enabled" class="param-hint">过渡音频未启用。填写播报文字或添加音频文件后，开启并保存。</p>
       <div class="params-grid">
         <span class="param-label">音频类型</span>
         <el-radio-group v-model="transitConfig.type" size="small">
@@ -22,7 +29,7 @@
               v-model="transitConfig.text" type="textarea" :rows="3"
               placeholder="例：正在前往下一个展区，请稍候……" class="transit-input"
             />
-            <p class="param-hint">每次启动时改写一次并合成，循环播放。</p>
+            <p class="param-hint">每次启动时改写一次并合成，循环播放。凭据和音色使用“系统设置 → 过渡音频与手动播报”。</p>
           </div>
         </template>
 
@@ -72,6 +79,8 @@ const props = defineProps({ wsRef: Object })
 const transitConfig  = reactive({ enabled: false, type: 'tts', text: '', mp3_file: '', mp3_files: [], mp3_mode: 'repeat' })
 const savingTransit  = ref(false)
 const transitSavedOk = ref(false)
+const configLoaded = ref(false)
+const configLoadError = ref('')
 let transitSaveTimer = null
 let transitSaveCleanup = null
 let transitLoadCleanup = null
@@ -120,29 +129,39 @@ function removeTransitMp3(file) {
   transitSavedOk.value = false
 }
 
-function loadTransitConfig(ws) {
-  if (ws.readyState !== WebSocket.OPEN) return
+function loadTransitConfig(ws, attempt = 0) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return
   transitLoadCleanup?.()
+  if (attempt >= 5) {
+    configLoadError.value = '过渡音频设置加载超时。请重新加载；若仍失败，请重启后端或导出诊断日志。未保存的内容已保留。'
+    return
+  }
+  configLoadError.value = ''
   const revision = draftRevision
+  let retryTimer
   const handler = event => {
     try {
       const msg = JSON.parse(event.data)
       if (msg.type !== 'TRANSIT_CONFIG') return
       loadedSocket = ws
+      configLoaded.value = true
       // A late/reconnected response must not replace the operator's draft.
       if (!draftDirty && draftRevision === revision) applyTransitConfig(msg.data)
       transitLoadCleanup?.()
     } catch { /* ignore unrelated malformed messages */ }
   }
   transitLoadCleanup = () => {
+    clearTimeout(retryTimer)
     ws.removeEventListener('message', handler)
     transitLoadCleanup = null
   }
   ws.addEventListener('message', handler)
   try {
+    retryTimer = setTimeout(() => loadTransitConfig(ws, attempt + 1), 2000)
     ws.send(JSON.stringify({ type: 'GET_TRANSIT_CONFIG' }))
   } catch {
     transitLoadCleanup?.()
+    configLoadError.value = '过渡音频设置请求发送失败，请检查后端连接并重新加载。'
   }
 }
 
@@ -224,6 +243,8 @@ watch(() => props.wsRef, (ws, _previous, onCleanup) => {
   transitLoadCleanup?.()
   transitSaveCleanup?.()
   loadedSocket = null
+  configLoaded.value = false
+  configLoadError.value = ''
   transitSavedOk.value = false
   if (!ws) return
   const onOpen = () => loadTransitConfig(ws)
@@ -231,6 +252,8 @@ watch(() => props.wsRef, (ws, _previous, onCleanup) => {
     transitLoadCleanup?.()
     transitSaveCleanup?.()
     loadedSocket = null
+    configLoaded.value = false
+    configLoadError.value = ''
     transitSavedOk.value = false
   }
   ws.addEventListener('close', onClose)

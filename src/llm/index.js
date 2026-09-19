@@ -7,9 +7,9 @@ export class LLMRewriter {
     this.primary   = new DoubaoProvider(config)
     this.fallback  = new DeepseekProvider(config)
     this.filter    = new BannedWordFilter(
-      config.BANNED_WORDS_FILE || process.env.BANNED_WORDS_FILE || './config/banned-words.txt'
+      (config.BANNED_WORDS_FILE ?? process.env.BANNED_WORDS_FILE) || './config/banned-words.txt'
     )
-    this.timeoutMs = parseInt(config.LLM_TIMEOUT_MS || process.env.LLM_TIMEOUT_MS || '8000')
+    this.timeoutMs = parseInt((config.LLM_TIMEOUT_MS ?? process.env.LLM_TIMEOUT_MS) || '8000')
   }
 
   async init() {
