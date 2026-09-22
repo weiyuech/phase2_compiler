@@ -11,6 +11,11 @@ on:
         description: 'Unused test release tag; run this workflow at that exact tag'
         required: true
         type: string
+      archive_only:
+        description: 'Add streaming_app.zip to an existing verified draft without rebuilding the application'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -23,7 +28,7 @@ jobs:
       contents: read
 
   test-installer:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-test.'))
+    if: (github.event_name == 'workflow_dispatch' && !inputs.archive_only) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-test.'))
     concurrency:
       group: windows-test-${{ github.repository }}-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
       cancel-in-progress: false
@@ -32,3 +37,25 @@ jobs:
       release_tag: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
     permissions:
       contents: write
+
+  release-archive:
+    if: github.event_name == 'workflow_dispatch' && inputs.archive_only
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: release-archive-${{ github.repository }}-${{ inputs.release_tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test archive validation and exact contents
+        run: python3 robot-ui/scripts/test-release-archive.py
+      - name: Verify and bundle the existing installer on GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: python3 robot-ui/scripts/package-release-archive.py
