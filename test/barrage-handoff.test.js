@@ -58,21 +58,25 @@ test('in-flight barrage uses immutable OCR text and retains only one latest pend
 })
 
 test('host does not cancel generating reply, but drops a prepared reply waiting for a boundary', async t => {
-  const prepared = deferred(), finish = deferred()
+  const preparing = deferred(), prepared = deferred(), waitingForBoundary = deferred(), finish = deferred()
   const h = harness(t, { tts: { speak: async (_text, opts) => {
+    preparing.resolve()
     await prepared.promise
     opts.onPrepared({ utteranceId: opts.utteranceId })
+    waitingForBoundary.resolve()
     await finish.promise
     assert.equal(opts.signal.aborted, true)
     assert.equal(opts.beforePlay(), false)
     return { ok: false, aborted: true }
   } } })
   const playing = h.manager.playActionSequence(event('viewer'))
-  await nextTurn()
+  // Template file IO may take several event-loop turns on Windows. Wait for
+  // the actual stage instead of assuming setImmediate means preparation ran.
+  await preparing.promise
   h.manager.stopSpeech()
   assert.equal(h.state.stops, 0)
   prepared.resolve()
-  await nextTurn()
+  await waitingForBoundary.promise
   h.state.host = true
   h.manager.stopSpeech()
   assert.equal(h.state.stops, 1)
@@ -84,14 +88,18 @@ test('host does not cancel generating reply, but drops a prepared reply waiting 
 })
 
 test('cancelled old LLM completion cannot clear or start over a newer barrage job', async t => {
-  const old = deferred(), newer = deferred()
+  const old = deferred(), newer = deferred(), oldEntered = deferred(), newerEntered = deferred()
   let calls = 0
-  const h = harness(t, { llm: { rewriteBarrage: () => ++calls === 1 ? old.promise : newer.promise } })
+  const h = harness(t, { llm: { rewriteBarrage: () => {
+    if (++calls === 1) { oldEntered.resolve(); return old.promise }
+    newerEntered.resolve()
+    return newer.promise
+  } } })
   const first = h.manager.playActionSequence(event('first'))
-  await nextTurn()
+  await oldEntered.promise
   h.manager.cancelPendingSpeech()
   const second = h.manager.playActionSequence(event('second'))
-  await nextTurn()
+  await newerEntered.promise
   old.resolve('obsolete reply')
   await first
   assert.equal(h.manager.isPlaying, true)
