@@ -2,47 +2,60 @@ name: Build and Release (Windows Only)
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Unused test release tag; run this workflow at that exact tag'
+        required: true
+        type: string
+      archive_only:
+        description: 'Add streaming_app.zip to an existing verified draft without rebuilding the application'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-    runs-on: windows-latest
+  verify:
+    if: github.event_name != 'workflow_dispatch' && !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-test.'))
+    uses: ./.github/workflows/windows-package.yml
+    permissions:
+      contents: read
 
+  test-installer:
+    if: (github.event_name == 'workflow_dispatch' && !inputs.archive_only) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-test.'))
+    concurrency:
+      group: windows-test-${{ github.repository }}-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/windows-package.yml
+    with:
+      release_tag: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+    permissions:
+      contents: write
+
+  release-archive:
+    if: github.event_name == 'workflow_dispatch' && inputs.archive_only
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: release-archive-${{ github.repository }}-${{ inputs.release_tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
         with:
-          node-version: 20
-          cache: 'npm'
-          cache-dependency-path: |
-            package-lock.json
-            robot-ui/package-lock.json
-
-      - name: Install Root Dependencies
-        run: npm ci
-
-      - name: Install UI Dependencies
-        run: |
-          cd robot-ui
-          npm ci
-
-      - name: Build and Package Electron App
-        run: |
-          cd robot-ui
-          node scripts/gen-icon.mjs
-          node scripts/prepare-backend.mjs
-          npx electron-vite build
-          npx electron-builder --publish never
-
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-windows
-          path: release/*.exe
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test archive validation and exact contents
+        run: python3 robot-ui/scripts/test-release-archive.py
+      - name: Verify and bundle the existing installer on GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: python3 robot-ui/scripts/package-release-archive.py

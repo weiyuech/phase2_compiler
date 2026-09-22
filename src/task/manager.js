@@ -122,17 +122,22 @@ export class TaskManager extends EventEmitter {
    */
   setList(items) {
     const prev = this._currentIndex >= 0 ? this._list[this._currentIndex] : null
+    const successors = this._list.slice(this._currentIndex + 1)
+    const samePoint = (a, b) => a.map_name === b.map_name &&
+      a.path_name === b.path_name && a.goal_id === b.goal_id
 
     this._list = items.map(item => ({ ...item }))
 
     if (prev !== null) {
-      const newIndex = this._list.findIndex(item =>
-        item.map_name  === prev.map_name  &&
-        item.path_name === prev.path_name &&
-        item.goal_id   === prev.goal_id
-      )
+      const newIndex = this._list.findIndex(item => samePoint(item, prev))
       if (newIndex === -1) {
-        const nextIndex = this._list.length > 0 ? 0 : -1
+        // The UI submits the entire edited list. Deleting the current point
+        // must continue with its next surviving successor, not restart at 0.
+        let nextIndex = -1
+        for (const next of successors) {
+          nextIndex = this._list.findIndex(item => samePoint(item, next))
+          if (nextIndex !== -1) break
+        }
         this._currentIndex = -1
         this._save()
         this.emit('list-changed', this.getList())

@@ -1,4 +1,10 @@
 import { WebSocketServer } from 'ws'
+import { writeSync }       from 'node:fs'
+
+// 弹幕识别开着时，每秒都会收到一帧截图和若干条消息。
+// 把这些逐帧日志一直写进 backend.log，一天就是几 MB，排障时还得从里面翻。
+// 默认关掉，需要现场调试时设 DEBUG_WS=1 打开。
+const DEBUG_WS = process.env.DEBUG_WS === '1'
 
 let wss        = null
 let paused     = false
@@ -22,6 +28,7 @@ const handlers = {
   onSkipPoint:     null,
   // Queries (reply to specific client)
   onGetTourList:   null,
+  onGetTourState:  null,
   onGetKbMaps:     null,
   onGetKbList:     null,
   onGetKbPaths:    null,
@@ -51,6 +58,11 @@ const handlers = {
   // Transit audio config
   onGetTransitConfig:   null,
   onSetTransitConfig:   null,
+  // Playback destination (local computer / robot speaker)
+  onGetAudioOutputConfig: null,
+  onSetAudioOutputConfig: null,
+  onGetAudioDiagnostics: null,
+  onMarkAudioGlitch: null,
   // Cruising point audio files
   onGetCruisingAudioFiles: null,
   onUploadCruisingAudio:   null,
@@ -62,14 +74,72 @@ const handlers = {
   onNewClient:          null,
 }
 
-export function start(port = 3001) {
-  wss = new WebSocketServer({ port })
+// 实际监听到的端口。首选 3001；被占用时由系统另分配一个空闲端口，
+// 再把真实端口告诉主进程 → 界面据此连接，所以端口冲突不再是致命问题。
+let actualPort = null
+
+export function start(preferredPort = 3001) {
+  listen(preferredPort, /* isFallback */ false)
+}
+
+function listen(port, isFallback) {
+  // 只监听回环地址：这个通道服务的是同一台机器上的 Electron 界面。
+  // 机器人不走这个端口（ROBOT_URL 是往外拨号的），不受影响。
+  // 之前监听全部网卡且没有任何鉴权，同一个 Wi-Fi 下的任何设备都能发指令。
+  wss = new WebSocketServer({ port, host: '127.0.0.1' })
+
+  let listening = false
+  wss.on('listening', () => {
+    listening = true
+    actualPort = wss.address().port          // port 为 0 时这里才是系统分配的真实端口
+    console.log(`[UI] 控制台通道已就绪，端口 ${actualPort}`)
+    // 告诉主进程真实端口，由它转给渲染进程。
+    // 开发模式下没有 parentPort（后端是手动 npm start 起的），界面回退到 3001。
+    try { process.parentPort?.postMessage({ type: 'UI_PORT', port: actualPort }) } catch {}
+  })
+
+  // 没有这个监听器时，listen 失败会以未捕获异常直接杀掉整个后端进程，
+  // 界面上只剩一个"未连接"，日志里也只有一段看不懂的堆栈。
+  wss.on('error', (err) => {
+    if (!listening) {
+      // 首选端口被占用 → 换一个系统分配的空闲端口重来，而不是让用户
+      // 自己去找并关掉占用端口的程序（对方可能根本关不掉）。
+      if (err.code === 'EADDRINUSE' && !isFallback) {
+        // 用 console.log（stdout）而不是 warn（stderr）：这是已经处理掉的正常情况。
+        // 界面在后端退出时展示的是 stderr 末尾几行，把这条写进 stderr 的话，
+        // 以后真的因为别的原因崩溃时，用户会看到"端口被占用"这条陈旧信息。
+        console.log(`[UI] 端口 ${port} 已被占用，改用系统自动分配的空闲端口`)
+        try { wss.close() } catch {}
+        listen(0, true)
+        return
+      }
+      // writeSync 而不是 console.error：管道 stderr 在 macOS 上是异步写，
+      // 紧跟 process.exit() 会把这条唯一的线索截掉
+      try {
+        writeSync(2, `[UI] 控制台通道启动失败: ${err.message}\n`)
+      } catch {}
+      process.exit(3)
+    }
+    // 已经在监听之后出现的错误不致命，记录即可
+    console.error('[UI] 控制台通道错误:', err.message)
+  })
 
   wss.on('connection', (ws) => {
+    // 每次连接记一行（不是每条消息）。排障时这一行能直接回答
+    // "界面到底连上后端没有"，CI 的冒烟测试也用它判断窗口是否真的起来了。
+    console.log('[UI] 界面已连接')
+    ws.on('close', () => console.log('[UI] 界面已断开'))
+
     const sendTo = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
     sendTo('STATUS', { paused, duckVolume, fadeMs })
     if (tunnelUrl) sendTo('TUNNEL_URL', { url: tunnelUrl })
     handlers.onNewClient?.(sendTo)
+
+    // 单个连接上的协议错误如果没人监听，EventEmitter 会把它抛成未捕获异常，
+    // 整个后端就没了。一个客户端出问题不应该影响其它客户端。
+    ws.on('error', (err) => {
+      console.error('[UI] 客户端连接错误:', err.message)
+    })
 
     ws.on('message', (data, isBinary) => {
       const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -80,7 +150,7 @@ export function start(port = 3001) {
                     buffer[2] === 0x4E && buffer[3] === 0x47;
 
       if (isPng) {
-        console.log(`[DEBUG] [WS] Received valid PNG image packet (${buffer.length} bytes)`);
+        if (DEBUG_WS) console.log(`[DEBUG] [WS] Received valid PNG image packet (${buffer.length} bytes)`);
         handlers.onBarrageImage?.(buffer)
         return
       }
@@ -98,15 +168,32 @@ export function start(port = 3001) {
 
       function handleJson(str) {
         let msg
-        try { 
-          msg = JSON.parse(str) 
+        try {
+          msg = JSON.parse(str)
         } catch (err) {
-          return 
+          return
         }
-        
-        const { type, data: msgData } = msg
-        
-        if (type !== 'BARRAGE_IMAGE') {
+
+        // 解析成功之后仍然可能炸：msg 可能是 null，msgData 可能缺字段
+        // （{"type":"SELECT_MAP"} 就够了），handler 自己也可能抛。
+        // 这里不兜住的话，一条畸形消息就能让整个后端退出。
+        try {
+          dispatch(msg)
+        } catch (err) {
+          console.error('[UI] 处理消息失败:', err?.stack || err)
+          broadcast('ERROR', { message: `处理 ${msg?.type || '消息'} 失败: ${err?.message || String(err)}` })
+        }
+      }
+
+      function dispatch(msg) {
+        const { type, data: msgData } = msg ?? {}
+
+        // Keep operator actions observable without logging text, credentials or frames.
+        if (['START_TOUR', 'PAUSE_TOUR', 'RESUME_TOUR', 'STOP_TOUR', 'TEST_SPEECH'].includes(type)) {
+          console.log(`[UI] 收到控制指令: ${type}`)
+        }
+
+        if (DEBUG_WS && type !== 'BARRAGE_IMAGE') {
           console.log('[DEBUG] [WS Incoming]:', type, JSON.stringify(msgData))
         }
 
@@ -155,12 +242,21 @@ export function start(port = 3001) {
             break
 
           // ── Queries (reply to this client only) ─────────────────────────────
+          case 'GET_AUDIO_DIAGNOSTICS':
+          case 'MARK_AUDIO_GLITCH': {
+            const reply = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
+            if (type === 'GET_AUDIO_DIAGNOSTICS') handlers.onGetAudioDiagnostics?.(reply)
+            else handlers.onMarkAudioGlitch?.(reply)
+            break
+          }
           case 'GET_TOUR_LIST':
+          case 'GET_TOUR_STATE':
           case 'GET_KB_MAPS':
           case 'GET_KB_LIST':
           case 'GET_KB_PATHS': {
             const reply = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
             if (type === 'GET_TOUR_LIST') handlers.onGetTourList?.(reply)
+            if (type === 'GET_TOUR_STATE') handlers.onGetTourState?.(reply)
             if (type === 'GET_KB_MAPS')   handlers.onGetKbMaps?.(reply)
             if (type === 'GET_KB_LIST')   handlers.onGetKbList?.(reply)
             if (type === 'GET_KB_PATHS')  handlers.onGetKbPaths?.(msgData, reply)
@@ -230,6 +326,14 @@ export function start(port = 3001) {
           case 'SET_TRANSIT_CONFIG':
             handlers.onSetTransitConfig?.(msgData)
             break
+          case 'GET_AUDIO_OUTPUT_CONFIG': {
+            const reply = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
+            handlers.onGetAudioOutputConfig?.(reply)
+            break
+          }
+          case 'SET_AUDIO_OUTPUT_CONFIG':
+            handlers.onSetAudioOutputConfig?.(msgData)
+            break
           case 'GET_TTS_CACHE_LIST': {
             const reply = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
             handlers.onGetTtsCacheList?.(reply)
@@ -252,8 +356,11 @@ export function start(port = 3001) {
             broadcast('DUCK_END', {})
             break
           case 'BARRAGE_START':
-            handlers.onBarrageStart?.(msgData)
-            broadcast('BARRAGE_START', msgData)
+            // A native OCR load failure can reject the start. Do not overwrite
+            // its final BARRAGE_STOP with an unconditional START echo.
+            if (handlers.onBarrageStart?.(msgData) !== false) {
+              broadcast('BARRAGE_START', msgData)
+            }
             break
           case 'BARRAGE_STOP':
             handlers.onBarrageStop?.()
@@ -275,12 +382,26 @@ export function start(port = 3001) {
 }
 
 export function broadcast(type, data = {}) {
+  // A UI event alone never reached backend.log, and vanished when no UI was connected.
+  if (type === 'ERROR') console.error('[UI ERROR]', data.message || '未知错误')
   if (!wss) return
   const msg = JSON.stringify({ type, data, ts: Date.now() })
   wss.clients.forEach((c) => { if (c.readyState === 1) c.send(msg) })
 }
 
-export function on(event, fn)  { handlers[event] = fn }
+export function on(event, fn) {
+  handlers[event] = (...args) => {
+    const fail = error => {
+      broadcast('ERROR', { message: `处理 ${event} 失败: ${error?.message || String(error)}` })
+    }
+    try {
+      const result = fn(...args)
+      // The WebSocket dispatcher does not await handlers. Observe rejections here.
+      if (result?.then) return Promise.resolve(result).catch(fail)
+      return result
+    } catch (error) { fail(error) }
+  }
+}
 export function isPaused()     { return paused }
 export function getDuckVolume(){ return duckVolume }
 export function getFadeMs()    { return fadeMs }

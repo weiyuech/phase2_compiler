@@ -1,6 +1,6 @@
 {
   "name": "robot-live-ui",
-  "version": "1.0.0",
+  "version": "1.0.2-test.8",
   "description": "Robot Live System Control Panel",
   "author": "weiyuech",
   "repository": {
@@ -20,11 +20,12 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.6.0",
+    "@electron/rebuild": "^4.2.0",
     "@vitejs/plugin-vue": "^5.0.4",
-    "electron": "^30.0.0",
-    "electron-builder": "^24.13.3",
-    "electron-vite": "^2.2.0",
+    "electron": "^41.10.3",
+    "electron-builder": "^26.15.7",
+    "electron-vite": "^3.1.0",
+    "vite": "^6.4.3",
     "vue": "^3.4.21"
   },
   "build": {
@@ -50,19 +51,34 @@
         ]
       },
       {
-        "from": "../config",
-        "to": "backend/config"
+        "from": "resources/backend-seed/config",
+        "to": "backend/config",
+        "filter": [
+          "banned-words.txt",
+          "llm-system-prompt.txt",
+          "barrage-prompt-name.txt",
+          "barrage-prompt-general.txt"
+        ]
       },
       {
-        "from": "../data",
-        "to": "backend/data"
+        "from": "resources/backend-seed/data",
+        "to": "backend/data",
+        "filter": [
+          "models/PP-OCRv6_medium_det.onnx",
+          "models/PP-OCRv6_medium_rec.onnx",
+          "models/ppocrv6_dict.txt",
+          "tour-list.json",
+          "transit-audio.json",
+          "audio-output.json",
+          "barrage-knowledge/config.json"
+        ]
       },
       {
         "from": "../package.json",
         "to": "backend/package.json"
       },
       {
-        "from": "../.env.example",
+        "from": "resources/backend-seed/.env.example",
         "to": "backend/.env.example"
       },
       {
@@ -80,6 +96,7 @@
       "executableName": "robot-live-ui"
     },
     "nsis": {
+      "artifactName": "Setup.${version}.${ext}",
       "oneClick": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,

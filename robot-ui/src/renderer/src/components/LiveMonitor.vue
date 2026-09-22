@@ -132,6 +132,8 @@
 
 <script setup>
 import { ref, watch, nextTick, computed, onMounted, onUnmounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { SpeechCaptions } from '../speech-captions.js'
 
 const props = defineProps({ wsRef: Object })
 const emit  = defineEmits(['send'])
@@ -144,6 +146,7 @@ const battery         = ref(null)
 const ducking         = ref(false)
 const currentPoint    = ref('')
 const currentText     = ref('')
+const speechCaptions = new SpeechCaptions()
 const tourStatus      = ref('idle')   // idle | running | paused | finished
 const goalCheckFailed = ref(null)     // { message, map_name, path_name, goal_id } | null
 const tunnelUrl       = ref(null)     // ngrok wss:// URL | null
@@ -156,6 +159,11 @@ let barrageTimer      = null
 let videoStream       = null
 let videoEl           = null
 let canvasEl          = null
+let barrageCaptureGeneration = 0
+let removeBarrageRegionListener = null
+let ownsBarrageCapture = false
+const BARRAGE_CAPTURE_MAX_FPS = 2
+const BARRAGE_SOCKET_BACKLOG_LIMIT = 512 * 1024
 
 // ── Ducker state ──────────────────────────────────────────────────────────────
 const duckerEnabled     = ref(false)
@@ -498,12 +506,17 @@ function handleMessage(raw) {
         break
 
       case 'SPEECH_START':
-        currentText.value = data.text || `[MP3] ${data.mp3_file || ''}`
-        broadcastCount.value++
+        if (speechCaptions.start(data)) broadcastCount.value++
+        currentText.value = speechCaptions.text
         addLog(data.mp3_file ? 'mp3' : 'speech', currentText.value)
         break
+      case 'SPEECH_SENTENCE':
+        speechCaptions.sentence(data)
+        currentText.value = speechCaptions.text
+        break
       case 'SPEECH_END':
-        currentText.value = ''
+        speechCaptions.end(data)
+        currentText.value = speechCaptions.text
         break
 
       case 'DUCK_START':
@@ -516,12 +529,18 @@ function handleMessage(raw) {
         break
 
       case 'BARRAGE_START':
+        send('GET_BARRAGE_CONFIG')
         barrageRegion.value = data
         addLog('system', `弹幕追踪已启动: ${data.width}x${data.height}`)
-        startBarrageLoop()
+        if (ownsBarrageCapture) startBarrageLoop()
         break
-      
+      case 'BARRAGE_CONFIG':
+      case 'BARRAGE_CONFIG_SAVED':
+        barrageScanInterval = Math.max(1, Math.min(60, Number(data?.scan_interval) || 1))
+        break
+
       case 'BARRAGE_STOP':
+        ownsBarrageCapture = false
         barrageRegion.value = null
         addLog('system', '弹幕追踪已停止')
         stopBarrageLoop()
@@ -556,100 +575,217 @@ function handleMessage(raw) {
 }
 
 async function startBarrageLoop() {
-  if (barrageTimer) clearInterval(barrageTimer)
-  
+  // A plain browser can mirror backend state, but only Electron has the preload
+  // bridge required for desktop capture. It must not answer a shared START with
+  // STOP, otherwise one browser tab can cancel the native client's OCR session.
+  if (!window.api?.getScreenSourceId) {
+    addLog('system', '浏览器预览不执行屏幕截取；请在 Electron 窗口使用弹幕识别')
+    return
+  }
+
+  const generation = ++barrageCaptureGeneration
+  disposeBarrageCapture()
+  const region = barrageRegion.value ? { ...barrageRegion.value } : null
+  if (!region) return
+
+  let acquiredStream = null
+  let acquiredVideo = null
+
   try {
     send('LOG_MESSAGE', 'Requesting screen source ID...')
-    const sourceId = await window.api.getScreenSourceId()
+    const sourceResult = await window.api.getScreenSourceId()
+    if (generation !== barrageCaptureGeneration || !barrageRegion.value) return
+    const sourceId = typeof sourceResult === 'string' ? sourceResult : sourceResult?.sourceId
+    if (typeof sourceResult !== 'string' && !sourceResult?.ok) {
+      const captureError = new Error(sourceResult?.error || '无法获取屏幕画面。')
+      captureError.code = sourceResult?.code
+      captureError.canOpenSettings = sourceResult?.canOpenSettings === true
+      throw captureError
+    }
     send('LOG_MESSAGE', `Got screen source ID: ${sourceId}`)
     if (!sourceId) throw new Error('Cannot find screen source')
+    const sourceBounds = sourceResult?.display?.bounds
+    const captureDisplay = {
+      width: Number(sourceBounds?.width || sourceResult?.display?.width) || window.screen.width,
+      height: Number(sourceBounds?.height || sourceResult?.display?.height) || window.screen.height
+    }
 
-    // Hot stream connection
+    // Restrict the desktop track itself. Sampling a normal-refresh-rate stream
+    // once per second still makes Chromium capture/composite every source frame.
     send('LOG_MESSAGE', 'Requesting getUserMedia...')
-    videoStream = await navigator.mediaDevices.getUserMedia({
+    acquiredStream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId } }
+      video: {
+        mandatory: {
+          chromeMediaSource: 'desktop',
+          chromeMediaSourceId: sourceId,
+          maxFrameRate: BARRAGE_CAPTURE_MAX_FPS
+        }
+      }
     })
-    
+    const captureTrack = acquiredStream.getVideoTracks()[0]
+    try {
+      await captureTrack?.applyConstraints?.({
+        frameRate: { ideal: BARRAGE_CAPTURE_MAX_FPS, max: BARRAGE_CAPTURE_MAX_FPS }
+      })
+    } catch (error) {
+      // Some Windows capture drivers ignore/reject a very low standard FPS
+      // constraint. The initial Chromium maxFrameRate remains in effect.
+      send('LOG_MESSAGE', `Screen capture FPS constraint was not applied: ${error?.message || error}`)
+    }
+    const captureSettings = captureTrack?.getSettings?.() || {}
+    send(
+      'LOG_MESSAGE',
+      `Screen capture settings: ${captureSettings.width || '?'}x${captureSettings.height || '?'} @ ${captureSettings.frameRate || '?'}fps`
+    )
+    if (generation !== barrageCaptureGeneration || !barrageRegion.value) {
+      acquiredStream.getTracks().forEach(track => track.stop())
+      return
+    }
+    videoStream = acquiredStream
+
     send('LOG_MESSAGE', 'Got videoStream, setting up video element...')
-    videoEl = document.createElement('video')
-    videoEl.srcObject = videoStream
-    await videoEl.play()
-    
+    acquiredVideo = document.createElement('video')
+    acquiredVideo.srcObject = acquiredStream
+    videoEl = acquiredVideo
+    await acquiredVideo.play()
+    if (generation !== barrageCaptureGeneration || !barrageRegion.value) {
+      acquiredVideo.pause()
+      acquiredVideo.srcObject = null
+      acquiredStream.getTracks().forEach(track => track.stop())
+      return
+    }
+
     canvasEl = document.createElement('canvas')
-    canvasEl.width = barrageRegion.value.width
-    canvasEl.height = barrageRegion.value.height
+    canvasEl.width = region.width
+    canvasEl.height = region.height
 
-    console.log('[Phase 2] Hot video stream ready. Starting 1000ms loop.')
+    console.log('[Phase 2] Hot video stream ready. Starting configurable scan loop.')
     send('LOG_MESSAGE', 'Hot stream ready. Starting interval.')
+    ElMessage.success('弹幕识别已启动')
 
+    let encodeInFlight = false
+    let lastScanAt = performance.now()
     barrageTimer = setInterval(() => {
-      if (!barrageRegion.value || !videoEl || !props.wsRef || props.wsRef.readyState !== 1) return
+      if (performance.now() - lastScanAt < barrageScanInterval * 1000) return
+      if (
+        encodeInFlight ||
+        generation !== barrageCaptureGeneration ||
+        !barrageRegion.value ||
+        !videoEl ||
+        !canvasEl ||
+        !props.wsRef ||
+        props.wsRef.readyState !== 1
+      ) return
 
       const ctx = canvasEl.getContext('2d')
-      const scaleX = videoEl.videoWidth / window.screen.width
-      const scaleY = videoEl.videoHeight / window.screen.height
+      if (!ctx || !videoEl.videoWidth || !videoEl.videoHeight) return
+      const socket = props.wsRef
+      if (Number(socket?.bufferedAmount || 0) > BARRAGE_SOCKET_BACKLOG_LIMIT) return
+      const scaleX = videoEl.videoWidth / captureDisplay.width
+      const scaleY = videoEl.videoHeight / captureDisplay.height
 
-      const sx = barrageRegion.value.x * scaleX
-      const sy = barrageRegion.value.y * scaleY
-      const sw = barrageRegion.value.width * scaleX
-      const sh = barrageRegion.value.height * scaleY
+      const sx = region.x * scaleX
+      const sy = region.y * scaleY
+      const sw = region.width * scaleX
+      const sh = region.height * scaleY
 
       // Instant hardware-accelerated crop
-      ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, barrageRegion.value.width, barrageRegion.value.height)
-      
+      lastScanAt = performance.now()
+      ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, region.width, region.height)
+
       // Convert to binary PNG blob and send
+      encodeInFlight = true
       canvasEl.toBlob((blob) => {
-        if (blob && props.wsRef.readyState === 1) {
-          props.wsRef.send(blob)
+        encodeInFlight = false
+        const socket = props.wsRef
+        if (
+          blob &&
+          generation === barrageCaptureGeneration &&
+          barrageRegion.value &&
+          socket?.readyState === 1 &&
+          Number(socket.bufferedAmount || 0) <= BARRAGE_SOCKET_BACKLOG_LIMIT
+        ) {
+          socket.send(blob)
         }
       }, 'image/png')
-    }, 1000) // 1 second interval to prevent piling up
+    }, 250) // Only crop/encode when the configured scan deadline is due.
   } catch (err) {
+    if (generation !== barrageCaptureGeneration) {
+      acquiredStream?.getTracks().forEach(track => track.stop())
+      return
+    }
     addLog('error', `弹幕流启动失败: ${err.message}`)
     console.error('[Phase 2]', err)
     send('LOG_MESSAGE', `Stream error: ${err.message}`)
+    if (err.canOpenSettings && window.api?.openScreenRecordingSettings) {
+      ElMessageBox.confirm(err.message, '无法启动弹幕识别', {
+        type: 'warning',
+        confirmButtonText: '打开系统设置',
+        cancelButtonText: '稍后处理'
+      }).then(async () => {
+        const result = await window.api.openScreenRecordingSettings()
+        if (!result?.ok) ElMessage.error(`无法打开系统设置：${result?.error || '未知错误'}`)
+      }).catch(() => {})
+    } else {
+      ElMessage.error(`弹幕识别无法启动：${err.message}`)
+    }
+    barrageRegion.value = null
+    stopBarrageLoop()
+    send('BARRAGE_STOP')
   }
 }
 
-function stopBarrageLoop() {
+function disposeBarrageCapture() {
   if (barrageTimer) clearInterval(barrageTimer)
   barrageTimer = null
   if (videoStream) {
     videoStream.getTracks().forEach(t => t.stop())
     videoStream = null
   }
+  if (videoEl) {
+    videoEl.pause()
+    videoEl.srcObject = null
+  }
   videoEl = null
   canvasEl = null
+}
+
+function stopBarrageLoop() {
+  barrageCaptureGeneration++
+  disposeBarrageCapture()
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 onMounted(async () => {
-  await loadDuckerConfig()
-  const saved = localStorage.getItem('duckerEnabled')
-  if (saved === '1') {
-    duckerEnabled.value = true
-    await startMicMonitor()
-  }
-
-  // Handle OCR region selection
-  if (window.api && window.api.onBarrageRegionSelected) {
-    window.api.onBarrageRegionSelected((rect) => {
+  // Register synchronously so a quick overlay confirmation cannot arrive while
+  // microphone/config initialization is still awaiting completion.
+  if (window.api?.onBarrageRegionSelected) {
+    removeBarrageRegionListener = window.api.onBarrageRegionSelected((rect) => {
       if (rect) {
+        ownsBarrageCapture = true
         barrageRegion.value = rect
         send('BARRAGE_START', rect)
-        startBarrageLoop() // Trigger immediately, don't wait for backend echo
       } else {
+        ownsBarrageCapture = false
         barrageRegion.value = null
         send('BARRAGE_STOP')
         stopBarrageLoop()
       }
     })
   }
+
+  await loadDuckerConfig()
+  const saved = localStorage.getItem('duckerEnabled')
+  if (saved === '1') {
+    duckerEnabled.value = true
+    await startMicMonitor()
+  }
 })
 
 let currentSocket = null
+let barrageScanInterval = 1
 watch(() => props.wsRef, (socket) => {
   if (currentSocket) currentSocket.removeEventListener('message', onMsg)
   if (socket) {
@@ -663,6 +799,9 @@ function onMsg(e) { handleMessage(e.data) }
 
 onUnmounted(() => {
   currentSocket?.removeEventListener('message', onMsg)
+  removeBarrageRegionListener?.()
+  removeBarrageRegionListener = null
+  stopBarrageLoop()
   stopMicMonitor()
 })
 </script>

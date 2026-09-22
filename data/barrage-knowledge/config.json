@@ -1,7 +1,7 @@
 {
   "mode": "llm-strict",
   "cooldown": 1,
-  "document_name": "test_doc.txt",
+  "document_name": "",
   "priority_mode": false,
   "random_reply": false
 }

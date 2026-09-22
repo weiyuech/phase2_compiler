@@ -17,8 +17,10 @@
     <!-- Right panel -->
     <div class="settings-panel">
 
+      <AudioDiagnostics v-if="activeSection === 'diagnostics'" :ws-ref="props.wsRef" />
+
       <!-- ── 违禁词 ─────────────────────────────────────────────────────── -->
-      <template v-if="activeSection === 'banned'">
+      <template v-else-if="activeSection === 'banned'">
         <div class="panel-header">违禁词</div>
         <div class="panel-body">
           <div class="word-tags">
@@ -55,7 +57,7 @@
         <div class="panel-body panel-body--stretch" style="gap: 20px">
           <div>
             <div class="prompt-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-              <span class="section-sub-title" style="color: var(--text); font-size: 13px; font-weight: 600;">导播提示词</span>
+              <span class="section-sub-title" style="color: var(--text); font-size: 13px; font-weight: 600;">巡游与过渡改写提示词</span>
               <div style="display: flex; align-items: center; gap: 6px;">
                 <span style="font-size: 12px; color: var(--text-dim)">自定义</span>
                 <el-switch v-model="customCruiseEnabled" size="small" @change="handleCruiseSwitch" />
@@ -87,29 +89,45 @@
             <el-input v-model="barrageGeneralText" type="textarea" :rows="3" class="prompt-textarea" :disabled="!customBarrageGeneralEnabled" />
           </div>
 
+          <div>
+            <div class="prompt-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <span class="section-sub-title" style="color: var(--text); font-size: 13px; font-weight: 600;">弹幕 - 新增问题判断提示词</span>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="font-size: 12px; color: var(--text-dim)">自定义</span>
+                <el-switch v-model="customJudgeEnabled" size="small" @change="handleJudgeSwitch" />
+              </div>
+            </div>
+            <el-input v-model="judgePromptText" type="textarea" :rows="3" class="prompt-textarea" :disabled="!customJudgeEnabled" />
+            <p class="panel-note">仅用于 TTS：冷却到点时比较上次判断与当前 OCR；“无新问题”跳过本轮。</p>
+          </div>
+
           <div class="row-actions" style="margin-top: auto; padding-top: 16px;">
-            <el-button type="primary" :loading="savingPrompt" @click="savePrompt">保存全部提示词</el-button>
+            <el-button type="primary" :loading="savingPrompt" :disabled="!promptLoaded" @click="savePrompt">保存全部提示词</el-button>
             <span v-if="promptSavedOk" class="ok-text">已保存，后端已重载</span>
           </div>
         </div>
       </template>
 
       <!-- ── 导播设置 ─────────────────────────────────────────────────────── -->
-      <template v-else-if="activeSection === 'cruise'">
-        <div class="panel-header">导播设置</div>
+      <template v-else-if="['cruise', 'transit', 'barrage'].includes(activeSection)">
+        <div class="panel-header">{{ speechProfileTitles[activeSection] }}</div>
         <div class="panel-body">
+          <p class="panel-note">{{ speechProfileDescriptions[activeSection] }}</p>
+          <p class="panel-note">三组配置独立保存；可以填写相同凭据，留空不会自动使用其他组的凭据。使用旧版配置升级时，已复制原有有效配置。</p>
+          <p class="panel-note">LLM 按本组“主服务商 → 备用服务商”调用。选千问时填写完整 API Key 和模型（默认 qwen3.8-flash）；无需填写账号数字或带星号的密钥摘要。千问只负责文字生成，语音仍使用下方 TTS 配置。</p>
+          <p class="panel-note">选 DeepSeek 时，请选择“官方”或“火山方舟”，并填写对应平台的密钥和模型。两套凭据分别保存；方舟需填写控制台的模型 ID 或推理接入点 ID，可在方舟专用密钥栏填写已有的火山方舟 API Key。</p>
           <div class="section-sub-title" style="margin-bottom: 12px; color: var(--text); font-size: 13px; font-weight: 600;">运行参数</div>
           <div class="params-grid">
-            <template v-for="item in cruisePublicEnvDef" :key="item.key">
+            <template v-for="item in currentPublicEnvDef()" :key="item.key">
               <span class="param-label">{{ item.label }}</span>
               <el-select v-if="item.options" v-model="publicEnv[item.key]" size="small" style="width: 200px">
-                <el-option v-for="o in item.options" :key="o" :label="o" :value="o" />
+                <el-option v-for="o in item.options" :key="o" :label="item.optionLabels?.[o] || o" :value="o" />
               </el-select>
               <el-input v-else v-model="publicEnv[item.key]" :placeholder="item.placeholder || ''" size="small" style="width: 200px" />
             </template>
           </div>
           <div class="row-actions" style="margin-top: 16px; margin-bottom: 32px">
-            <el-button type="primary" :loading="savingPublic" @click="savePublicEnv">保存并重启</el-button>
+            <el-button type="primary" :loading="savingPublic" @click="savePublicEnv">保存本组参数并重启</el-button>
             <span v-if="publicSavedOk" class="ok-text">{{ restartMsg }}</span>
           </div>
 
@@ -138,8 +156,8 @@
           <!-- 已锁定 -->
           <template v-else-if="!sensitiveUnlocked">
             <div class="masked-rows">
-              <div v-for="key in cruiseSensitiveKeys" :key="key" class="masked-row">
-                <span class="key-name">{{ key }}</span>
+              <div v-for="key in currentSensitiveKeys()" :key="key" class="masked-row">
+                <span class="key-name">{{ credentialLabel(key) }}</span>
                 <span class="key-mask">••••••••••••••••</span>
               </div>
             </div>
@@ -153,13 +171,17 @@
           <!-- 已解锁 -->
           <template v-else>
             <div class="key-form">
-              <template v-for="key in cruiseSensitiveKeys" :key="key">
-                <span class="param-label key-name-label">{{ key }}</span>
-                <el-input v-model="sensitiveEnv[key]" type="password" show-password size="small" style="width: 320px" :placeholder="key" />
+              <template v-for="key in currentSensitiveKeys()" :key="key">
+                <span class="param-label key-name-label">{{ credentialLabel(key) }}</span>
+                <div class="credential-input">
+                  <el-input v-model="sensitiveEnv[key]" type="password" show-password size="small" style="width: 320px" :placeholder="credentialLabel(key)" />
+                  <el-button v-if="key.endsWith('DEEPSEEK_ARK_API_KEY')" size="small" plain
+                    :disabled="!canReuseDoubaoKey(key)" @click="reuseDoubaoKey(key)">使用本组豆包密钥</el-button>
+                </div>
               </template>
             </div>
             <div class="row-actions" style="margin-top: 20px">
-              <el-button type="primary" :loading="savingSensitive" @click="saveSensitiveEnv">保存并重启</el-button>
+              <el-button type="primary" :loading="savingSensitive" @click="saveSensitiveEnv">保存本组全部设置并重启</el-button>
               <el-button plain @click="lockSensitive">取消</el-button>
               <span v-if="sensitiveSavedOk" class="ok-text">{{ restartMsg }}</span>
             </div>
@@ -167,143 +189,55 @@
         </div>
       </template>
 
-      <!-- ── 弹幕设置 ─────────────────────────────────────────────────────── -->
-      <template v-else-if="activeSection === 'barrage'">
-        <div class="panel-header">弹幕设置</div>
+      <!-- ── 音频输出 ─────────────────────────────────────────────────────── -->
+      <template v-else-if="activeSection === 'audio'">
+        <div class="panel-header">音频输出</div>
         <div class="panel-body">
-          <div class="section-sub-title" style="margin-bottom: 12px; color: var(--text); font-size: 13px; font-weight: 600;">运行参数</div>
-          <div class="params-grid">
-            <template v-for="item in barragePublicEnvDef" :key="item.key">
-              <span class="param-label">{{ item.label }}</span>
-              <el-select v-if="item.options" v-model="publicEnv[item.key]" size="small" style="width: 200px">
-                <el-option v-for="o in item.options" :key="o" :label="o" :value="o" />
-              </el-select>
-              <el-input v-else v-model="publicEnv[item.key]" :placeholder="item.placeholder || ''" size="small" style="width: 200px" />
-            </template>
-          </div>
-          <div class="row-actions" style="margin-top: 16px; margin-bottom: 32px">
-            <el-button type="primary" :loading="savingPublic" @click="savePublicEnv">保存并重启</el-button>
-            <span v-if="publicSavedOk" class="ok-text">{{ restartMsg }}</span>
-          </div>
-
-          <div class="section-sub-title" style="margin-bottom: 12px; color: var(--text); font-size: 13px; font-weight: 600;">
-            API 密钥
-            <span class="lock-chip" :class="{ unlocked: sensitiveUnlocked }">
-              {{ sensitiveUnlocked ? '已解锁' : '已锁定' }}
-            </span>
-          </div>
-          
-          <!-- 首次使用：设置密码 -->
-          <template v-if="!hasPassword">
-            <p class="panel-note" style="margin-bottom: 16px">请先设置管理员密码以保护 API 密钥</p>
-            <div class="key-form">
-              <span class="param-label">新密码</span>
-              <el-input v-model="setupPwd1" type="password" show-password size="small" style="width: 240px" placeholder="至少 4 位" />
-              <span class="param-label">确认密码</span>
-              <el-input v-model="setupPwd2" type="password" show-password size="small" style="width: 240px" @keyup.enter="doSetPassword" />
-            </div>
-            <div class="row-actions" style="margin-top: 16px">
-              <el-button type="primary" :loading="settingPwd" :disabled="!setupPwd1 || !setupPwd2" @click="doSetPassword">设置密码</el-button>
-              <span v-if="pwdError" class="err-text">{{ pwdError }}</span>
-            </div>
-          </template>
-
-          <!-- 已锁定 -->
-          <template v-else-if="!sensitiveUnlocked">
-            <div class="masked-rows">
-              <div v-for="key in barrageSensitiveKeys" :key="key" class="masked-row">
-                <span class="key-name">{{ key }}</span>
-                <span class="key-mask">••••••••••••••••</span>
-              </div>
-            </div>
-            <div class="row-actions" style="margin-top: 16px">
-              <el-button :disabled="cooldownLeft > 0" @click="doUnlock">
-                {{ cooldownLeft > 0 ? `解锁（${cooldownLeft}s）` : '解锁' }}
-              </el-button>
-              <el-button plain @click="doChangePassword">修改密码</el-button>
-              <span v-if="unlockError" class="err-text">{{ unlockError }}</span>
-            </div>
-          </template>
-
-          <!-- 已解锁 -->
-          <template v-else>
-            <div class="key-form">
-              <template v-for="key in barrageSensitiveKeys" :key="key">
-                <span class="param-label key-name-label">{{ key }}</span>
-                <el-input
-                  v-model="sensitiveEnv[key]"
-                  type="password"
-                  show-password
-                  size="small"
-                  style="width: 320px"
-                  :placeholder="key"
-                />
-              </template>
-            </div>
-            <div class="row-actions" style="margin-top: 20px">
-              <el-button type="primary" :loading="savingSensitive" @click="saveSensitiveEnv">
-                保存并重启
-              </el-button>
-              <el-button plain @click="lockSensitive">取消</el-button>
-              <span v-if="sensitiveSavedOk" class="ok-text">{{ restartMsg }}</span>
-            </div>
-          </template>
-
-        </div>
-      </template>
-
-      <!-- ── 过渡音频 ─────────────────────────────────────────────────────── -->
-      <template v-else-if="activeSection === 'transit'">
-        <div class="panel-header">过渡音频</div>
-        <div class="panel-body">
-          <p class="panel-note" style="margin-bottom: 16px">
-            机器人行进期间循环播放，到达下一个点位时自动停止。
+          <p class="panel-note" style="margin: 0 0 18px">
+            统一控制巡游讲解、弹幕回复、过渡音频和手动播报测试的输出位置。
           </p>
-          <div class="params-grid">
-            <span class="param-label">启用过渡音频</span>
-            <el-switch v-model="transitConfig.enabled" />
 
-            <span class="param-label">音频类型</span>
-            <el-radio-group v-model="transitConfig.type" size="small">
-              <el-radio-button value="tts">TTS 文字</el-radio-button>
-              <el-radio-button value="mp3">MP3 文件</el-radio-button>
+          <div class="params-grid" style="max-width: 620px">
+            <span class="param-label">输出位置</span>
+            <el-radio-group v-model="audioOutputConfig.destination" size="small">
+              <el-radio-button value="local">本地</el-radio-button>
+              <el-radio-button value="robot">机器人端</el-radio-button>
             </el-radio-group>
 
-            <template v-if="transitConfig.type === 'tts'">
-              <span class="param-label" style="align-self: flex-start; padding-top: 6px">播报文字</span>
-              <div>
-                <el-input
-                  v-model="transitConfig.text"
-                  type="textarea"
-                  :rows="3"
-                  placeholder="例：正在前往下一个展区，请稍候……"
-                  style="width: 320px"
-                />
-                <p class="param-hint">经 LLM 改写后合成语音，每次行进改写一次并缓存循环</p>
-              </div>
-            </template>
+            <span class="param-label">机器人连接</span>
+            <span :class="robotAudioConnected ? 'ok-text' : 'err-text'">
+              {{ robotAudioConnected ? '已连接，可以传输音频' : '未连接；选择机器人端后将暂时无法播放' }}
+            </span>
 
-            <template v-else>
-              <span class="param-label">MP3 文件</span>
-              <div class="mp3-row">
-                <el-input
-                  v-model="transitConfig.mp3_file"
-                  placeholder="点击选择文件按钮选取"
-                  size="small"
-                  style="width: 240px"
-                  readonly
-                />
-                <el-button size="small" @click="pickTransitMp3">选择文件</el-button>
-              </div>
-            </template>
+            <span class="param-label">机器人音量</span>
+            <div class="robot-volume-control">
+              <el-slider
+                v-model="audioOutputConfig.robotVolumePercent"
+                :min="0"
+                :max="150"
+                :step="1"
+                show-input
+                input-size="small"
+              />
+              <span class="param-hint">仅影响机器人端播放；100% 为原始音量。</span>
+            </div>
+          </div>
+
+          <div class="audio-output-help">
+            <p><strong>本地：</strong>声音从运行本应用的电脑播放。</p>
+            <p><strong>机器人端：</strong>通过现有机器人连接实时发送。</p>
+            <p>切换输出位置会停止当前正在播放的声音，新设置从下一次播放开始生效。</p>
           </div>
 
           <div class="row-actions" style="margin-top: 20px">
-            <el-button type="primary" :loading="savingTransit" @click="saveTransitConfig">保存</el-button>
-            <span v-if="transitSavedOk" class="ok-text">已保存，下次发目标点时生效</span>
+            <el-button type="primary" :loading="savingAudioOutput" @click="saveAudioOutputConfig">
+              保存并立即切换
+            </el-button>
+            <span v-if="audioOutputSavedOk" class="ok-text">已保存并生效</span>
           </div>
         </div>
       </template>
+
 
     </div>
   </div>
@@ -312,17 +246,39 @@
 <script setup>
 import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessageBox, ElMessage }                   from 'element-plus'
+import AudioDiagnostics from './AudioDiagnostics.vue'
+import { DEFAULT_OCR_JUDGE_PROMPT } from '../../../../../src/phase2/ocr/judge-prompt.js'
 
 const props = defineProps({ wsRef: Object })
 
 const navItems = [
-  { key: 'cruise',  label: '导播设置'  },
-  { key: 'barrage', label: '弹幕设置'  },
+  { key: 'cruise',  label: '巡游讲解' },
+  { key: 'transit', label: '过渡音频与手动播报' },
+  { key: 'barrage', label: '弹幕回复' },
   { key: 'prompt',  label: '改写提示词' },
   { key: 'banned',  label: '违禁词管理'   },
-  { key: 'transit', label: '过渡音频'  },
+  { key: 'audio',   label: '音频输出'  },
+  { key: 'diagnostics', label: '音频诊断' },
 ]
 const activeSection = ref('cruise')
+const speechProfileTitles = { cruise: '巡游讲解', transit: '过渡音频与手动播报', barrage: '弹幕回复' }
+const speechProfileDescriptions = {
+  cruise: '用于机器人到达点位后的讲解：文字改写和语音合成。',
+  transit: '用于过渡音频的文字改写与语音合成，以及手动播报测试的语音合成。过渡文字、音频文件和启用开关在“播报控制 → 过渡音频”设置。',
+  barrage: '用于弹幕问题判断、回复生成和回复语音合成。',
+}
+function currentPublicEnvDef() {
+  return activeSection.value === 'transit' ? transitPublicEnvDef : activeSection.value === 'barrage' ? barragePublicEnvDef : cruisePublicEnvDef
+}
+function currentSensitiveKeys() {
+  return activeSection.value === 'transit' ? transitSensitiveKeys : activeSection.value === 'barrage' ? barrageSensitiveKeys : cruiseSensitiveKeys
+}
+function credentialLabel(key) {
+  return {
+    DOUBAO_API_KEY: '豆包 API 密钥', DEEPSEEK_API_KEY: 'DeepSeek 官方 API Key', DEEPSEEK_ARK_API_KEY: 'DeepSeek 火山方舟 API Key', QWEN_API_KEY: '千问 API Key（完整密钥）',
+    TTS_API_KEY: 'TTS API 密钥', TTS_APP_ID: 'TTS App ID（旧版鉴权）', TTS_ACCESS_TOKEN: 'TTS Access Token（旧版鉴权）',
+  }[key.replace(/^(TRANSIT_|BARRAGE_)/, '')] || key
+}
 
 // ── 违禁词 ─────────────────────────────────────────────────────────────────────
 const bannedWords  = ref([])
@@ -364,10 +320,19 @@ async function saveBannedWords() {
 
 // ── 改写提示词 ─────────────────────────────────────────────────────────────────
 const promptText   = ref('')
+const judgePromptText = ref(DEFAULT_OCR_JUDGE_PROMPT)
+const customJudgeEnabled = ref(false)
+const customJudgeText = ref('')
+function handleJudgeSwitch(enabled) {
+  if (enabled) judgePromptText.value = customJudgeText.value || DEFAULT_OCR_JUDGE_PROMPT
+  else { customJudgeText.value = judgePromptText.value; judgePromptText.value = DEFAULT_OCR_JUDGE_PROMPT }
+}
+watch(judgePromptText, value => { if (customJudgeEnabled.value) customJudgeText.value = value })
 const barrageNameText = ref('')
 const barrageGeneralText = ref('')
 const savingPrompt = ref(false)
 const promptSavedOk = ref(false)
+const promptLoaded = ref(false)
 
 // Constants for default system prompts
 const DEFAULT_CRUISE = '你是一名直播讲解员，请将讲解文本改写为口播版本，语言自然流畅。'
@@ -410,8 +375,15 @@ function isDefaultMatch(savedText, defaultText) {
 
 async function loadPrompt() {
   if (!window.api) return
+  promptLoaded.value = false
   try {
+    const judge = await window.api.readBarragePromptJudge()
+    if (!judge.ok) throw new Error(judge.error || '判断提示词读取失败')
+    judgePromptText.value = judge.text || DEFAULT_OCR_JUDGE_PROMPT
+    customJudgeEnabled.value = !isDefaultMatch(judge.text, DEFAULT_OCR_JUDGE_PROMPT)
+    if (customJudgeEnabled.value) customJudgeText.value = judge.text
     const res = await window.api.readLlmPrompt()
+    if (!res.ok) throw new Error(res.error || '导播提示词读取失败')
     if (res.ok) {
       const text = res.text
       if (isDefaultMatch(text, DEFAULT_CRUISE)) {
@@ -425,6 +397,7 @@ async function loadPrompt() {
     }
     
     const resName = await window.api.readBarragePromptName()
+    if (!resName.ok) throw new Error(resName.error || '精准回答提示词读取失败')
     if (resName.ok) {
       const text = resName.text
       if (isDefaultMatch(text, DEFAULT_BARRAGE_NAME)) {
@@ -438,6 +411,7 @@ async function loadPrompt() {
     }
     
     const resGen = await window.api.readBarragePromptGeneral()
+    if (!resGen.ok) throw new Error(resGen.error || '常规问答提示词读取失败')
     if (resGen.ok) {
       const text = resGen.text
       if (isDefaultMatch(text, DEFAULT_BARRAGE_GENERAL)) {
@@ -449,7 +423,8 @@ async function loadPrompt() {
         barrageGeneralText.value = text
       }
     }
-  } catch {}
+    promptLoaded.value = true
+  } catch (e) { ElMessage.error(e.message || '提示词读取失败，请重新进入设置页后再试') }
 }
 
 function handleCruiseSwitch(val) {
@@ -497,8 +472,12 @@ watch(barrageGeneralText, (newVal) => {
 
 async function savePrompt() {
   if (!window.api) return
+  if (!promptLoaded.value) { ElMessage.error('提示词尚未完整加载，请重新进入设置页后再试'); return }
   savingPrompt.value = true
+  promptSavedOk.value = false
   try {
+    const judge = await window.api.writeBarragePromptJudge(judgePromptText.value)
+    if (!judge.ok) throw new Error(judge.error || '判断提示词保存失败')
     const res = await window.api.writeLlmPrompt(promptText.value)
     if (!res.ok) throw new Error(res.error || '保存失败')
     
@@ -520,24 +499,42 @@ async function savePrompt() {
 
 // ── 运行参数 ───────────────────────────────────────────────────────────────────
 const cruisePublicEnvDef = [
+  { key: 'LLM_PROVIDER', label: 'LLM 主服务商', options: ['doubao', 'deepseek', 'qwen'], optionLabels: { doubao: '豆包', deepseek: 'DeepSeek', qwen: '千问 Qwen' } },
+  { key: 'LLM_FALLBACK_PROVIDER', label: 'LLM 备用服务商', options: ['none', 'doubao', 'deepseek', 'qwen'], optionLabels: { none: '不使用备用', doubao: '豆包', deepseek: 'DeepSeek', qwen: '千问 Qwen' } },
+  { key: 'QWEN_MODEL', label: '千问模型 ID', placeholder: 'qwen3.8-flash' },
   { key: 'DOUBAO_MODEL',   label: '豆包模型 ID',    placeholder: 'ep-xxxxxxxx' },
-  { key: 'DEEPSEEK_MODEL', label: 'DeepSeek 模型',  placeholder: 'deepseek-chat' },
-  { key: 'TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'BV001_streaming 或复刻音色 S_xxxxxxxxxx' },
+  { key: 'DEEPSEEK_PLATFORM', label: 'DeepSeek 接入平台', options: ['official', 'ark'], optionLabels: { official: 'DeepSeek 官方', ark: '火山方舟' } },
+  { key: 'DEEPSEEK_MODEL', label: 'DeepSeek 官方模型', placeholder: 'deepseek-chat' },
+  { key: 'DEEPSEEK_ARK_MODEL', label: 'DeepSeek 方舟模型 ID', placeholder: '方舟模型 ID 或 ep-…' },
+  { key: 'TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'V3 音色 ID 或复刻音色 S_xxxxxxxxxx' },
   { key: 'TTS_CLUSTER',   label: 'TTS Cluster', placeholder: 'volcano_tts（内置）/ volcano_icl（复刻）' },
+  { key: 'TTS_RESOURCE_ID', label: 'TTS Resource ID', placeholder: 'seed-tts-1.0 / seed-icl-1.0' },
+  { key: 'TTS_AUTH_MODE', label: 'TTS 鉴权方式', options: ['api-key', 'legacy'] },
+  { key: 'TTS_TIMEOUT_MS', label: 'TTS 基础超时 (ms)', placeholder: '30000（长文本会自动延长）' },
   { key: 'LLM_TIMEOUT_MS', label: 'LLM 超时 (ms)',  placeholder: '8000' },
+  { key: 'LLM_MAX_TOKENS', label: 'LLM 最大输出 tokens', placeholder: '4096' },
   { key: 'ROBOT_PORT',     label: '机器人监听端口',  placeholder: '8765' },
   { key: 'ROBOT_URL',      label: '机器人 WS 连接地址', placeholder: '空为监听模式 / 填写如 ws://192.168.1.100:8765' },
 ]
 
+const transitPublicEnvDef = cruisePublicEnvDef.filter(item => !item.key.startsWith('ROBOT_'))
+  .map(item => ({ ...item, key: 'TRANSIT_' + item.key }))
+
 const barragePublicEnvDef = [
+  ...cruisePublicEnvDef.filter(item => ['LLM_PROVIDER', 'LLM_FALLBACK_PROVIDER', 'QWEN_MODEL', 'DEEPSEEK_PLATFORM', 'DEEPSEEK_MODEL', 'DEEPSEEK_ARK_MODEL'].includes(item.key))
+    .map(item => ({ ...item, key: 'BARRAGE_' + item.key })),
   { key: 'BARRAGE_DOUBAO_MODEL',   label: '豆包模型 ID',    placeholder: 'ep-xxxxxxxx' },
-  { key: 'BARRAGE_DEEPSEEK_MODEL', label: 'DeepSeek 模型',  placeholder: 'deepseek-chat' },
-  { key: 'BARRAGE_TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'BV001_streaming 或复刻音色 S_xxxxxxxxxx' },
+  { key: 'BARRAGE_TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'V3 音色 ID 或复刻音色 S_xxxxxxxxxx' },
   { key: 'BARRAGE_TTS_CLUSTER',   label: 'TTS Cluster', placeholder: 'volcano_tts（内置）/ volcano_icl（复刻）' },
+  { key: 'BARRAGE_TTS_RESOURCE_ID', label: 'TTS Resource ID', placeholder: 'seed-tts-1.0 / seed-icl-1.0' },
+  { key: 'BARRAGE_TTS_AUTH_MODE', label: 'TTS 鉴权方式', options: ['api-key', 'legacy'] },
+  { key: 'BARRAGE_TTS_TIMEOUT_MS', label: 'TTS 基础超时 (ms)', placeholder: '30000（长文本会自动延长）' },
   { key: 'BARRAGE_LLM_TIMEOUT_MS', label: 'LLM 超时 (ms)',  placeholder: '8000' },
+  { key: 'BARRAGE_LLM_MAX_TOKENS', label: 'LLM 最大输出 tokens', placeholder: '500' },
 ]
 
 const publicEnv    = reactive({})
+const publicEnvLoaded = ref(false)
 const savingPublic = ref(false)
 const publicSavedOk = ref(false)
 
@@ -545,15 +542,26 @@ async function loadPublicEnv() {
   if (!window.api) return
   try {
     const res = await window.api.readPublicEnv()
-    if (res.ok) Object.assign(publicEnv, res.env)
+    if (res.ok) {
+      Object.assign(publicEnv, res.env)
+      for (const prefix of ['', 'TRANSIT_', 'BARRAGE_']) {
+        publicEnv[prefix + 'LLM_PROVIDER'] ||= 'doubao'
+        publicEnv[prefix + 'LLM_FALLBACK_PROVIDER'] ||= 'deepseek'
+        publicEnv[prefix + 'QWEN_MODEL'] ||= 'qwen3.8-flash'
+        publicEnv[prefix + 'DEEPSEEK_PLATFORM'] ||= 'official'
+      }
+      publicEnvLoaded.value = true
+    }
   } catch {}
 }
 
 async function savePublicEnv() {
   if (!window.api) return
+  if (!publicEnvLoaded.value) { ElMessage.error('设置尚未加载，请稍后重试'); return }
   savingPublic.value = true
   try {
-    const res = await window.api.writePublicEnv({ ...publicEnv })
+    const changes = Object.fromEntries(currentPublicEnvDef().map(({ key }) => [key, publicEnv[key] ?? '']))
+    const res = await window.api.writePublicEnv(changes)
     if (!res.ok) { ElMessage.error(res.error || '保存失败'); return }
     publicSavedOk.value = true
     await triggerRestart()
@@ -582,14 +590,16 @@ async function triggerRestart() {
 
 // ── API 密钥 ───────────────────────────────────────────────────────────────────
 const cruiseSensitiveKeys = [
-  'DOUBAO_API_KEY', 'DEEPSEEK_API_KEY', 'QWEN_API_KEY',
-  'TTS_APP_ID', 'TTS_ACCESS_TOKEN',
+  'DOUBAO_API_KEY', 'DEEPSEEK_API_KEY', 'DEEPSEEK_ARK_API_KEY', 'QWEN_API_KEY',
+  'TTS_APP_ID', 'TTS_ACCESS_TOKEN', 'TTS_API_KEY',
   // 'NGROK_AUTHTOKEN',
 ]
 
+const transitSensitiveKeys = cruiseSensitiveKeys.map(key => 'TRANSIT_' + key)
+
 const barrageSensitiveKeys = [
-  'BARRAGE_DOUBAO_API_KEY', 'BARRAGE_DEEPSEEK_API_KEY', 'BARRAGE_QWEN_API_KEY',
-  'BARRAGE_TTS_APP_ID', 'BARRAGE_TTS_ACCESS_TOKEN'
+  'BARRAGE_DOUBAO_API_KEY', 'BARRAGE_DEEPSEEK_API_KEY', 'BARRAGE_DEEPSEEK_ARK_API_KEY', 'BARRAGE_QWEN_API_KEY',
+  'BARRAGE_TTS_APP_ID', 'BARRAGE_TTS_ACCESS_TOKEN', 'BARRAGE_TTS_API_KEY'
 ]
 
 const hasPassword       = ref(false)
@@ -607,6 +617,18 @@ let failedAttempts = 0
 const cooldownLeft = ref(0)
 let cooldownTimer  = null
 let _sessionPwd    = ''
+
+function canReuseDoubaoKey(key) {
+  return sensitiveUnlocked.value && !savingSensitive.value && currentSensitiveKeys().includes(key)
+    && key.endsWith('DEEPSEEK_ARK_API_KEY')
+    && Boolean(sensitiveEnv[key.replace(/DEEPSEEK_ARK_API_KEY$/, 'DOUBAO_API_KEY')]?.trim())
+}
+
+function reuseDoubaoKey(key) {
+  if (!canReuseDoubaoKey(key)) return
+  sensitiveEnv[key] = sensitiveEnv[key.replace(/DEEPSEEK_ARK_API_KEY$/, 'DOUBAO_API_KEY')].trim()
+  ElMessage.success('已填入本组豆包密钥，保存本组设置后生效')
+}
 
 async function loadHasPassword() {
   if (!window.api) return
@@ -631,9 +653,10 @@ async function doSetPassword() {
   // Auto-unlock: skip redundant re-entry of password
   try {
     const envRes = await window.api.readSensitiveEnv(setupPwd1.value)
+    if (!envRes.ok) { pwdError.value = envRes.error || '密钥加载失败，请重新解锁'; return }
     _sessionPwd = setupPwd1.value
-    if (envRes.ok) Object.assign(sensitiveEnv, envRes.env)
-  } catch {}
+    Object.assign(sensitiveEnv, envRes.env)
+  } catch (error) { pwdError.value = error.message; return }
   setupPwd1.value = setupPwd2.value = ''
   sensitiveUnlocked.value = true
 }
@@ -700,9 +723,14 @@ async function doChangePassword() {
 
 async function saveSensitiveEnv() {
   if (!window.api) return
+  if (!publicEnvLoaded.value || !sensitiveUnlocked.value) { ElMessage.error('请先加载设置并解锁 API 密钥'); return }
   savingSensitive.value = true
   try {
-    const res = await window.api.writeSensitiveEnv(_sessionPwd, { ...sensitiveEnv })
+    const changes = Object.fromEntries([
+      ...currentPublicEnvDef().map(({ key }) => [key, publicEnv[key] ?? '']),
+      ...currentSensitiveKeys().map(key => [key, sensitiveEnv[key] ?? '']),
+    ])
+    const res = await window.api.writeSpeechProfile(_sessionPwd, activeSection.value, changes)
     if (!res.ok) { ElMessage.error(res.error || '保存失败'); return }
     sensitiveSavedOk.value = true
     lockSensitive()
@@ -720,48 +748,85 @@ function lockSensitive() {
   _sessionPwd = ''
   for (const k of cruiseSensitiveKeys) sensitiveEnv[k] = ''
   for (const k of barrageSensitiveKeys) sensitiveEnv[k] = ''
+  for (const k of transitSensitiveKeys) sensitiveEnv[k] = ''
 }
 
-// ── 过渡音频 ─────────────────────────────────────────────────────────────────
-const transitConfig  = reactive({ enabled: false, type: 'tts', text: '', mp3_file: '' })
-const savingTransit  = ref(false)
-const transitSavedOk = ref(false)
+// ── 音频输出 ─────────────────────────────────────────────────────────────────
+const audioOutputConfig  = reactive({ destination: 'local', robotVolumePercent: 100 })
+const robotAudioConnected = ref(false)
+const savingAudioOutput  = ref(false)
+const audioOutputSavedOk = ref(false)
+let audioOutputSocket = null
+let audioOutputSaveTimer = null
 
-function loadTransitConfig() {
-  const ws = props.wsRef
-  if (!ws || ws.readyState !== WebSocket.OPEN) return
-
-  const handler = (event) => {
-    try {
-      const msg = JSON.parse(event.data)
-      if (msg.type === 'TRANSIT_CONFIG') {
-        Object.assign(transitConfig, msg.data)
-        ws.removeEventListener('message', handler)
+function handleAudioOutputMessage(event) {
+  try {
+    const msg = JSON.parse(event.data)
+    if (msg.type === 'AUDIO_OUTPUT_CONFIG') {
+      if (msg.data?.destination) audioOutputConfig.destination = msg.data.destination
+      if (Number.isInteger(msg.data?.robotVolumePercent)) {
+        audioOutputConfig.robotVolumePercent = Math.min(150, Math.max(0, msg.data.robotVolumePercent))
       }
-    } catch { /* ignore */ }
+      if (typeof msg.data?.robotConnected === 'boolean') {
+        robotAudioConnected.value = msg.data.robotConnected
+      }
+      if (savingAudioOutput.value) {
+        savingAudioOutput.value = false
+        audioOutputSavedOk.value = true
+        clearTimeout(audioOutputSaveTimer)
+        setTimeout(() => { audioOutputSavedOk.value = false }, 3000)
+      }
+    } else if (msg.type === 'AUDIO_OUTPUT_STATUS') {
+      robotAudioConnected.value = !!msg.data?.robotConnected
+    } else if (msg.type === 'ROBOT_CONNECTED') {
+      robotAudioConnected.value = true
+    } else if (msg.type === 'ROBOT_DISCONNECTED') {
+      robotAudioConnected.value = false
+    }
+  } catch { /* ignore */ }
+}
+
+function attachAudioOutputSocket(ws) {
+  if (audioOutputSocket === ws) return
+  if (audioOutputSocket) {
+    audioOutputSocket.removeEventListener('message', handleAudioOutputMessage)
   }
-  ws.addEventListener('message', handler)
-  ws.send(JSON.stringify({ type: 'GET_TRANSIT_CONFIG' }))
-  // Auto-cleanup after 5s in case no response
-  setTimeout(() => ws.removeEventListener('message', handler), 5000)
+  audioOutputSocket = ws || null
+  if (!audioOutputSocket) return
+
+  audioOutputSocket.addEventListener('message', handleAudioOutputMessage)
+  const requestConfig = () => {
+    if (audioOutputSocket?.readyState === WebSocket.OPEN) {
+      audioOutputSocket.send(JSON.stringify({ type: 'GET_AUDIO_OUTPUT_CONFIG' }))
+    }
+  }
+  if (audioOutputSocket.readyState === WebSocket.OPEN) requestConfig()
+  else audioOutputSocket.addEventListener('open', requestConfig, { once: true })
 }
 
-async function pickTransitMp3() {
-  const filePath = await window.api.selectMp3File()
-  if (filePath) transitConfig.mp3_file = filePath
-}
+watch(() => props.wsRef, attachAudioOutputSocket, { immediate: true })
 
-async function saveTransitConfig() {
+function saveAudioOutputConfig() {
   const ws = props.wsRef
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     ElMessage.error('未连接后端')
     return
   }
-  savingTransit.value = true
-  ws.send(JSON.stringify({ type: 'SET_TRANSIT_CONFIG', data: { ...transitConfig } }))
-  transitSavedOk.value = true
-  setTimeout(() => { transitSavedOk.value = false }, 3000)
-  savingTransit.value = false
+  savingAudioOutput.value = true
+  audioOutputSavedOk.value = false
+  ws.send(JSON.stringify({
+    type: 'SET_AUDIO_OUTPUT_CONFIG',
+    data: {
+      destination: audioOutputConfig.destination,
+      robotVolumePercent: audioOutputConfig.robotVolumePercent,
+    },
+  }))
+  clearTimeout(audioOutputSaveTimer)
+  audioOutputSaveTimer = setTimeout(() => {
+    if (!savingAudioOutput.value) return
+    savingAudioOutput.value = false
+    ElMessage.error('保存音频输出设置超时，请检查后端连接')
+  }, 5000)
 }
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────────
@@ -770,12 +835,13 @@ onMounted(() => {
   loadPrompt()
   loadPublicEnv()
   loadHasPassword()
-  loadTransitConfig()
 })
 
 onBeforeUnmount(() => {
   lockSensitive()
   clearInterval(cooldownTimer)
+  clearTimeout(audioOutputSaveTimer)
+  audioOutputSocket?.removeEventListener('message', handleAudioOutputMessage)
 })
 </script>
 
@@ -789,8 +855,8 @@ onBeforeUnmount(() => {
 
 /* ── Left nav ── */
 .settings-nav {
-  width: 148px;
-  min-width: 148px;
+  width: 190px;
+  min-width: 190px;
   border-right: 1px solid var(--border);
   padding: 12px 0;
   background: var(--bg2);
@@ -854,6 +920,22 @@ onBeforeUnmount(() => {
   color: var(--text-dim);
 }
 .mp3-row { display: flex; gap: 8px; align-items: center; }
+.audio-output-help {
+  max-width: 680px;
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg3);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.audio-output-help p + p { margin-top: 6px; }
+.audio-output-help strong { color: var(--text); }
+.robot-volume-control {
+  width: min(360px, 100%);
+}
 
 /* ── Lock chip ── */
 .lock-chip {
@@ -906,6 +988,12 @@ onBeforeUnmount(() => {
 }
 
 /* ── Key form ── */
+.credential-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
 .key-form {
   display: grid;
   grid-template-columns: 160px 1fr;
