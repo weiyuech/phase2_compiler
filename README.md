@@ -63,7 +63,7 @@ robot-live-system/
 │   ├── robot/listener.js      # 机器人 WebSocket（远程客户端 / 本地监听）
 │   ├── task/manager.js        # 巡游清单驱动
 │   ├── knowledge/             # 知识库（flatfile / sqlite）
-│   ├── llm/                   # LLM 改写（豆包主 + DeepSeek 备）
+│   ├── llm/                   # LLM 改写（豆包 / DeepSeek / 千问，可选择主备）
 │   ├── tts/                   # TTS 合成 + AudioPlayer
 │   ├── transit/manager.js     # 过渡音频管理
 │   ├── phase2/                # 弹幕 OCR、冷却调度与回复（生产功能）
@@ -220,11 +220,35 @@ data/flatfiles/{map_name}/{path_name}/{goal_id}.json
 弹幕组使用 `BARRAGE_` 前缀。新配置使用 `SPEECH_PROFILES_VERSION=1` 标记独立配置语义。
 没有标记的旧配置在安装版启动或设置保存时迁移；直接启动后端时按相同规则解析。
 
+三组设置均可选择 LLM 主服务商和备用服务商：豆包、DeepSeek、千问，备用也可关闭。
+默认保持豆包 → DeepSeek；主备相同时只请求一次。选择千问时，填写完整 API Key 和
+`QWEN_MODEL=qwen3.8-flash`；无需账号数字或带星号的密钥摘要。请求发送至
+`https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions`，关闭思考模式以减少播报等待。
+只需配置实际选用的主备服务商。千问参与巡游/过渡改写、弹幕新增问题判断与回答生成；
+手动播报仍直接调用 TTS。LLM 密钥不能代替 TTS 凭据。
+
+DeepSeek 支持官方与火山方舟：每组的 `DEEPSEEK_PLATFORM` 选择 `official`（默认）或 `ark`，
+同时在主服务商或备用服务商中选择 `deepseek`。官方使用 `DEEPSEEK_API_KEY` 和 `DEEPSEEK_MODEL`，
+请求发送至 `https://api.deepseek.com/chat/completions`。方舟使用独立的 `DEEPSEEK_ARK_API_KEY`
+和 `DEEPSEEK_ARK_MODEL`，请求发送至 `https://ark.cn-beijing.volces.com/api/v3/chat/completions`。
+方舟模型 ID 或推理接入点 ID 必须从控制台填写；不会用官方模型名或官方密钥代替。
+可以将已有且获授权的火山方舟 Key 填入方舟专用密钥栏；切换平台会保留两套配置，
+但只使用所选平台的配置。三个功能组均独立选择，留空不会借用其他组的密钥。
+本次已实测方舟模型 `deepseek-v4-flash-ga-260731`；使用前需确认自己的方舟账号已开通该模型。
+
 | 变量 | 说明 | 必填 |
 |---|---|---|
-| `DOUBAO_API_KEY` | 火山方舟 LLM Key | 要 LLM 必填 |
-| `DOUBAO_MODEL` | 推理接入点 ID（ep- 开头） | 要 LLM 必填 |
-| `DEEPSEEK_API_KEY` | DeepSeek 备用 Key | 可选 |
+| `LLM_PROVIDER` | `doubao` / `deepseek` / `qwen`；默认 `doubao` | 可选 |
+| `LLM_FALLBACK_PROVIDER` | `none` / `doubao` / `deepseek` / `qwen`；默认 `deepseek` | 可选 |
+| `QWEN_API_KEY` | 千问完整 API Key | 选用千问时必填 |
+| `QWEN_MODEL` | 千问模型，默认 `qwen3.8-flash` | 可选 |
+| `DOUBAO_API_KEY` | 火山方舟 LLM Key | 选用豆包时必填 |
+| `DOUBAO_MODEL` | 模型 ID 或推理接入点 ID | 选用豆包时必填 |
+| `DEEPSEEK_PLATFORM` | `official`（默认）或 `ark` | 可选 |
+| `DEEPSEEK_API_KEY` | DeepSeek 官方 API Key | 选用官方 DeepSeek 时必填 |
+| `DEEPSEEK_MODEL` | 官方模型，默认 `deepseek-chat` | 可选 |
+| `DEEPSEEK_ARK_API_KEY` | 火山方舟 API Key | 选用方舟 DeepSeek 时必填 |
+| `DEEPSEEK_ARK_MODEL` | 方舟 DeepSeek 模型 ID 或推理接入点 ID | 选用方舟 DeepSeek 时必填 |
 | `TTS_API_KEY` | 火山引擎 V3 TTS API Key | 要语音必填（或使用 App ID + Access Token） |
 | `TTS_APP_ID` | 火山引擎 TTS App ID | 使用 App ID 鉴权时必填 |
 | `TTS_ACCESS_TOKEN` | 火山引擎 TTS Access Token | 使用 App ID 鉴权时必填 |

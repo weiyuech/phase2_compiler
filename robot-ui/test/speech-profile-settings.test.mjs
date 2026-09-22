@@ -61,6 +61,13 @@ for (const [profile, prefix] of [['cruise', ''], ['transit', 'TRANSIT_'], ['barr
     await h.state.doUnlock()
     h.state.activeSection.value = profile
     h.state.publicEnv[prefix + 'TTS_VOICE_TYPE'] = 'new-voice'
+    h.state.publicEnv[prefix + 'LLM_PROVIDER'] = 'qwen'
+    h.state.publicEnv[prefix + 'LLM_FALLBACK_PROVIDER'] = 'none'
+    h.state.publicEnv[prefix + 'QWEN_MODEL'] = 'qwen3.8-flash'
+    h.state.publicEnv[prefix + 'DEEPSEEK_PLATFORM'] = 'ark'
+    h.state.publicEnv[prefix + 'DEEPSEEK_ARK_MODEL'] = 'ep-test'
+    h.state.sensitiveEnv[prefix + 'DEEPSEEK_ARK_API_KEY'] = 'synthetic-ark-key'
+    h.state.sensitiveEnv[prefix + 'QWEN_API_KEY'] = 'synthetic-qwen-key'
     h.state.sensitiveEnv[prefix + 'TTS_API_KEY'] = 'reused-api-key'
     await h.state.saveSensitiveEnv()
     assert.deepEqual(h.errors, [])
@@ -68,6 +75,13 @@ for (const [profile, prefix] of [['cruise', ''], ['transit', 'TRANSIT_'], ['barr
     assert.equal(h.saved[0].profile, profile)
     assert.equal(h.saved[0].changes[prefix + 'TTS_VOICE_TYPE'], 'new-voice')
     assert.equal(h.saved[0].changes[prefix + 'TTS_API_KEY'], 'reused-api-key')
+    assert.equal(h.saved[0].changes[prefix + 'LLM_PROVIDER'], 'qwen')
+    assert.equal(h.saved[0].changes[prefix + 'LLM_FALLBACK_PROVIDER'], 'none')
+    assert.equal(h.saved[0].changes[prefix + 'QWEN_MODEL'], 'qwen3.8-flash')
+    assert.equal(h.saved[0].changes[prefix + 'QWEN_API_KEY'], 'synthetic-qwen-key')
+    assert.equal(h.saved[0].changes[prefix + 'DEEPSEEK_PLATFORM'], 'ark')
+    assert.equal(h.saved[0].changes[prefix + 'DEEPSEEK_ARK_MODEL'], 'ep-test')
+    assert.equal(h.saved[0].changes[prefix + 'DEEPSEEK_ARK_API_KEY'], 'synthetic-ark-key')
     for (const other of ['cruise', 'transit', 'barrage'].filter(item => item !== profile)) {
       for (const key of speechProfileKeys(other, { secrets: true })) {
         assert.equal(h.saved[0].changes[key], undefined)

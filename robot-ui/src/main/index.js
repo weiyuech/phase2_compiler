@@ -56,6 +56,7 @@ const ADMIN_PATH        = join(CONFIG_DIR, 'admin.json')
 const ENV_PATH          = app.isPackaged ? join(USER_DATA_DIR, '.env') : join(PROJECT_ROOT, '.env')
 
 const PUBLIC_ENV_KEYS   = [
+  ...speechProfileKeys('cruise'), ...speechProfileKeys('barrage'),
   ...speechProfileKeys('transit'),
   'KB_PROVIDER', 'DOUBAO_MODEL', 'DEEPSEEK_MODEL', 'TTS_VOICE_TYPE', 'TTS_CLUSTER', 'TTS_RESOURCE_ID', 'TTS_AUTH_MODE',
   'DUCK_VOLUME', 'DUCK_FADE_MS', 'LLM_TIMEOUT_MS', 'LLM_MAX_TOKENS', 'TTS_TIMEOUT_MS', 'ROBOT_PORT', 'ROBOT_URL',
@@ -64,6 +65,7 @@ const PUBLIC_ENV_KEYS   = [
   'BARRAGE_TTS_RESOURCE_ID', 'BARRAGE_TTS_AUTH_MODE', 'BARRAGE_TTS_TIMEOUT_MS', 'BARRAGE_LLM_TIMEOUT_MS', 'BARRAGE_LLM_MAX_TOKENS'
 ]
 const SENSITIVE_ENV_KEYS = [
+  ...speechProfileKeys('cruise', { secrets: true }), ...speechProfileKeys('barrage', { secrets: true }),
   ...speechProfileKeys('transit', { secrets: true }),
   'DOUBAO_API_KEY', 'DEEPSEEK_API_KEY', 'QWEN_API_KEY',
   'TTS_APP_ID', 'TTS_ACCESS_TOKEN', 'TTS_API_KEY',
@@ -98,6 +100,13 @@ function writeEnvFields(raw, changes) {
   // 那样 write-public-env（不需要密码）就能写入 SENSITIVE 的密钥，
   // 甚至写入 FFPLAY_PATH 让后端去启动任意程序。这里直接挡掉。
   for (const [key, val] of Object.entries(changes)) {
+    if (/^(?:(?:TRANSIT|BARRAGE)_)?DEEPSEEK_PLATFORM$/.test(key) && !['', 'official', 'ark'].includes(val)) {
+      throw new Error('DeepSeek 平台无效，请从下拉列表选择')
+    }
+    if (/^(?:(?:TRANSIT|BARRAGE)_)?LLM_(?:FALLBACK_)?PROVIDER$/.test(key)) {
+      const allowed = key.endsWith('FALLBACK_PROVIDER') ? ['', 'none', 'doubao', 'deepseek', 'qwen'] : ['', 'doubao', 'deepseek', 'qwen']
+      if (!allowed.includes(val)) throw new Error('LLM 服务商无效，请从下拉列表选择')
+    }
     if (/[\r\n]/.test(String(val))) {
       throw new Error(`配置项 ${key} 的值不能包含换行`)
     }

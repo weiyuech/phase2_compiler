@@ -11,7 +11,7 @@ export class DoubaoProvider {
     this.maxTokens = Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : 4096
   }
 
-  async rewrite(body, goalObject) {
+  async rewrite(body, goalObject, { signal } = {}) {
     if (!this.apiKey || !this.model) {
       throw new Error('豆包未配置，请检查 DOUBAO_API_KEY 和 DOUBAO_MODEL')
     }
@@ -19,6 +19,7 @@ export class DoubaoProvider {
     const { system, user } = buildPrompt(body, goalObject)
 
     const res = await fetch(API_URL, {
+      signal,
       method: 'POST',
       headers: {
         'Content-Type':  'application/json',

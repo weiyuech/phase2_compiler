@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { LLMRewriter } from '../src/llm/index.js'
 import { DoubaoProvider } from '../src/llm/providers/doubao.js'
 import { DeepseekProvider } from '../src/llm/providers/deepseek.js'
+import { QwenProvider } from '../src/llm/providers/qwen.js'
 
 test('barrage judge timeout aborts primary before invoking fallback', async t => {
   const llm = new LLMRewriter({ LLM_TIMEOUT_MS: '20' })
@@ -39,11 +40,11 @@ test('successful custom requests clear their timer and preserve the exact judge 
   assert.equal(cleared, true)
 })
 
-for (const Provider of [DoubaoProvider, DeepseekProvider]) {
+for (const Provider of [DoubaoProvider, DeepseekProvider, QwenProvider]) {
   test(Provider.name + ' custom request carries cancellation through fetch', async t => {
     const controller = new AbortController()
     const provider = new Provider({ DOUBAO_API_KEY: 'synthetic-key', DOUBAO_MODEL: 'synthetic-model',
-      DEEPSEEK_API_KEY: 'synthetic-key' })
+      DEEPSEEK_API_KEY: 'synthetic-key', QWEN_API_KEY: 'synthetic-key' })
     let calls = 0
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
       calls++

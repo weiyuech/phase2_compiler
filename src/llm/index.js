@@ -1,11 +1,17 @@
 import { DoubaoProvider }  from './providers/doubao.js'
 import { DeepseekProvider } from './providers/deepseek.js'
+import { QwenProvider } from './providers/qwen.js'
 import { BannedWordFilter } from './banned-word-filter.js'
 
 export class LLMRewriter {
   constructor(config = {}) {
-    this.primary   = new DoubaoProvider(config)
-    this.fallback  = new DeepseekProvider(config)
+    const providers = { doubao: DoubaoProvider, deepseek: DeepseekProvider, qwen: QwenProvider }
+    const primary = (config.LLM_PROVIDER ?? process.env.LLM_PROVIDER) || 'doubao'
+    const fallback = (config.LLM_FALLBACK_PROVIDER ?? process.env.LLM_FALLBACK_PROVIDER) || 'deepseek'
+    if (!Object.hasOwn(providers, primary)) throw new Error('LLM 主服务商无效，请选择 doubao、deepseek 或 qwen')
+    if (fallback !== 'none' && !Object.hasOwn(providers, fallback)) throw new Error('LLM 备用服务商无效，请选择 none、doubao、deepseek 或 qwen')
+    this.primary = new providers[primary](config)
+    this.fallback = fallback === 'none' || fallback === primary ? null : new providers[fallback](config)
     this.filter    = new BannedWordFilter(
       (config.BANNED_WORDS_FILE ?? process.env.BANNED_WORDS_FILE) || './config/banned-words.txt'
     )
@@ -36,16 +42,16 @@ export class LLMRewriter {
   }
 
   async _tryProvider(provider, body, goalObject) {
+    if (!provider) return null
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(new Error('timeout')), this.timeoutMs)
     try {
-      const text = await Promise.race([
-        provider.rewrite(body, goalObject),
-        this._timeout()
-      ])
+      const text = await provider.rewrite(body, goalObject, { signal: controller.signal })
       return { text, provider: provider.name }
     } catch (err) {
       console.error(`[LLM] Rewrite with ${provider.name} failed:`, err.message)
       return null
-    }
+    } finally { clearTimeout(timer) }
   }
 
   async rewriteBarrage(system, user) {
@@ -72,6 +78,7 @@ export class LLMRewriter {
   }
 
   async _tryProviderCustom(provider, system, user) {
+    if (!provider) return null
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('timeout')), this.timeoutMs)
     try {
@@ -86,9 +93,4 @@ export class LLMRewriter {
     } finally { clearTimeout(timer) }
   }
 
-  _timeout() {
-    return new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('timeout')), this.timeoutMs)
-    )
-  }
 }

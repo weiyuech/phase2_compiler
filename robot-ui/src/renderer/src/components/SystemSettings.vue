@@ -114,12 +114,14 @@
         <div class="panel-body">
           <p class="panel-note">{{ speechProfileDescriptions[activeSection] }}</p>
           <p class="panel-note">三组配置独立保存；可以填写相同凭据，留空不会自动使用其他组的凭据。使用旧版配置升级时，已复制原有有效配置。</p>
+          <p class="panel-note">LLM 按本组“主服务商 → 备用服务商”调用。选千问时填写完整 API Key 和模型（默认 qwen3.8-flash）；无需填写账号数字或带星号的密钥摘要。千问只负责文字生成，语音仍使用下方 TTS 配置。</p>
+          <p class="panel-note">选 DeepSeek 时，请选择“官方”或“火山方舟”，并填写对应平台的密钥和模型。两套凭据分别保存；方舟需填写控制台的模型 ID 或推理接入点 ID，可在方舟专用密钥栏填写已有的火山方舟 API Key。</p>
           <div class="section-sub-title" style="margin-bottom: 12px; color: var(--text); font-size: 13px; font-weight: 600;">运行参数</div>
           <div class="params-grid">
             <template v-for="item in currentPublicEnvDef()" :key="item.key">
               <span class="param-label">{{ item.label }}</span>
               <el-select v-if="item.options" v-model="publicEnv[item.key]" size="small" style="width: 200px">
-                <el-option v-for="o in item.options" :key="o" :label="o" :value="o" />
+                <el-option v-for="o in item.options" :key="o" :label="item.optionLabels?.[o] || o" :value="o" />
               </el-select>
               <el-input v-else v-model="publicEnv[item.key]" :placeholder="item.placeholder || ''" size="small" style="width: 200px" />
             </template>
@@ -269,7 +271,7 @@ function currentSensitiveKeys() {
 }
 function credentialLabel(key) {
   return {
-    DOUBAO_API_KEY: '豆包 API 密钥', DEEPSEEK_API_KEY: 'DeepSeek API 密钥', QWEN_API_KEY: 'Qwen API 密钥（预留）',
+    DOUBAO_API_KEY: '豆包 API 密钥', DEEPSEEK_API_KEY: 'DeepSeek 官方 API Key', DEEPSEEK_ARK_API_KEY: 'DeepSeek 火山方舟 API Key', QWEN_API_KEY: '千问 API Key（完整密钥）',
     TTS_API_KEY: 'TTS API 密钥', TTS_APP_ID: 'TTS App ID（旧版鉴权）', TTS_ACCESS_TOKEN: 'TTS Access Token（旧版鉴权）',
   }[key.replace(/^(TRANSIT_|BARRAGE_)/, '')] || key
 }
@@ -493,8 +495,13 @@ async function savePrompt() {
 
 // ── 运行参数 ───────────────────────────────────────────────────────────────────
 const cruisePublicEnvDef = [
+  { key: 'LLM_PROVIDER', label: 'LLM 主服务商', options: ['doubao', 'deepseek', 'qwen'], optionLabels: { doubao: '豆包', deepseek: 'DeepSeek', qwen: '千问 Qwen' } },
+  { key: 'LLM_FALLBACK_PROVIDER', label: 'LLM 备用服务商', options: ['none', 'doubao', 'deepseek', 'qwen'], optionLabels: { none: '不使用备用', doubao: '豆包', deepseek: 'DeepSeek', qwen: '千问 Qwen' } },
+  { key: 'QWEN_MODEL', label: '千问模型 ID', placeholder: 'qwen3.8-flash' },
   { key: 'DOUBAO_MODEL',   label: '豆包模型 ID',    placeholder: 'ep-xxxxxxxx' },
-  { key: 'DEEPSEEK_MODEL', label: 'DeepSeek 模型',  placeholder: 'deepseek-chat' },
+  { key: 'DEEPSEEK_PLATFORM', label: 'DeepSeek 接入平台', options: ['official', 'ark'], optionLabels: { official: 'DeepSeek 官方', ark: '火山方舟' } },
+  { key: 'DEEPSEEK_MODEL', label: 'DeepSeek 官方模型', placeholder: 'deepseek-chat' },
+  { key: 'DEEPSEEK_ARK_MODEL', label: 'DeepSeek 方舟模型 ID', placeholder: '方舟模型 ID 或 ep-…' },
   { key: 'TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'V3 音色 ID 或复刻音色 S_xxxxxxxxxx' },
   { key: 'TTS_CLUSTER',   label: 'TTS Cluster', placeholder: 'volcano_tts（内置）/ volcano_icl（复刻）' },
   { key: 'TTS_RESOURCE_ID', label: 'TTS Resource ID', placeholder: 'seed-tts-1.0 / seed-icl-1.0' },
@@ -510,8 +517,9 @@ const transitPublicEnvDef = cruisePublicEnvDef.filter(item => !item.key.startsWi
   .map(item => ({ ...item, key: 'TRANSIT_' + item.key }))
 
 const barragePublicEnvDef = [
+  ...cruisePublicEnvDef.filter(item => ['LLM_PROVIDER', 'LLM_FALLBACK_PROVIDER', 'QWEN_MODEL', 'DEEPSEEK_PLATFORM', 'DEEPSEEK_MODEL', 'DEEPSEEK_ARK_MODEL'].includes(item.key))
+    .map(item => ({ ...item, key: 'BARRAGE_' + item.key })),
   { key: 'BARRAGE_DOUBAO_MODEL',   label: '豆包模型 ID',    placeholder: 'ep-xxxxxxxx' },
-  { key: 'BARRAGE_DEEPSEEK_MODEL', label: 'DeepSeek 模型',  placeholder: 'deepseek-chat' },
   { key: 'BARRAGE_TTS_VOICE_TYPE', label: 'TTS 音色 ID',  placeholder: 'V3 音色 ID 或复刻音色 S_xxxxxxxxxx' },
   { key: 'BARRAGE_TTS_CLUSTER',   label: 'TTS Cluster', placeholder: 'volcano_tts（内置）/ volcano_icl（复刻）' },
   { key: 'BARRAGE_TTS_RESOURCE_ID', label: 'TTS Resource ID', placeholder: 'seed-tts-1.0 / seed-icl-1.0' },
@@ -530,7 +538,16 @@ async function loadPublicEnv() {
   if (!window.api) return
   try {
     const res = await window.api.readPublicEnv()
-    if (res.ok) { Object.assign(publicEnv, res.env); publicEnvLoaded.value = true }
+    if (res.ok) {
+      Object.assign(publicEnv, res.env)
+      for (const prefix of ['', 'TRANSIT_', 'BARRAGE_']) {
+        publicEnv[prefix + 'LLM_PROVIDER'] ||= 'doubao'
+        publicEnv[prefix + 'LLM_FALLBACK_PROVIDER'] ||= 'deepseek'
+        publicEnv[prefix + 'QWEN_MODEL'] ||= 'qwen3.8-flash'
+        publicEnv[prefix + 'DEEPSEEK_PLATFORM'] ||= 'official'
+      }
+      publicEnvLoaded.value = true
+    }
   } catch {}
 }
 
@@ -569,7 +586,7 @@ async function triggerRestart() {
 
 // ── API 密钥 ───────────────────────────────────────────────────────────────────
 const cruiseSensitiveKeys = [
-  'DOUBAO_API_KEY', 'DEEPSEEK_API_KEY', 'QWEN_API_KEY',
+  'DOUBAO_API_KEY', 'DEEPSEEK_API_KEY', 'DEEPSEEK_ARK_API_KEY', 'QWEN_API_KEY',
   'TTS_APP_ID', 'TTS_ACCESS_TOKEN', 'TTS_API_KEY',
   // 'NGROK_AUTHTOKEN',
 ]
@@ -577,7 +594,7 @@ const cruiseSensitiveKeys = [
 const transitSensitiveKeys = cruiseSensitiveKeys.map(key => 'TRANSIT_' + key)
 
 const barrageSensitiveKeys = [
-  'BARRAGE_DOUBAO_API_KEY', 'BARRAGE_DEEPSEEK_API_KEY', 'BARRAGE_QWEN_API_KEY',
+  'BARRAGE_DOUBAO_API_KEY', 'BARRAGE_DEEPSEEK_API_KEY', 'BARRAGE_DEEPSEEK_ARK_API_KEY', 'BARRAGE_QWEN_API_KEY',
   'BARRAGE_TTS_APP_ID', 'BARRAGE_TTS_ACCESS_TOKEN', 'BARRAGE_TTS_API_KEY'
 ]
 
