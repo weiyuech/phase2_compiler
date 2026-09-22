@@ -1,6 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('api', {
+  getShellState: () => ipcRenderer.invoke('shell-get-state'),
+  enterMachines: () => ipcRenderer.invoke('shell-enter'),
+  selectMachine: id => ipcRenderer.invoke('shell-select-machine', id),
+  toggleMachineTabs: () => ipcRenderer.invoke('shell-toggle-tabs'),
+  setMachineLayout: layout => ipcRenderer.invoke('shell-set-layout', layout),
+  selectMachinePane: (pane, id) => ipcRenderer.invoke('shell-select-pane', pane, id),
+  onShellState: callback => {
+    const listener = (_event, state) => callback(state)
+    ipcRenderer.on('shell-state', listener)
+    return () => ipcRenderer.removeListener('shell-state', listener)
+  },
   // File picker
   selectMp3File: () => ipcRenderer.invoke('select-mp3-file'),
   selectJsonFile: () => ipcRenderer.invoke('select-json-file'),

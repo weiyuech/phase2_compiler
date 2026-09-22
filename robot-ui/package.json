@@ -1,6 +1,6 @@
 {
   "name": "robot-live-ui",
-  "version": "1.0.2-test.8",
+  "version": "1.1.0-test.1",
   "description": "Robot Live System Control Panel",
   "author": "weiyuech",
   "repository": {
@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "test:machines": "node scripts/machine-shell-smoke.mjs",
     "preview": "electron-vite preview",
     "package": "node scripts/gen-icon.mjs && node scripts/prepare-backend.mjs && electron-vite build && electron-builder"
   },
@@ -25,6 +26,7 @@
     "electron": "^41.10.3",
     "electron-builder": "^26.15.7",
     "electron-vite": "^3.1.0",
+    "playwright": "1.62.1",
     "vite": "^6.4.3",
     "vue": "^3.4.21"
   },

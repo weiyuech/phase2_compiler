@@ -9,6 +9,7 @@ robot-ui/resources/.backend-seed-build-*/
 # Sensitive config
 .env
 config/admin.json
+.local-machines/
 
 # Build outputs
 robot-ui/out/
@@ -38,3 +39,6 @@ Thumbs.db
 
 # Downloaded Microsoft prerequisite (embedded by NSIS)
 robot-ui/build/vc_redist.*.exe*
+
+# Local UI verification captures
+output/machine-shell-preview/

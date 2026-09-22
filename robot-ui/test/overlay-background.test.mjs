@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events'
 import { fileURLToPath } from 'node:url'
 
 const project = fileURLToPath(new URL('../../', import.meta.url))
-const mainSource = fs.readFileSync(path.join(project, 'robot-ui/src/main/index.js'), 'utf8')
+const mainSource = fs.readFileSync(path.join(project, 'robot-ui/src/main/machine-runtime.js'), 'utf8')
 const overlaySource = fs.readFileSync(path.join(project, 'robot-ui/src/renderer/src/BarrageOverlay.vue'), 'utf8')
 const begin = mainSource.indexOf("ipcMain.handle('open-barrage-overlay',")
 const end = mainSource.indexOf('// ─── IPC: File picker', begin)
@@ -51,7 +51,7 @@ function setup(rendererUrl) {
     },
     join: path.join,
     __dirname: '/mock/robot-ui/out/main',
-    DEVTOOLS_ENABLED: false,
+    DEVTOOLS_ENABLED: false, registerOverlay: undefined,
     process: { env: rendererUrl ? { ELECTRON_RENDERER_URL: rendererUrl } : {} },
     _win: { isDestroyed: () => false, webContents: { send: (...args) => sent.push(args) } },
   })

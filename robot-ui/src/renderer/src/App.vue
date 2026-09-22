@@ -5,6 +5,7 @@
       <div class="topbar-left">
         <span class="logo-icon">◈</span>
         <span class="logo-text">机器人直播控制台</span>
+        <span class="machine-context">机器 {{ machineId }}</span>
       </div>
       <div class="topbar-center">
         <span class="ws-dot" :class="wsStatus" />
@@ -69,6 +70,7 @@ const tabs = [
   { key: 'settings',  label: '系统设置', icon: '⚙' },
 ]
 const activeTab = ref('monitor')
+const machineId = Number(window.location.hash.match(/machine\/(\d)/)?.[1] || 1)
 
 // Clock
 const clock = ref('')
@@ -84,24 +86,14 @@ function updateClock() {
 //
 // 端口不写死：后端首选 3001，被占用时会改用系统分配的空闲端口，
 // 并把真实端口交给主进程。每次连接前都重新问一次（重启后端可能会换端口）。
-const DEFAULT_PORT = 3001
-let _isDev = null      // 只问一次：开发模式下后端是手动 npm start 起的
-
 async function resolveWsUrl() {
   try {
     const p = await window.api?.getUiPort?.()
     if (Number.isInteger(p) && p > 0) return `ws://127.0.0.1:${p}`
   } catch { /* 忽略，下面按未知端口处理 */ }
 
-  // 端口还不知道。开发模式固定 3001；打包模式下端口由后端自己选，
-  // 这时候贸然去连 3001 很危险：占用它的可能是别的程序，
-  // 那种程序会接受 TCP 连接却不说 WebSocket，握手就一直卡着不返回。
-  if (_isDev === null) {
-    try { _isDev = (await window.api?.getBackendStatus?.())?.dev === true }
-    catch { _isDev = true }
-  }
-  if (_isDev || !window.api?.getUiPort) return `ws://127.0.0.1:${DEFAULT_PORT}`
-  return null      // 打包模式：等后端把端口报上来再连
+  // Never guess a different machine's port while this backend starts/restarts.
+  return null
 }
 const ws = ref(null)
 const wsStatus = ref('disconnected') // 'connected' | 'disconnected' | 'error'
@@ -115,6 +107,8 @@ let wsTimer
 // 结果两条都连上了（run #42 的日志里 界面已连接 出现了两次）。
 let activeSocket = null
 let activePort   = null
+let connectionAttempt = 0
+let disposed = false
 
 async function exportDiagnostics() {
   const res = await window.api?.exportDiagnostics?.()
@@ -145,13 +139,16 @@ function showBackendFailure({ code, stderr }) {
 
 function scheduleReconnect(delay = 5000) {
   clearTimeout(wsTimer)
+  if (disposed) return
   wsTimer = setTimeout(connectWS, delay)
 }
 
 async function connectWS() {
   clearTimeout(wsTimer)
+  const attempt = ++connectionAttempt
   try {
     const url = await resolveWsUrl()
+    if (disposed || attempt !== connectionAttempt) return
     if (!url) {          // 端口还没报上来，稍后再试（不去猜 3001）
       scheduleReconnect(1000)
       return
@@ -170,6 +167,7 @@ async function connectWS() {
     // onopen / onclose / onerror 一个都不会触发，socket 就永远停在 CONNECTING，
     // 重连定时器也永远排不上——界面会一直停在"未连接"。
     const handshakeTimer = setTimeout(() => {
+      if (activeSocket !== socket || disposed) return
       if (settled) return
       settled = true
       try { socket.close() } catch {}
@@ -183,6 +181,7 @@ async function connectWS() {
     }, 6000)
 
     socket.onopen = () => {
+      if (activeSocket !== socket || disposed) { socket.close(); return }
       settled = true
       clearTimeout(handshakeTimer)
       console.log('[WebSocket] Connected on port', thisPort)
@@ -194,6 +193,7 @@ async function connectWS() {
     }
 
     socket.addEventListener('message', (e) => {
+      if (activeSocket !== socket || disposed) return
       try {
         const { type, data } = JSON.parse(e.data)
         if (type === 'ERROR' && data?.message) {
@@ -204,6 +204,7 @@ async function connectWS() {
 
     socket.onclose = () => {
       clearTimeout(handshakeTimer)
+      if (activeSocket !== socket || disposed) return
       if (settled && !ws.value) return     // 超时分支已经安排过重连了
       settled = true
       wsEverFailed.value = true
@@ -218,6 +219,7 @@ async function connectWS() {
       scheduleReconnect(5000)
     }
     socket.onerror = () => {
+      if (activeSocket !== socket || disposed) return
       wsEverFailed.value = true
       if (!wsDetail.value) {
         wsStatus.value = 'error'
@@ -257,9 +259,11 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  disposed = true
+  connectionAttempt++
   clearInterval(clockTimer)
   clearTimeout(wsTimer)
-  ws.value?.close()
+  activeSocket?.close()
 })
 </script>
 
@@ -320,6 +324,7 @@ html, body, #app { height: 100%; background: var(--bg); color: var(--text); font
 .topbar-left  { display: flex; align-items: center; gap: 10px; }
 .logo-icon    { color: var(--amber); font-size: 18px; }
 .logo-text    { font-weight: 700; font-size: 14px; letter-spacing: .08em; color: var(--text); }
+.machine-context { color: var(--text-dim); font-size: 11px; padding-left: 8px; border-left: 1px solid var(--border); }
 .topbar-center { display: flex; align-items: center; gap: 8px; }
 .ws-dot {
   width: 8px; height: 8px; border-radius: 50%;
@@ -343,6 +348,8 @@ html, body, #app { height: 100%; background: var(--bg); color: var(--text); font
   display: flex; gap: 0;
   background: var(--bg2); border-bottom: 1px solid var(--border);
   padding: 0 12px;
+  overflow-x: auto;
+  flex-shrink: 0;
 }
 .tab-btn {
   display: flex; align-items: center; gap: 6px;
@@ -354,5 +361,15 @@ html, body, #app { height: 100%; background: var(--bg); color: var(--text); font
 .tab-btn.active { color: var(--amber); border-bottom-color: var(--amber); }
 .tab-icon { font-size: 14px; }
 
-.panel-area { flex: 1; overflow: hidden; }
+.panel-area { flex: 1; min-height: 0; overflow: auto; }
+@media (max-width: 800px) {
+  .topbar { padding: 0 12px; gap: 8px; }
+  .topbar-left { gap: 7px; }
+  .logo-text { font-size: 12px; letter-spacing: 0; }
+  .topbar-right { display: none; }
+  .ws-label { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+  .tab-btn { padding: 9px 12px; font-size: 12px; }
+  .panel-area > * { min-width: 540px; }
+}
+@media (max-width: 560px) { .logo-text { display: none; } }
 </style>

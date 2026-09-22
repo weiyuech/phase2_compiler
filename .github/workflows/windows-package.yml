@@ -261,6 +261,10 @@ jobs:
           if (-not $uiConnected) { Write-Host "后端换了端口，但界面没有连上来——端口传递链路有问题"; exit 1 }
           Write-Host "端口冲突兜底验证通过（界面已连接到新端口）"
 
+      - name: Verify three machine workspaces, split view and concurrent OCR
+        timeout-minutes: 5
+        run: node robot-ui/scripts/machine-shell-smoke.mjs --executable release/win-unpacked/robot-live-ui.exe --shots release/machine-shell-preview
+
       - name: Upload Build Artifacts
         continue-on-error: true
         uses: actions/upload-artifact@v7
@@ -269,6 +273,7 @@ jobs:
           path: |
             release/*.exe
             release/packaged-runtime.json
+            release/machine-shell-preview/
 
       - name: Deliver exact test tag to a new draft release
         if: inputs.release_tag != ''

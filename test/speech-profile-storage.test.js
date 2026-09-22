@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { speechProfileKeys, speechProfileMigration, selectSpeechProfileChanges, resolveSpeechProfile } from '../src/config/speech-profiles.js'
 import { LLMRewriter } from '../src/llm/index.js'
 
-const main = fs.readFileSync(new URL('../robot-ui/src/main/index.js', import.meta.url), 'utf8')
+const main = fs.readFileSync(new URL('../robot-ui/src/main/machine-runtime.js', import.meta.url), 'utf8')
 function fixture(t, text = '') {
   const dir = fs.mkdtempSync(join(tmpdir(), 'speech-profile-storage-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
@@ -21,7 +21,7 @@ function fixture(t, text = '') {
   })
   vm.runInContext(main.slice(main.indexOf('const PUBLIC_ENV_KEYS'), main.indexOf('// ─── .env helpers')), context)
   vm.runInContext(main.slice(main.indexOf('function parseEnv('), main.indexOf('// ─── Backend auto-start')), context)
-  vm.runInContext(main.slice(main.indexOf("ipcMain.handle('read-public-env'")), context)
+  vm.runInContext(main.slice(main.indexOf("ipcMain.handle('read-public-env'"), main.indexOf("// End machine IPC")), context)
   fs.writeFileSync(ADMIN_PATH, JSON.stringify(context.hashPassword('test-password')))
   return { context, handlers, path: ENV_PATH, read: () => context.parseEnv(fs.readFileSync(ENV_PATH, 'utf8')) }
 }

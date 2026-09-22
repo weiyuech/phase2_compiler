@@ -243,7 +243,7 @@ test('renderer capture waits for backend START and owns generation cleanup', asy
   assert.match(liveMonitor, /if \(ownsBarrageCapture\) startBarrageLoop\(\)/);
 
   const main = await readFile(
-    new URL('../robot-ui/src/main/index.js', import.meta.url),
+    new URL('../robot-ui/src/main/machine-runtime.js', import.meta.url),
     'utf8',
   );
   const closeHandlerStart = main.indexOf("ipcMain.handle('close-barrage-overlay'");

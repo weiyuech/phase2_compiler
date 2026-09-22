@@ -39,7 +39,7 @@ import { safeJoin }                    from './safe-path.js'
 
 // ── Initialise modules ────────────────────────────────────────────────────────
 
-const diagnosticsDirectory = process.env.USER_DATA_DIR || join(process.cwd(), 'data')
+const diagnosticsDirectory = process.env.DIAGNOSTICS_DIR || process.env.USER_DATA_DIR || join(process.cwd(), 'data')
 const backendLogCapture = startBackendLogCapture({ directory: diagnosticsDirectory })
 const audioDiagnostics = new AudioDiagnostics({ directory: diagnosticsDirectory })
 
@@ -740,7 +740,7 @@ robot.on('reply', ({ type, data }) => {
 
 // Accept UI connections only after all state queries and controls are registered.
 // Otherwise an early GET_TOUR_STATE is silently lost and manual speech stays disabled.
-uiBridge.start()
+uiBridge.start(process.env.UI_PORT === undefined ? 3001 : Number(process.env.UI_PORT))
 robot.start()
 
 // ── ngrok tunnel (optional) ───────────────────────────────────────────────
