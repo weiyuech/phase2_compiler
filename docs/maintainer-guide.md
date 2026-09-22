@@ -1,6 +1,6 @@
 # 开发维护与交接
 
-适用功能基线：`v1.0.2-test.6`（`c0865fc`）。后续维护提交不改变这个既有安装包；运行或交接时同时记录源码提交号与 UI 版本，不只看版本名称。
+当前多机器分支版本：`1.1.0-test.1`。既有测试标签与安装包保持不变；运行或交接时同时记录源码提交号与 UI 版本，不只看版本名称。新安装包须经过下文的 Windows 检查与精确标签交付。
 
 ## 1. 先确认正在操作哪份代码
 
@@ -19,7 +19,7 @@ node -p "require('./robot-ui/package.json').version"
 
 更新流程：
 
-1. 停止现场任务及该目录的后端/Electron；同一台机器不要启动两份后端。
+1. 停止现场任务及该目录的后端/Electron；同一台电脑只启动一份桌面外壳；外壳内部自动管理三个机器后台，不另开根目录 `npm start`。
 2. 保存本地代码改动，备份用户数据；不要用 `reset --hard` 或整目录覆盖来「同步」。只对明确文件做有名称的备份/stash，查看差异后决定如何合并。
 3. `git fetch origin` 后核对要更新到的**精确提交**。优先 `git merge --ff-only <reviewed-commit>`；若拒绝，说明需要审查分歧，不能强行覆盖。关联 worktree 的本地已审查提交也可直接快进，不要求先推送。
 4. 在根目录、`robot-ui/` 各执行 `npm ci`，然后运行下节检查。锁文件更新后，运行中的旧进程和旧 `node_modules` 不会自动变成新版本。
@@ -49,6 +49,7 @@ npm --prefix robot-ui run build
 
 | 需求 | 首要入口 | 回归重点 |
 | --- | --- | --- |
+| 多机器窗口、分屏与工作区隔离 | `robot-ui/src/main/{index,machine-runtime}.js`、`shell-state.mjs`、`MachineShell.vue` | `machine-profile`、`machine-shell`、`npm --prefix robot-ui run test:machines` |
 | 应用接线、共享对象与销毁 | `src/index.js`、`src/ui-bridge.js` | `tour-ui-controls`、`cruise-websocket` |
 | 机器人连接/导航 | `src/robot/listener.js`、`goal-tracker.js`、`src/task/cruise-controller.js` | `cruise-navigation`、`cruise-websocket` |
 | 点位与过渡内容 | `src/task/point-narrator.js`、`src/transit/manager.js` | `point-handoff`、`transit-pool`、`local-playback-handoff` |

@@ -1036,4 +1036,15 @@ onBeforeUnmount(() => {
 .row-actions { display: flex; align-items: center; gap: 8px; }
 .ok-text  { font-size: 12px; color: var(--green); }
 .err-text { font-size: 12px; color: var(--red); }
+@media (max-width: 800px) {
+  .settings-nav { width: 144px; min-width: 144px; }
+  .nav-item { font-size: 12px; padding: 9px 10px; }
+  .settings-panel { min-width: 0; }
+  .panel-body { padding: 14px; }
+  .params-grid, .key-form { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .param-label, .key-name-label { text-align: left; margin-top: 7px; }
+  .credential-input :deep(.el-input) { max-width: 100%; }
+  .row-actions { flex-wrap: wrap; }
+  .masked-row { flex-wrap: wrap; gap: 6px; }
+}
 </style>

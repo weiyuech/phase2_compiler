@@ -28,7 +28,7 @@ export class OcrWorkerClient {
     workerFactory = defaultWorkerFactory,
     modelsPath = path.resolve('./data/models'),
     debugImagePath = process.env.OCR_DEBUG_IMAGES === '1'
-      ? path.resolve('./data/debug-ocr-crop.png')
+      ? path.resolve(process.env.USER_DATA_DIR || '.', 'data/debug-ocr-crop.png')
       : null,
   } = {}) {
     this.workerFactory = workerFactory;
