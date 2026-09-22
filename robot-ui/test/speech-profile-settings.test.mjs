@@ -35,7 +35,7 @@ function fixture(t) {
     restartBackend: async () => { restarts++ },
   }
   const component = createComponent({ ...Vue, onMounted() {}, onBeforeUnmount: fn => cleanups.push(fn) },
-    { prompt: async () => ({ value: 'test-password' }) }, { error: msg => errors.push(msg) }, { api }, () => 1, DEFAULT_OCR_JUDGE_PROMPT)
+    { prompt: async () => ({ value: 'test-password' }) }, { error: msg => errors.push(msg), success() {} }, { api }, () => 1, DEFAULT_OCR_JUDGE_PROMPT)
   const scope = Vue.effectScope()
   const state = scope.run(() => component.setup({ wsRef: null }, { expose() {} }))
   t.after(() => { for (const cleanup of cleanups) cleanup(); scope.stop() })
@@ -55,6 +55,30 @@ test('three clearly named sections select their own public and secret fields', t
 })
 
 for (const [profile, prefix] of [['cruise', ''], ['transit', 'TRANSIT_'], ['barrage', 'BARRAGE_']]) {
+  test(`${profile} reuses only its own Doubao key and persists it only on explicit profile save`, async t => {
+    const h = fixture(t), target = prefix + 'DEEPSEEK_ARK_API_KEY'
+    await h.state.loadPublicEnv()
+    await h.state.doUnlock()
+    h.state.activeSection.value = profile
+    const before = { ...h.state.sensitiveEnv }
+    assert.equal(h.state.canReuseDoubaoKey(target), true)
+    h.state.reuseDoubaoKey(target)
+    assert.equal(h.state.sensitiveEnv[target], profile + '-original')
+    h.state.sensitiveEnv[prefix + 'DOUBAO_API_KEY'] = '  newly-pasted-key  '
+    h.state.reuseDoubaoKey(target)
+    assert.equal(h.state.sensitiveEnv[target], 'newly-pasted-key')
+    assert.equal(h.saved.length, 0)
+    assert.equal(h.stored[target], profile + '-original')
+    assert.equal(h.state.sensitiveEnv[prefix + 'DEEPSEEK_API_KEY'], before[prefix + 'DEEPSEEK_API_KEY'])
+    for (const other of ['cruise', 'transit', 'barrage'].filter(p => p !== profile)) {
+      for (const key of speechProfileKeys(other, { secrets: true })) assert.equal(h.state.sensitiveEnv[key], before[key])
+    }
+    await h.state.saveSensitiveEnv()
+    assert.equal(h.saved[0].changes[target], 'newly-pasted-key')
+    assert.equal(h.restarts(), 1)
+    assert.equal(h.state.canReuseDoubaoKey(target), false)
+  })
+
   test(`${profile} saves voice/model and credentials together without saving another group's drafts`, async t => {
     const h = fixture(t)
     await h.state.loadPublicEnv()
@@ -114,4 +138,22 @@ test('unloaded settings cannot overwrite stored values with empty form defaults'
   await h.state.saveSensitiveEnv()
   assert.equal(h.saved.length, 0)
   assert.equal(h.errors.length, 2)
+})
+
+test('key reuse rejects blank sources, other groups, official credentials, and locked settings', async t => {
+  const h = fixture(t)
+  await h.state.doUnlock()
+  h.state.activeSection.value = 'transit'
+  const target = 'TRANSIT_DEEPSEEK_ARK_API_KEY'
+  h.state.sensitiveEnv.TRANSIT_DOUBAO_API_KEY = '   '
+  for (const key of [target, 'DEEPSEEK_ARK_API_KEY', 'BARRAGE_DEEPSEEK_ARK_API_KEY', 'TRANSIT_DEEPSEEK_API_KEY']) {
+    const before = h.state.sensitiveEnv[key]
+    assert.equal(h.state.canReuseDoubaoKey(key), false)
+    h.state.reuseDoubaoKey(key)
+    assert.equal(h.state.sensitiveEnv[key], before)
+  }
+  h.state.lockSensitive()
+  h.state.reuseDoubaoKey(target)
+  assert.equal(h.state.sensitiveEnv[target], '')
+  assert.equal(h.saved.length, 0)
 })

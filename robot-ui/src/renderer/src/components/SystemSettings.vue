@@ -173,7 +173,11 @@
             <div class="key-form">
               <template v-for="key in currentSensitiveKeys()" :key="key">
                 <span class="param-label key-name-label">{{ credentialLabel(key) }}</span>
-                <el-input v-model="sensitiveEnv[key]" type="password" show-password size="small" style="width: 320px" :placeholder="credentialLabel(key)" />
+                <div class="credential-input">
+                  <el-input v-model="sensitiveEnv[key]" type="password" show-password size="small" style="width: 320px" :placeholder="credentialLabel(key)" />
+                  <el-button v-if="key.endsWith('DEEPSEEK_ARK_API_KEY')" size="small" plain
+                    :disabled="!canReuseDoubaoKey(key)" @click="reuseDoubaoKey(key)">使用本组豆包密钥</el-button>
+                </div>
               </template>
             </div>
             <div class="row-actions" style="margin-top: 20px">
@@ -614,6 +618,18 @@ const cooldownLeft = ref(0)
 let cooldownTimer  = null
 let _sessionPwd    = ''
 
+function canReuseDoubaoKey(key) {
+  return sensitiveUnlocked.value && !savingSensitive.value && currentSensitiveKeys().includes(key)
+    && key.endsWith('DEEPSEEK_ARK_API_KEY')
+    && Boolean(sensitiveEnv[key.replace(/DEEPSEEK_ARK_API_KEY$/, 'DOUBAO_API_KEY')]?.trim())
+}
+
+function reuseDoubaoKey(key) {
+  if (!canReuseDoubaoKey(key)) return
+  sensitiveEnv[key] = sensitiveEnv[key.replace(/DEEPSEEK_ARK_API_KEY$/, 'DOUBAO_API_KEY')].trim()
+  ElMessage.success('已填入本组豆包密钥，保存本组设置后生效')
+}
+
 async function loadHasPassword() {
   if (!window.api) return
   try { hasPassword.value = await window.api.adminHasPassword() } catch {}
@@ -972,6 +988,12 @@ onBeforeUnmount(() => {
 }
 
 /* ── Key form ── */
+.credential-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
 .key-form {
   display: grid;
   grid-template-columns: 160px 1fr;
