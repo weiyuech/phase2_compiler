@@ -8,7 +8,6 @@
     </button>
     <header v-else class="machine-bar" :class="{ 'is-mac': isMac }">
       <template v-if="!shell.collapsed">
-        <div class="shell-brand"><span class="brand-mark">◈</span><span>喵飞直播</span></div>
         <nav class="machine-tabs" aria-label="机器工作区">
           <button v-for="id in [1, 2, 3]" :key="id" class="machine-tab" :class="{ active: shell.activeMachine === id, visible: shell.layout === 'split' && shell.panes.includes(id) }"
             :aria-label="`切换到机器 ${id}`" :aria-current="shell.activeMachine === id ? 'page' : undefined" @click="select(id)">
@@ -24,7 +23,6 @@
         </button>
       </template>
       <template v-else>
-        <span class="collapsed-brand">喵飞直播</span>
         <button class="reveal-control" aria-label="展开机器切换栏" title="展开切换栏 · Ctrl / ⌘ + Shift + M" @click="toggle">
           <span class="current-machine-dot"></span><strong>{{ shell.layout === 'split' ? `机器 ${shell.panes[0]} / 机器 ${shell.panes[1]}` : `机器 ${shell.activeMachine}` }}</strong>
           <span class="reveal-label">展开切换</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
@@ -110,7 +108,7 @@ onUnmounted(() => {
 button { font: inherit; }
 button:focus-visible { outline: 2px solid #f5c777; outline-offset: -4px; }
 .welcome { position: absolute; inset: 0; display: block; width: 100%; height: 100%; overflow: hidden; border: 0; background: #0d1117; color: white; cursor: pointer; padding: 0; }
-.welcome-art { position: absolute; width: min(100%, 1680px); height: auto; max-height: 100%; object-fit: contain; left: 50%; top: 48%; transform: translate(-50%, -50%); pointer-events: none; user-select: none; }
+.welcome-art { position: absolute; width: min(80%, 1344px); height: auto; max-height: 80%; object-fit: contain; mix-blend-mode: lighten; left: 50%; top: 48%; transform: translate(-50%, -50%); pointer-events: none; user-select: none; }
 .welcome-invitation { position: absolute; left: 0; right: 0; bottom: 12%; display: flex; align-items: center; justify-content: center; gap: 20px; color: #bbc0c9; font-size: 14px; font-weight: 400; letter-spacing: .26em; animation: invitation-breathe 4s ease-in-out infinite; }
 .invitation-line { width: 34px; height: 1px; background: linear-gradient(90deg, transparent, #657181); }
 .invitation-line:last-child { transform: rotate(180deg); }
@@ -121,8 +119,6 @@ button:focus-visible { outline: 2px solid #f5c777; outline-offset: -4px; }
 @keyframes welcome-out { to { opacity: 0; } }
 .machine-bar { height: 68px; padding: 0 18px 0 24px; display: flex; align-items: center; gap: 24px; border-bottom: 1px solid #2a3039; background: #0f141c; -webkit-app-region: drag; }
 .machine-bar.is-mac { padding-left: 94px; }
-.shell-brand { display: flex; align-items: center; gap: 10px; color: #cbd1db; font-size: 13px; letter-spacing: .1em; white-space: nowrap; }
-.brand-mark { color: #e9d2ab; font-size: 23px; }
 .machine-tabs { align-self: stretch; display: flex; align-items: flex-end; gap: 7px; padding-top: 14px; -webkit-app-region: no-drag; }
 .machine-tab { min-width: 132px; height: 44px; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 0 22px; border: 1px solid transparent; border-bottom: none; border-radius: 9px 9px 0 0; background: transparent; color: #8f98a7; font-size: 13px; cursor: pointer; transition: background .16s, color .16s; }
 .machine-tab:hover { background: #191f28; color: #e5e8ed; }
@@ -142,8 +138,7 @@ button:focus-visible { outline: 2px solid #f5c777; outline-offset: -4px; }
 .collapse-control:hover, .reveal-control:hover { color: #f2dfbd; border-color: #8a734b; background: #24252a; }
 svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; }
 .is-collapsed .machine-bar { height: 40px; justify-content: space-between; }
-.collapsed-brand { font-size: 10px; color: #788393; letter-spacing: .15em; }
-.reveal-control { display: flex; align-items: center; gap: 9px; background: #1a2029; color: #d5dce6; border: 1px solid #35404e; padding: 4px 10px; border-radius: 5px; cursor: pointer; font-size: 11px; -webkit-app-region: no-drag; }
+.reveal-control { margin-left: auto; display: flex; align-items: center; gap: 9px; background: #1a2029; color: #d5dce6; border: 1px solid #35404e; padding: 4px 10px; border-radius: 5px; cursor: pointer; font-size: 11px; -webkit-app-region: no-drag; }
 .reveal-control strong { font-weight: 500; }
 .current-machine-dot { width: 5px; height: 5px; border-radius: 50%; background: #d9b26e; }
 .reveal-label { color: #9ca7b7; margin-left: 7px; padding-left: 12px; border-left: 1px solid #36404d; }
@@ -154,7 +149,6 @@ svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width:
 @media (max-width: 1050px) {
   .machine-bar { gap: 14px; }
   .machine-tab { min-width: 104px; gap: 8px; padding: 0 14px; }
-  .shell-brand { font-size: 11px; gap: 5px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 </style>
