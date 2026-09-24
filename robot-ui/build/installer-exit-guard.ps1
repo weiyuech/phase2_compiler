@@ -1,6 +1,6 @@
 # Windows PowerShell 5.1, shipped in the installer's temporary plugin directory.
-# No app data is opened or modified. Stay silent: nsExec's /TIMEOUT is an
-# inactivity timeout, so emitting progress would extend its 10-second deadline.
+# No app data is opened or modified. Diagnostics go to the installer's TEMP
+# files; a native process wait imposes the outer 10-second execution deadline.
 param(
     [string] $InstallDirectory,
     [string] $AppExecutable,
@@ -131,7 +131,7 @@ function Invoke-InstallerExitGuard {
         [scriptblock] $Sleep = { param($milliseconds) Start-Sleep -Milliseconds $milliseconds },
         [scriptblock] $ElapsedMilliseconds
     )
-    # nsExec supplies the outer 10-second bound, including PowerShell startup.
+    # The installer supplies a native 10-second bound, including PowerShell startup.
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $script:InstallerGuardFailure = $null
     if (-not $ElapsedMilliseconds) { $ElapsedMilliseconds = { $watch.ElapsedMilliseconds }.GetNewClosure() }

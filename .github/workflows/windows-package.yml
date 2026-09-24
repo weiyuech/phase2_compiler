@@ -47,6 +47,19 @@ jobs:
           node --test --test-concurrency=4 @tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Verify real NSIS process handoff before packaging
+        timeout-minutes: 3
+        run: node robot-ui/scripts/installer-host-smoke.mjs
+
+      - name: Preserve installer host diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-host-verification
+          path: release/installer-host-smoke/
+          if-no-files-found: ignore
+
       - name: Build and Package Electron App
         # Explicit x64 target: use Windows native dependencies from this runner.
         run: |
