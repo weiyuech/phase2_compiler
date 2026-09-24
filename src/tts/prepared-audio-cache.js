@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 
 const OWNED_FILE = /^pcm-[0-9a-f-]{36}\.pcm$/
+const RUN_DIRECTORY = /^run-([1-9][0-9]*)-([0-9a-f-]{36})$/
 export const abortedError = () => Object.assign(new Error('音频准备已取消'), { name: 'AbortError', code: 'AUDIO_CANCELLED' })
 
 /** Runtime cache: ref-counted assets, LRU unused eviction, and accounted spool /
@@ -19,7 +20,8 @@ export class PreparedAudioCache {
     this.diskBytes = 0
     this.entries = new Map()
     this._temporary = !directory
-    this.directory = directory ? resolve(directory) : null
+    this.rootDirectory = directory ? resolve(directory) : null
+    this.directory = null
     this.diagnostics = diagnostics
     this._capacity = Promise.resolve()
     this._activeDecodes = 0
@@ -32,37 +34,61 @@ export class PreparedAudioCache {
   }
 
   async _initialize() {
-    if (!this.directory) this.directory = await mkdtemp(join(tmpdir(), 'robot-pcm-cache-'))
-    else await mkdir(this.directory, { recursive: true })
+    if (!this.rootDirectory) this.rootDirectory = await mkdtemp(join(tmpdir(), 'robot-pcm-cache-'))
+    else await mkdir(this.rootDirectory, { recursive: true })
+    await this._cleanupAbandonedRuns()
+    // PCM is disposable and never shared between running caches. A private
+    // directory prevents a leftover legacy owner.json (including a reused PID)
+    // from blocking audio, without touching another instance's active files.
+    const directory = join(this.rootDirectory, `run-${process.pid}-${this._nonce}`)
+    await mkdir(directory)
+    this.directory = directory
+    this._ownsDirectory = true
     this._lockPath = join(this.directory, 'owner.json')
     let lock
-    try { lock = await open(this._lockPath, 'wx', 0o600) } catch (err) {
-      if (err.code !== 'EEXIST') throw err
-      const owner = JSON.parse(await readFile(this._lockPath, 'utf8'))
-      if (owner.kind !== 'robot-pcm-cache-v1' || !Number.isInteger(owner.pid) || owner.pid < 1) {
-        throw new Error('音频缓存所有权文件无效，未清理任何文件')
-      }
-      let alive = true
-      try { process.kill(owner.pid, 0) } catch (probe) { if (probe.code === 'ESRCH') alive = false }
-      if (alive) throw new Error('音频缓存正由其他运行实例使用')
-      await unlink(this._lockPath)
-      lock = await open(this._lockPath, 'wx', 0o600)
-    }
     try {
+      lock = await open(this._lockPath, 'wx', 0o600)
       await this._writeOwnerLock(lock)
       await lock.close()
     } catch (err) {
-      // We created this exact lock with wx. A partial write (e.g. disk full)
-      // must not leave an invalid owner file that blocks every later launch.
-      await lock.close().catch(() => {})
-      await unlink(this._lockPath).catch(() => {})
+      if (lock) {
+        await lock.close().catch(() => {})
+        await unlink(this._lockPath).catch(() => {})
+      }
+      await rmdir(this.directory).catch(() => {})
+      this._ownsDirectory = false
+      if (this._temporary) await rmdir(this.rootDirectory).catch(() => {})
       throw err
     }
-    this._ownsLock = true
-    // Only our generated files in the exclusively-owned cache directory. Never
-    // recursively clean a data directory or remove arbitrary user files.
-    for (const name of await readdir(this.directory)) {
-      if (OWNED_FILE.test(name)) await this._unlink(join(this.directory, name))
+  }
+
+  async _cleanupAbandonedRuns() {
+    for (const item of await readdir(this.rootDirectory, { withFileTypes: true })) {
+      const match = item.isDirectory() && RUN_DIRECTORY.exec(item.name)
+      if (!match) continue // Includes legacy root-level caches and symlinks.
+      const pid = Number(match[1])
+      if (!Number.isSafeInteger(pid) || pid > 0x7fffffff) continue
+      // A live/reused PID or denied probe means "leave it alone", never "fail
+      // this launch". Run names are unique, so concurrent collectors cannot
+      // accidentally unlink a newly acquired global ownership lock.
+      try { process.kill(pid, 0); continue } catch (err) { if (err.code !== 'ESRCH') continue }
+      const directory = join(this.rootDirectory, item.name)
+      try {
+        const ownerPath = join(directory, 'owner.json')
+        const owner = JSON.parse(await readFile(ownerPath, 'utf8'))
+        if (owner.kind !== 'robot-pcm-cache-v1' || owner.pid !== pid || owner.nonce !== match[2]) continue
+        const files = await readdir(directory)
+        for (const name of files) {
+          if (OWNED_FILE.test(name)) await unlink(join(directory, name)).catch(err => { if (err.code !== 'ENOENT') throw err })
+        }
+        if (files.every(name => name === 'owner.json' || OWNED_FILE.test(name))) {
+          await unlink(ownerPath)
+          await rmdir(directory)
+        }
+      } catch {
+        // Cleanup is best effort: inaccessible/partial metadata, unexpected
+        // files or another collector must not disable a fresh private cache.
+      }
     }
   }
 
@@ -284,7 +310,7 @@ export class PreparedAudioCache {
     }
     await this._ready.catch(() => {})
     await this._capacity
-    if (!this._ownsLock) return
+    if (!this._ownsDirectory) return
     for (const entry of this.entries.values()) {
       if (entry.path) await this._unlink(entry.path)
       entry.buffer = null; entry.path = null
@@ -296,8 +322,9 @@ export class PreparedAudioCache {
       const owner = JSON.parse(await readFile(this._lockPath, 'utf8'))
       if (owner.nonce === this._nonce) await unlink(this._lockPath)
     } catch (err) { if (err.code !== 'ENOENT') throw err }
-    this._ownsLock = false
-    if (this._temporary) await rmdir(this.directory).catch(() => {})
+    this._ownsDirectory = false
+    await rmdir(this.directory).catch(() => {})
+    if (this._temporary) await rmdir(this.rootDirectory).catch(() => {})
   }
 }
 
