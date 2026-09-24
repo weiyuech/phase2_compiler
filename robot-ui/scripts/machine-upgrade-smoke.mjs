@@ -141,6 +141,17 @@ function isolatedEnvironment() {
   } else env.MIAOFEI_DEV_PROFILE = profile
   return env
 }
+function installerEnvironment() {
+  // NSIS and Windows PowerShell need the runner's real Windows environment and
+  // Known Folder configuration. The exact same guard completes under that
+  // environment but hangs before script startup with filtered variables and
+  // synthetic APPDATA/LOCALAPPDATA. That fixture does not represent an upgrade.
+  // Keep only diagnostics private here; actual app data remains isolated by the
+  // separately verified --user-data-dir when this CI-only test launches Electron.
+  const env = { ...process.env }
+  for (const key of Object.keys(env)) if (/^(TEMP|TMP)$/i.test(key)) delete env[key]
+  return { ...env, TEMP: installerTemp, TMP: installerTemp }
+}
 const installerDiagnosticName = name => /^robot-live-(?:installer-[a-z0-9-]+|vc-redist(?:_[a-z0-9_-]+)?)\.(?:log|json|txt)$/i.test(name)
 async function captureInstallerDiagnostics(label, record) {
   const names = (await readdir(installerTemp)).filter(installerDiagnosticName).sort()
@@ -175,11 +186,11 @@ async function runInstaller(label) {
   // directory so an initial install's success cannot disguise an upgrade error.
   for (const name of (await readdir(installerTemp)).filter(installerDiagnosticName)) await rm(join(installerTemp, name))
   const started = Date.now()
-  const record = { label }
+  const record = { label, environment: 'normal-windows-with-private-temp' }
   report.installer ||= []
   report.installer.push(record)
   const child = spawn(options.installer, ['/S', `/D=${installDirectory}`], {
-    env: isolatedEnvironment(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    env: installerEnvironment(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
   })
   let log = '', timeout
   const append = chunk => { log = (log + chunk.toString()).slice(-64000) }

@@ -20,9 +20,14 @@ const records = []
 const quoted = value => value.replaceAll('$', () => '$$').replaceAll('"', () => '$\\"')
 await mkdir(output, { recursive: true })
 try {
-  const executable = join(workspace, 'guard-test.exe')
-  const script = join(workspace, 'guard-test.nsi')
-  await writeFile(script, `Unicode true
+  const compiler = await getMakeNsisPath()
+  for (const [name, leaf] of [['ordinary-path', 'ordinary'], ['literal-path', "path with spaces and O'Brien"]]) {
+    const directory = join(workspace, leaf)
+    const temporary = join(directory, 'temp')
+    await mkdir(temporary, { recursive: true })
+    const executable = join(directory, 'guard-test.exe')
+    const script = join(directory, 'guard-test.nsi')
+    await writeFile(script, `Unicode true
 !include "LogicLib.nsh"
 !define BUILD_RESOURCES_DIR "${quoted(join(root, 'robot-ui', 'build'))}"
 !define APP_EXECUTABLE_FILENAME "guard-fixture-${randomUUID()}.exe"
@@ -32,27 +37,19 @@ OutFile "${quoted(executable)}"
 RequestExecutionLevel user
 SilentInstall silent
 Section
-  StrCpy $INSTDIR "${quoted(join(workspace, 'empty-installation'))}"
+  StrCpy $INSTDIR "${quoted(join(directory, 'empty-installation'))}"
   !insertmacro customCheckAppRunning
 SectionEnd
 `)
-  const compiler = await getMakeNsisPath()
-  await run(compiler.path, ['-INPUTCHARSET', 'UTF8', '-V2', script], {
-    env: { ...process.env, ...compiler.env }, windowsHide: true, timeout: 60000,
-  })
-  for (const isolated of [false, true]) {
-    const name = isolated ? 'isolated-profile' : 'normal-profile'
-    const directory = join(workspace, name)
-    const temporary = join(directory, 'temp')
-    const roaming = join(directory, 'roaming')
-    const local = join(directory, 'local')
-    await Promise.all([temporary, roaming, local].map(path => mkdir(path, { recursive: true })))
-    const env = isolated
-      ? Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(PATH|PATHEXT|HOME|USERPROFILE|USERNAME|USERDOMAIN|APPDATA|LOCALAPPDATA|PROGRAMDATA|ALLUSERSPROFILE|PUBLIC|PROGRAMFILES(?:\(X86\))?|PROGRAMW6432|COMMONPROGRAMFILES(?:\(X86\))?|COMMONPROGRAMW6432|PROCESSOR_ARCHITECTURE|SYSTEMROOT|WINDIR|COMSPEC|SYSTEMDRIVE|TEMP|TMP|TMPDIR|LANG|LC_.*|DISPLAY|WAYLAND_DISPLAY|XDG_.*)$/i.test(key)))
-      : { ...process.env }
-    for (const key of Object.keys(env)) if (/^(TEMP|TMP)$/i.test(key) || (isolated && /^(APPDATA|LOCALAPPDATA)$/i.test(key))) delete env[key]
+    await run(compiler.path, ['-INPUTCHARSET', 'UTF8', '-V2', script], {
+      env: { ...process.env, ...compiler.env }, windowsHide: true, timeout: 60000,
+    })
+    // Preserve the real Windows account environment and known folders. Spoofing
+    // APPDATA/LOCALAPPDATA while retaining that account creates an inconsistent
+    // profile and was observed to block PowerShell startup on the runner.
+    const env = { ...process.env }
+    for (const key of Object.keys(env)) if (/^(TEMP|TMP)$/i.test(key)) delete env[key]
     Object.assign(env, { TEMP: temporary, TMP: temporary })
-    if (isolated) Object.assign(env, { APPDATA: roaming, LOCALAPPDATA: local })
     const started = Date.now()
     const record = { name }
     try {
