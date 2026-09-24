@@ -46,10 +46,14 @@ can introduce sentence gaps: this is not a sample-gapless guarantee.
 - Prepared PCM: 64 MiB RAM, 256 MiB temporary disk cache; two concurrent decodes.
   Active/referenced assets cannot be evicted. Disk assets use bounded read-ahead.
   Capacity failures cancel/fail safely; incomplete assets are not played.
-- The app-owned `data/robot-pcm-cache` uses an owner lock. Shutdown releases owned
-  files; a later startup recovers only recognized generated files after confirming
-  the previous owner is gone. Developer cache/log histories are excluded from the
-  package and first-run data seeding.
+- Each cache uses a unique `data/robot-pcm-cache/run-<pid>-<nonce>` directory.
+  Shutdown releases only that run's files. A later startup recovers recognized
+  generated files only when the run's ownership metadata matches and its process
+  is gone. Live/reused PIDs and uncertain ownership are left untouched and cannot
+  block a new cache. Legacy root-level caches are also left untouched, so an old
+  version may finish using them safely. This isolation covers temporary PCM only;
+  the desktop's single-instance guard still protects the application profile.
+  Developer cache/log histories are excluded from packaging and first-run seeding.
 - Synthesized compressed sentences have a separate 8 MiB bounded cache. The
   existing user TTS library remains available: successful utterances are merged
   with ffmpeg (not concatenated MP3 bytes), using voice-aware identity. Temporary

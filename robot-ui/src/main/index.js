@@ -7,6 +7,7 @@ import { createDiagnosticsReport } from '../../../src/diagnostics/report.js'
 import { seedPackagedUserData } from '../../../src/packaging/seed-user-data.js'
 import { DEFAULT_OCR_JUDGE_PROMPT, resolveOcrJudgePrompt } from '../../../src/phase2/ocr/judge-prompt.js'
 import { speechProfileKeys, speechProfileMigration, selectSpeechProfileChanges } from '../../../src/config/speech-profiles.js'
+import { createBackendRestarter } from './backend-restart.mjs'
 
 // ─── PROJECT_ROOT ─────────────────────────────────────────────────────────────
 // dev:      src/main/ → src/ → robot-ui/ → robot-live-system/  (3 levels up)
@@ -193,7 +194,7 @@ function appendLog(value) {
 }
 
 function startBackend() {
-  if (!app.isPackaged) return   // dev: use `npm start` in a separate terminal
+  if (!app.isPackaged || app.isQuitting || _backendProcess) return
 
   _lastBackendExit = null
   _uiPort = null            // 重启后端会重新分配，先清掉旧值
@@ -242,7 +243,9 @@ function startBackend() {
   })
 
   // 后端启动后会把真实监听端口发过来
-  _backendProcess.on('message', (msg) => {
+  const backend = _backendProcess
+  backend.on('message', (msg) => {
+    if (_backendProcess !== backend || app.isQuitting) return
     if (msg?.type === 'UI_PORT' && Number.isInteger(msg.port)) {
       _uiPort = msg.port
       log(`[backend] UI 通道端口: ${_uiPort}\n`)
@@ -252,9 +255,11 @@ function startBackend() {
     }
   })
 
-  _backendProcess.on('exit', (code) => {
+  backend.on('exit', (code) => {
+    if (_backendProcess !== backend) return
     log(`[backend] process exited with code ${code}\n`)
     _backendProcess = null
+    _uiPort = null
     // 后端崩溃时界面原本只会显示"未连接"，用户无从判断是配置问题还是程序问题。
     // 把退出码和 stderr 末尾几行送到渲染进程，直接显示在标题栏上。
     const tail = stderrTail.trim().split('\n').slice(-8).join('\n')
@@ -424,6 +429,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   app.isQuitting = true
+  backendRestarter.dispose()
   _backendProcess?.kill()
 })
 
@@ -497,18 +503,12 @@ ipcMain.handle('get-backend-status', () => {
 // 界面回退到默认的 3001。
 ipcMain.handle('get-ui-port', () => _uiPort)
 
-ipcMain.handle('restart-backend', () => {
-  if (_backendProcess) {
-    // 监听 exit 事件，确保旧进程彻底退出后再等待 2000ms 重启，彻底规避 Windows 端口延迟释放(EADDRINUSE)问题
-    _backendProcess.once('exit', () => {
-      setTimeout(startBackendSafe, 2000)
-    })
-    _backendProcess.kill()
-  } else {
-    startBackendSafe()
-  }
-  return { ok: true }
+const backendRestarter = createBackendRestarter({
+  getBackend: () => _backendProcess,
+  startBackend: startBackendSafe,
+  isClosing: () => !!app.isQuitting,
 })
+ipcMain.handle('restart-backend', () => backendRestarter.request())
 
 // ─── IPC: Barrage Overlay ─────────────────────────────────────────────────────
 
