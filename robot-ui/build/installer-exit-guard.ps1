@@ -11,7 +11,6 @@ param(
 function Set-InstallerGuardFailure {
     param([string] $Stage, $Failure, [long] $Elapsed = 0)
     # Retain one small failure record in memory; never print progress or errors.
-    # Only the synthetic Windows harness requests a diagnostic output file.
     $script:InstallerGuardFailure = @{
         Stage = $Stage
         ElapsedMilliseconds = $Elapsed
@@ -19,6 +18,21 @@ function Set-InstallerGuardFailure {
         Message = $Failure.Exception.Message.Substring(0, [Math]::Min(2048, $Failure.Exception.Message.Length))
         Position = [string] $Failure.InvocationInfo.PositionMessage
     }
+}
+
+function Write-InstallerGuardDiagnostic {
+    param([string] $Phase, $ExitCode)
+    if (-not $DiagnosticPath) { return }
+    try {
+        $record = @{
+            Phase = $Phase
+            ExitCode = $ExitCode
+            Is64BitProcess = [Environment]::Is64BitProcess
+            PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+            Failure = $script:InstallerGuardFailure
+        }
+        [IO.File]::WriteAllText($DiagnosticPath, ($record | ConvertTo-Json -Depth 3 -Compress))
+    } catch {} # Diagnostics never change the guard result or emit output.
 }
 
 function Get-InstallerProcessSnapshot {
@@ -165,13 +179,9 @@ if (-not $FunctionsOnly) {
     $ProgressPreference = 'SilentlyContinue'
     $WarningPreference = 'SilentlyContinue'
     $InformationPreference = 'SilentlyContinue'
+    Write-InstallerGuardDiagnostic 'started' $null
     try { $result = Invoke-InstallerExitGuard -Directory $InstallDirectory -Executable $AppExecutable }
     catch { Set-InstallerGuardFailure 'initialization' $_; $result = 11 }
-    if ($result -ne 0 -and $DiagnosticPath) {
-        try {
-            $record = @{ ExitCode = $result; Failure = $script:InstallerGuardFailure }
-            [IO.File]::WriteAllText($DiagnosticPath, ($record | ConvertTo-Json -Depth 3 -Compress))
-        } catch {} # Diagnostics never change the guard result or emit output.
-    }
+    Write-InstallerGuardDiagnostic 'completed' $result
     exit $result
 }

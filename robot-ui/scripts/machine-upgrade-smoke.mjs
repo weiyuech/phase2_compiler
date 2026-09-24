@@ -20,6 +20,7 @@ const root = resolve(import.meta.dirname, '../..')
 const options = upgradeSmokeOptions(process.argv.slice(2))
 const workspace = await mkdtemp(join(options.packaged ? process.env.RUNNER_TEMP : tmpdir(), 'miaofei-upgrade-audio-'))
 const roaming = join(workspace, 'roaming')
+const installerTemp = join(workspace, 'installer-temp')
 const profile = options.packaged ? join(roaming, 'robot-live-ui') : workspace
 const installDirectory = join(workspace, 'installed')
 const executable = options.installer ? join(installDirectory, 'robot-live-ui.exe') : options.executable
@@ -132,11 +133,35 @@ function isolatedEnvironment() {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(PATH|PATHEXT|HOME|USERPROFILE|USERNAME|USERDOMAIN|APPDATA|LOCALAPPDATA|PROGRAMDATA|ALLUSERSPROFILE|PUBLIC|PROGRAMFILES(?:\(X86\))?|PROGRAMW6432|COMMONPROGRAMFILES(?:\(X86\))?|COMMONPROGRAMW6432|PROCESSOR_ARCHITECTURE|SYSTEMROOT|WINDIR|COMSPEC|SYSTEMDRIVE|TEMP|TMP|TMPDIR|LANG|LC_.*|DISPLAY|WAYLAND_DISPLAY|XDG_.*)$/i.test(key)))
   if (options.packaged) {
     // Remove case-insensitive duplicates before assigning Windows variables.
-    for (const key of Object.keys(env)) if (/^(APPDATA|LOCALAPPDATA)$/i.test(key)) delete env[key]
+    for (const key of Object.keys(env)) if (/^(APPDATA|LOCALAPPDATA|TEMP|TMP)$/i.test(key)) delete env[key]
     env.APPDATA = roaming
     env.LOCALAPPDATA = join(workspace, 'local')
+    env.TEMP = installerTemp
+    env.TMP = installerTemp
   } else env.MIAOFEI_DEV_PROFILE = profile
   return env
+}
+const installerDiagnosticName = name => /^robot-live-(?:installer-[a-z0-9-]+|vc-redist(?:_[a-z0-9_-]+)?)\.(?:log|json|txt)$/i.test(name)
+async function captureInstallerDiagnostics(label, record) {
+  const names = (await readdir(installerTemp)).filter(installerDiagnosticName).sort()
+  record.diagnostics = []
+  for (const name of names) {
+    const bytes = await readFile(join(installerTemp, name))
+    const utf16 = bytes[0] === 0xff && bytes[1] === 0xfe
+    const text = bytes.toString(utf16 ? 'utf16le' : 'utf8').replace(/^\uFEFF/u, '')
+    // Guard failures are tiny; VC++ bootstrapper/MSI logs may be much larger.
+    // Keep bounded tails for those logs, scoped only to this synthetic install.
+    const retained = text.length > 262144 ? '[Earlier log content omitted]\n' + text.slice(-262144) : text
+    const target = `installer-${label}-${name}`
+    await writeFile(join(output, target), retained)
+    record.diagnostics.push(target)
+    if (record.error) {
+      const lines = retained.trim().split(/\r?\n/u)
+      const reason = /installer-/i.test(name) ? retained.slice(-4000) : lines.slice(-12).join('\n').slice(-2000)
+      console.error(`[machine-upgrade] ${label} ${name}:\n${reason}`)
+    }
+  }
+  if (record.error && !names.length) console.error(`[machine-upgrade] ${label}: no installer guard or VC++ diagnostics were created`)
 }
 async function runInstaller(label) {
   assert.equal(options.packaged, true)
@@ -146,7 +171,13 @@ async function runInstaller(label) {
   // NSIS /D must be last and unquoted. Runner-generated paths contain no spaces;
   // fail rather than accidentally install into the real default destination.
   assert.doesNotMatch(installDirectory, /[\s"]/u, 'NSIS acceptance needs a runner temp path without whitespace')
+  // Remove only diagnostics from the prior invocation inside our own temporary
+  // directory so an initial install's success cannot disguise an upgrade error.
+  for (const name of (await readdir(installerTemp)).filter(installerDiagnosticName)) await rm(join(installerTemp, name))
   const started = Date.now()
+  const record = { label }
+  report.installer ||= []
+  report.installer.push(record)
   const child = spawn(options.installer, ['/S', `/D=${installDirectory}`], {
     env: isolatedEnvironment(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -164,13 +195,21 @@ async function runInstaller(label) {
         reject(new Error(`${label}: NSIS installer did not finish within 180 seconds`))
       }, 180000)
     })
-    report.installer ||= []
-    report.installer.push({ label, ...result, elapsedMs: Date.now() - started })
+    Object.assign(record, result)
     assert.equal(result.code, 0, `${label}: installer failed closed or failed installation (exit ${result.code}, signal ${result.signal})`)
     assert.ok((await stat(executable)).isFile(), `${label}: requested isolated install directory has no application`)
+  } catch (error) {
+    record.error = error.message
+    throw error
   } finally {
     clearTimeout(timeout)
+    record.elapsedMs = Date.now() - started
     await writeFile(join(output, `installer-${label}.log`), log || '(installer produced no stdout/stderr)\n')
+    try { await captureInstallerDiagnostics(label, record) }
+    catch (error) {
+      record.diagnosticsError = error.message
+      console.error(`[machine-upgrade] ${label}: could not retain installer diagnostics: ${error.message}`)
+    }
   }
 }
 async function launch() {
@@ -302,7 +341,10 @@ async function overwriteFromTray() {
 
 try {
   await mkdir(profile, { recursive: true })
-  if (options.packaged) await mkdir(join(workspace, 'local'), { recursive: true })
+  if (options.packaged) {
+    await mkdir(join(workspace, 'local'), { recursive: true })
+    await mkdir(installerTemp, { recursive: true })
+  }
   for (const id of ids) endpoints.push(await simulatedRobot(id))
   for (const id of ids) {
     const path = join(profile, `source-${id}.mp3`)
