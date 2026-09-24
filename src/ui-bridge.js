@@ -29,6 +29,9 @@ const handlers = {
   // Queries (reply to specific client)
   onGetTourList:   null,
   onGetTourState:  null,
+  onStartStationarySpeech: null,
+  onStopStationarySpeech: null,
+  onGetStationarySpeechState: null,
   onGetKbMaps:     null,
   onGetKbList:     null,
   onGetKbPaths:    null,
@@ -189,7 +192,7 @@ function listen(port, isFallback) {
         const { type, data: msgData } = msg ?? {}
 
         // Keep operator actions observable without logging text, credentials or frames.
-        if (['START_TOUR', 'PAUSE_TOUR', 'RESUME_TOUR', 'STOP_TOUR', 'TEST_SPEECH'].includes(type)) {
+        if (['START_TOUR', 'PAUSE_TOUR', 'RESUME_TOUR', 'STOP_TOUR', 'TEST_SPEECH', 'START_STATIONARY_SPEECH', 'STOP_STATIONARY_SPEECH'].includes(type)) {
           console.log(`[UI] 收到控制指令: ${type}`)
         }
 
@@ -219,6 +222,12 @@ function listen(port, isFallback) {
             break
           case 'TEST_SPEECH':
             handlers.onTestSpeech?.(msgData.text)
+            break
+          case 'START_STATIONARY_SPEECH':
+            handlers.onStartStationarySpeech?.(msgData)
+            break
+          case 'STOP_STATIONARY_SPEECH':
+            handlers.onStopStationarySpeech?.()
             break
 
           // ── Tour controls ───────────────────────────────────────────────────
@@ -251,12 +260,14 @@ function listen(port, isFallback) {
           }
           case 'GET_TOUR_LIST':
           case 'GET_TOUR_STATE':
+          case 'GET_STATIONARY_SPEECH_STATE':
           case 'GET_KB_MAPS':
           case 'GET_KB_LIST':
           case 'GET_KB_PATHS': {
             const reply = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
             if (type === 'GET_TOUR_LIST') handlers.onGetTourList?.(reply)
             if (type === 'GET_TOUR_STATE') handlers.onGetTourState?.(reply)
+            if (type === 'GET_STATIONARY_SPEECH_STATE') handlers.onGetStationarySpeechState?.(reply)
             if (type === 'GET_KB_MAPS')   handlers.onGetKbMaps?.(reply)
             if (type === 'GET_KB_LIST')   handlers.onGetKbList?.(reply)
             if (type === 'GET_KB_PATHS')  handlers.onGetKbPaths?.(msgData, reply)

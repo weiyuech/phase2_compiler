@@ -13,5 +13,6 @@ export function createSpeechServices({ env = process.env, audioOutput, coordinat
   }
   // Manual testing shares transit credentials, not point narration credentials.
   services.manualTts = services.transitTts
+  services.stationaryTts = services.tts
   return services
 }

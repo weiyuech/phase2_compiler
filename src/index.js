@@ -71,7 +71,7 @@ const audioOutput = new AudioOutputRouter({
 audioDiagnostics.event('runtime', { ...audioOutput.getConfig(), connected: robot.isConnected() })
 
 const speechCoordinator = new SpeechCoordinator({ diagnostics: audioDiagnostics })
-const { llm, tts, barrageLlm, barrageTts, transitLlm, transitTts, manualTts } = createSpeechServices({
+const { llm, tts, barrageLlm, barrageTts, transitLlm, transitTts, manualTts, stationaryTts } = createSpeechServices({
   audioOutput, coordinator: speechCoordinator, diagnostics: audioDiagnostics,
 })
 await Promise.all([llm.init(), barrageLlm.init(), transitLlm.init()])
@@ -136,10 +136,13 @@ const phase2 = initPhase2({
   onBarrageSpeechEnd: updateCruisingDucking,
 })
 
+const tourControls = registerTourControls({ uiBridge, tour, tts: manualTts, stationaryTts })
+
 // ── State snapshot for late-joining UI clients ────────────────────────────────
 
 uiBridge.on('onNewClient', (sendTo) => {
   sendTo('TOUR_STATE', getTourState(tour))
+  sendTo('STATIONARY_SPEECH_STATE', tourControls.snapshot())
   sendTo('AUDIO_DIAGNOSTICS', { snapshot: audioDiagnostics.snapshot() })
   sendTo('TRANSIT_CONFIG', transitAudio.getConfig())
   sendTo('AUDIO_OUTPUT_CONFIG', {
@@ -158,7 +161,6 @@ uiBridge.on('onNewClient', (sendTo) => {
 
 // ── UI Bridge commands ────────────────────────────────────────────────────────
 
-registerTourControls({ uiBridge, tour, tts: manualTts })
 uiBridge.on('onPause', () => speechCoordinator.setPauseReason('operator', ['cruise', 'transit', 'barrage'], true))
 uiBridge.on('onResume', () => speechCoordinator.setPauseReason('operator', [], false))
 uiBridge.on('onDuckStart', () => {
@@ -250,6 +252,7 @@ uiBridge.on('onSelectMap', async (mapName) => {
 })
 
 uiBridge.on('onStartTour', (payload) => {
+  if (!tourControls.canStartTour()) return
   // Payload is either {repeatCount:N} from new UI, or undefined from legacy clients
   const repeatCount = (payload && typeof payload === 'object') ? payload.repeatCount : payload
   cruise.start(repeatCount)
@@ -264,6 +267,7 @@ uiBridge.on('onResumeTour', () => {
 })
 
 uiBridge.on('onStopTour', () => {
+  if (!tour.isRunning && !tour.isPaused) return
   audioDiagnostics.event('stop', { source: 'point', reason: 'stop' })
   cruise.stop()
 })
@@ -640,6 +644,7 @@ uiBridge.on('onSetAudioOutputConfig', (config) => {
       // Never leave a previous destination playing after the user switches.
       // Volume-only changes are applied by the router without cancelling speech.
       destinationChanged = true
+      tourControls.stationary.stop('音频输出已更改，原地播报已停止')
       audioOutputGeneration++
       speechCoordinator.cancelAll()
       tts.stop()
@@ -762,6 +767,7 @@ async function playPoint(item, point, context = {}) {
 }
 
 function invalidateRobotSpeech() {
+  tourControls.stationary.stop('机器人连接已更改，原地播报已停止')
   audioOutputGeneration++
   speechCoordinator.cancelAll()
   tts.stop()
@@ -777,6 +783,7 @@ let shuttingDown = false
 async function shutdown() {
   if (shuttingDown) return
   shuttingDown = true
+  tourControls.stationary.stop()
   phase2.barrageManager?.stop?.()
   speechCoordinator.cancelAll()
   cruise.stop()

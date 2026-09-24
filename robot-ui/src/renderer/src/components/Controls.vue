@@ -13,7 +13,7 @@
         </div>
         <div class="btn-row">
           <template v-if="tourStatus === 'idle' || tourStatus === 'finished'">
-            <el-button type="primary" :disabled="!wsConnected" @click="startTour">▶ 开始巡游</el-button>
+            <el-button type="primary" :disabled="!canStartTour" @click="startTour">▶ 开始巡游</el-button>
             <div class="repeat-input">
               <span class="repeat-label">循环</span>
               <el-input-number
@@ -96,6 +96,25 @@
           </div>
         </section>
 
+        <section class="control-card stationary-card" aria-label="原地播报">
+          <div class="control-heading">
+            <div class="card-title">原地播报</div>
+            <div class="status-pill" :class="stationaryActive ? 'running' : 'dim'" role="status">
+              {{ stationaryStatusLabel }}
+              <span v-if="stationaryActive && stationaryIteration > 0"> · 第 {{ stationaryIteration }} 轮</span>
+            </div>
+          </div>
+          <p class="hint speech-profile-hint">使用“系统设置 → 巡游讲解”的配置。</p>
+          <el-input v-model="stationaryText" placeholder="输入原地播报文字…" type="textarea" :rows="4" aria-label="原地播报文字" />
+          <div class="btn-row test-actions">
+            <el-checkbox v-model="stationaryLoop" :disabled="stationaryActive || stationaryCommandPending">循环播报</el-checkbox>
+            <el-button type="primary" :disabled="!canStartStationary" @click="startStationary">开始播报</el-button>
+            <el-button type="danger" :disabled="!canStopStationary" @click="stopStationary">停止播报</el-button>
+          </div>
+          <p v-if="stationaryDisabledReason" class="hint" role="status">{{ stationaryDisabledReason }}</p>
+          <p v-if="stationaryMessage" class="hint" role="status">{{ stationaryMessage }}</p>
+        </section>
+
         <section class="control-card test-card" aria-label="手动播报测试">
           <div class="control-heading"><div class="card-title">手动播报测试</div></div>
           <p class="hint">使用“系统设置 → 过渡音频与手动播报”的 TTS 凭据和音色。</p>
@@ -133,6 +152,17 @@ const testText   = ref('')
 const tourStatus = ref('idle')   // idle | running | paused | finished
 const tourStateKnown = ref(false)
 const tourIsActive = computed(() => tourStatus.value === 'running' || tourStatus.value === 'paused')
+const stationaryText = ref('')
+const stationaryLoop = ref(false)
+const stationaryState = ref('idle')
+const stationaryStateKnown = ref(false)
+const stationaryActive = ref(false)
+const stationaryIteration = ref(0)
+const stationaryMessage = ref('')
+const stationaryCommandPending = ref(false)
+const manualActive = ref(false)
+const manualPending = ref(false)
+const stationaryStates = new Set(['idle', 'preparing', 'playing', 'waiting', 'stopping', 'completed', 'cancelled', 'failed'])
 
 const barrageEnabled = ref(false)
 const barrageRegion = ref(null)
@@ -162,10 +192,35 @@ const testSpeechDisabledReason = computed(() => {
   if (!wsConnected.value) return '后端未连接，请等待连接后再测试'
   if (!tourStateKnown.value) return '正在同步巡游状态，暂不能测试播报；将自动重试'
   if (tourIsActive.value) return '请先停止巡游，再进行手动播报测试'
+  if (!stationaryStateKnown.value) return '正在同步播报状态，暂不能测试播报；将自动重试'
+  if (stationaryActive.value || stationaryCommandPending.value) return '请先停止原地播报，再进行手动播报测试'
+  if (manualActive.value || manualPending.value) return '手动播报正在进行，请等待结束'
   if (!testText.value.trim()) return '请先输入测试文本'
   return ''
 })
 const canTestSpeech = computed(() => !testSpeechDisabledReason.value)
+const stationaryDisabledReason = computed(() => {
+  if (!wsConnected.value) return '后端未连接，请等待重新连接'
+  if (!tourStateKnown.value || !stationaryStateKnown.value) return '正在同步播报状态，将自动重试'
+  if (tourIsActive.value) return '请先停止巡游，再开始原地播报'
+  if (stationaryCommandPending.value) return '指令已发送，等待后端确认…'
+  if (stationaryActive.value) return ''
+  if (manualActive.value || manualPending.value) return '请等待手动播报结束，再开始原地播报'
+  if (!stationaryText.value.trim()) return '请输入要朗读的文字；默认播报一次'
+  return ''
+})
+const canStartStationary = computed(() => !stationaryDisabledReason.value && !stationaryActive.value)
+const canStopStationary = computed(() => wsConnected.value && stationaryStateKnown.value
+  && stationaryActive.value && stationaryState.value !== 'stopping' && !stationaryCommandPending.value)
+const canStartTour = computed(() => wsConnected.value && tourStateKnown.value && stationaryStateKnown.value
+  && !tourIsActive.value && !stationaryActive.value && !stationaryCommandPending.value
+  && !manualActive.value && !manualPending.value)
+const stationaryStatusLabel = computed(() => {
+  if (!wsConnected.value) return '未连接'
+  if (!stationaryStateKnown.value) return '同步中'
+  return { idle: '待机', preparing: '准备中', playing: '播报中', waiting: '等待下一轮',
+    stopping: '停止中', completed: '已完成', cancelled: '已停止', failed: '播报失败' }[stationaryState.value]
+})
 
 function send(type, data = {}) {
   const socket = props.wsRef?.value || props.wsRef;
@@ -184,7 +239,28 @@ function handleMessage(raw) {
     const { type, data } = JSON.parse(raw)
     switch (type) {
       case 'TEST_SPEECH_STATUS':
+        if (!['preparing', 'playing', 'completed', 'cancelled', 'failed'].includes(data?.state)) break
         testSpeechStatus.value = data?.message || ''
+        manualActive.value = data.state === 'preparing' || data.state === 'playing'
+        manualPending.value = false
+        break
+      case 'STATIONARY_SPEECH_STATE':
+        if (!stationaryStates.has(data?.state) || typeof data.active !== 'boolean'
+          || typeof data.loop !== 'boolean' || typeof data.manualActive !== 'boolean') {
+          stationaryStateKnown.value = false
+          awaitSpeechConfirmation()
+          break
+        }
+        stationaryState.value = data.state
+        stationaryActive.value = data.active
+        stationaryIteration.value = Number.isInteger(data.iteration) && data.iteration >= 0 ? data.iteration : 0
+        stationaryMessage.value = typeof data.message === 'string' ? data.message : ''
+        if (data.active) stationaryLoop.value = data.loop
+        manualActive.value = data.manualActive
+        manualPending.value = false
+        stationaryStateKnown.value = true
+        stationaryCommandPending.value = false
+        clearTimeout(stationaryStateRetry)
         break
       case 'TOUR_STATE':
         if (typeof data?.running !== 'boolean' || typeof data?.paused !== 'boolean') break
@@ -249,8 +325,10 @@ function handleMessage(raw) {
 
 let currentSocket = null
 let tourStateRetry = null
+let stationaryStateRetry = null
 function detachSocket() {
   clearTimeout(tourStateRetry)
+  clearTimeout(stationaryStateRetry)
   currentSocket?.removeEventListener('message', onMsg)
   currentSocket?.removeEventListener('open', onSocketOpen)
   currentSocket?.removeEventListener('close', onSocketClose)
@@ -261,11 +339,25 @@ function requestTourState() {
   send('GET_TOUR_STATE')
   tourStateRetry = setTimeout(requestTourState, 2000)
 }
+function requestStationaryState() {
+  clearTimeout(stationaryStateRetry)
+  if (!wsConnected.value || (stationaryStateKnown.value && !stationaryCommandPending.value && !manualPending.value)) return
+  send('GET_STATIONARY_SPEECH_STATE')
+  stationaryStateRetry = setTimeout(requestStationaryState, 2000)
+}
+function awaitSpeechConfirmation() {
+  clearTimeout(stationaryStateRetry)
+  stationaryStateRetry = setTimeout(requestStationaryState, 2000)
+}
 function onSocketOpen() {
   wsConnected.value = currentSocket?.readyState === 1
   if (!wsConnected.value) return
   tourStateKnown.value = false
+  stationaryStateKnown.value = false
+  stationaryCommandPending.value = false
+  manualPending.value = false
   requestTourState()
+  requestStationaryState()
   send('GET_BARRAGE_CONFIG')
   // The backend process does not persist the selected screen rectangle. If it
   // restarted while this renderer/capture survived, restore the active OCR
@@ -276,14 +368,17 @@ function onSocketOpen() {
 }
 function onSocketClose() {
   clearTimeout(tourStateRetry)
+  clearTimeout(stationaryStateRetry)
   wsConnected.value = false
   tourStateKnown.value = false
+  stationaryStateKnown.value = false
 }
 watch(() => props.wsRef?.value || props.wsRef, (socket) => {
   detachSocket()
   currentSocket = socket || null
   wsConnected.value = false
   tourStateKnown.value = false
+  stationaryStateKnown.value = false
   if (!currentSocket) return
   currentSocket.addEventListener('message', onMsg)
   currentSocket.addEventListener('close', onSocketClose)
@@ -344,9 +439,25 @@ async function downloadBarrageLog() {
 }
 
 function startTour() {
+  if (!canStartTour.value) return
   const n = Math.max(1, Math.floor(Number(repeatCount.value)) || 1)
-  currentIteration.value = 1
   send('START_TOUR', { repeatCount: n })
+}
+
+function startStationary() {
+  if (!canStartStationary.value) return
+  if (send('START_STATIONARY_SPEECH', { text: stationaryText.value.trim(), loop: stationaryLoop.value === true })) {
+    stationaryCommandPending.value = true
+    awaitSpeechConfirmation()
+  }
+}
+
+function stopStationary() {
+  if (!canStopStationary.value) return
+  if (send('STOP_STATIONARY_SPEECH')) {
+    stationaryCommandPending.value = true
+    awaitSpeechConfirmation()
+  }
 }
 
 function togglePause() {
@@ -364,7 +475,9 @@ function sendTestSpeech() {
   }
   if (!canTestSpeech.value) return
   if (send('TEST_SPEECH', { text: testText.value.trim() })) {
+    manualPending.value = true
     testSpeechStatus.value = '指令已发送，等待后端确认…'
+    awaitSpeechConfirmation()
   }
 }
 
@@ -482,6 +595,7 @@ const tourStatusClass = computed(() => ({
 .ocr-status { font-size: 11px; color: var(--amber); margin: -4px 0 12px; }
 .ocr-status.ready { color: var(--green); }
 .hint { font-size: 11px; color: var(--text-dim); margin-top: 12px; overflow-wrap: anywhere; }
+.speech-profile-hint { margin: 0 0 12px; line-height: 1.6; }
 .captured-text { color: var(--amber); }
 .card-footer { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
 .log-download { padding: 0; min-height: 24px; height: auto; color: var(--text-dim); }

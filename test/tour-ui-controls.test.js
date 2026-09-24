@@ -30,7 +30,9 @@ function fixture(source = bridgeSource) {
   const tour = { isRunning: false, isPaused: false, repeatCount: 1, currentIteration: 0 }
   const calls = []
   const tts = { speak: async text => { calls.push(text); return { ok: true } } }
-  registerTourControls({ uiBridge: bridge, tour, tts, logger })
+  const stationaryCalls = []
+  const stationaryTts = { speak: async (text, options) => { stationaryCalls.push({ text, options }); return { ok: true } } }
+  const controls = registerTourControls({ uiBridge: bridge, tour, tts, stationaryTts, logger })
   bridge.start(0)
   const socket = new EventEmitter()
   socket.readyState = 1
@@ -40,7 +42,7 @@ function fixture(source = bridgeSource) {
   server.emit('connection', socket)
   socket.messages.length = 0
   return {
-    tour, tts, calls, socket, bridge, logs,
+    tour, tts, calls, socket, bridge, logs, controls, stationaryCalls, stationaryTts,
     async send(type, data = {}) {
       socket.emit('message', Buffer.from(JSON.stringify({ type, data })), false)
       await new Promise(resolve => setImmediate(resolve))
@@ -79,14 +81,14 @@ test('manual playback remains available outside a tour', async () => {
   const h = fixture()
   await h.send('TEST_SPEECH', { text: 'Test sentence.' })
   assert.deepEqual(h.calls, ['Test sentence.'])
-  assert.deepEqual(h.socket.messages.map(m => m.data.state), ['preparing', 'completed'])
+  assert.deepEqual(h.socket.messages.filter(m => m.type === 'TEST_SPEECH_STATUS').map(m => m.data.state), ['preparing', 'completed'])
 })
 
 test('normal manual-test cancellation is not reported as an error', async () => {
   const h = fixture()
   h.tts.speak = async () => ({ ok: false, aborted: true })
   await h.send('TEST_SPEECH', { text: 'Cancelled test.' })
-  assert.deepEqual(h.socket.messages.map(m => m.data.state), ['preparing', 'cancelled'])
+  assert.deepEqual(h.socket.messages.filter(m => m.type === 'TEST_SPEECH_STATUS').map(m => m.data.state), ['preparing', 'cancelled'])
 })
 
 test('manual playback failures retain useful messages and tolerate missing error details', async () => {
@@ -99,7 +101,7 @@ test('manual playback failures retain useful messages and tolerate missing error
   ]) {
     h.tts.speak = speak
     await h.send('TEST_SPEECH', { text: 'Test sentence.' })
-    assert.equal(h.socket.messages.at(-1).data.message, `手动播报测试失败: ${expected}`)
+    assert.equal(h.socket.messages.findLast(m => m.type === 'ERROR').data.message, `手动播报测试失败: ${expected}`)
   }
 })
 
@@ -126,6 +128,7 @@ test('late-joining clients also receive a tour snapshot from the application hoo
   const tour = { isRunning: true, isPaused: false, repeatCount: 3, currentIteration: 2 }
   const context = vm.createContext({
     uiBridge: { on: (_name, handler) => { hook = handler } }, tour, getTourState,
+    tourControls: { snapshot: () => ({ active: true, loop: true, iteration: 3, manualActive: false }) },
     audioDiagnostics: { snapshot: () => ({}) }, transitAudio: { getConfig: () => ({}) },
     audioOutput: { getConfig: () => ({}) }, robotConnected: false,
   })
@@ -134,6 +137,7 @@ test('late-joining clients also receive a tour snapshot from the application hoo
   hook((type, data) => sent.push({ type, data }))
   assert.deepEqual(sent.find(message => message.type === 'TOUR_STATE').data,
     { running: true, paused: false, repeatCount: 3, currentIteration: 2 })
+  assert.equal(sent.find(message => message.type === 'STATIONARY_SPEECH_STATE').data.iteration, 3)
 })
 
 test('operator failures are recorded in backend output as well as UI events', async () => {
@@ -143,7 +147,7 @@ test('operator failures are recorded in backend output as well as UI events', as
   assert.ok(h.logs.some(line => line.includes('收到控制指令: TEST_SPEECH')))
   assert.ok(h.logs.some(line => line.includes('[UI ERROR]') && line.includes('Missing audio device')))
   assert.equal(h.logs.some(line => line.includes('private draft')), false)
-  assert.equal(h.socket.messages.at(-1).type, 'ERROR')
+  assert.ok(h.socket.messages.some(m => m.type === 'ERROR'))
 })
 
 test('sync and async command exceptions reach the UI instead of being lost', async () => {
@@ -160,5 +164,64 @@ test('manual playback reports preparation, actual playback and completion', asyn
   const h = fixture()
   h.tts.speak = async (_text, options) => { options.onAudioStart(); return { ok: true } }
   await h.send('TEST_SPEECH', { text: 'hello' })
-  assert.deepEqual(h.socket.messages.map(m => m.data.state), ['preparing', 'playing', 'completed'])
+  assert.deepEqual(h.socket.messages.filter(m => m.type === 'TEST_SPEECH_STATUS').map(m => m.data.state), ['preparing', 'playing', 'completed'])
+})
+
+test('stationary commands use only the cruise service, publish state and query without replay', async () => {
+  const h = fixture()
+  await h.send('START_STATIONARY_SPEECH', { text: 'private stationary draft', loop: false })
+  await h.controls.stationary.finished
+  assert.deepEqual(h.calls, [])
+  assert.deepEqual(h.stationaryCalls.map(call => call.text), ['private stationary draft'])
+  await h.send('GET_STATIONARY_SPEECH_STATE')
+  assert.equal(h.socket.messages.at(-1).type, 'STATIONARY_SPEECH_STATE')
+  assert.equal(h.socket.messages.at(-1).data.state, 'completed')
+  assert.equal(h.socket.messages.at(-1).data.manualActive, false)
+  assert.equal(h.stationaryCalls.length, 1)
+  assert.equal(h.logs.some(line => line.includes('private stationary draft')), false)
+})
+
+test('backend refuses simultaneous tour, manual, duplicate stationary and rejects malformed commands', async () => {
+  const h = fixture()
+  for (const paused of [false, true]) {
+    Object.assign(h.tour, { isRunning: true, isPaused: paused })
+    await h.send('START_STATIONARY_SPEECH', { text: 'must not play', loop: true })
+    assert.match(h.socket.messages.at(-1).data.message, /停止巡游/)
+    assert.equal(h.stationaryCalls.length, 0)
+  }
+  Object.assign(h.tour, { isRunning: false, isPaused: false })
+  for (const data of [null, {}, { text: ' ' }, { text: 'bad loop', loop: 'false' }]) {
+    await h.send('START_STATIONARY_SPEECH', data)
+    assert.equal(h.socket.messages.at(-1).type, 'ERROR')
+    assert.equal(h.controls.stationary.active, false)
+  }
+  h.stationaryTts.speak = (_text, { signal }) => new Promise(resolve => {
+    signal.addEventListener('abort', () => resolve({ aborted: true }), { once: true })
+  })
+  await h.send('START_STATIONARY_SPEECH', { text: 'hold', loop: true })
+  await h.send('TEST_SPEECH', { text: 'blocked manual' })
+  assert.deepEqual(h.calls, [])
+  assert.equal(h.controls.canStartTour(), false)
+  await h.send('START_STATIONARY_SPEECH', { text: 'duplicate' })
+  assert.match(h.socket.messages.at(-1).data.message, /原地播报正在进行/)
+  await h.send('STOP_STATIONARY_SPEECH')
+  await h.controls.stationary.finished
+  assert.equal(h.controls.canStartTour(), true)
+  assert.equal(h.controls.snapshot().state, 'cancelled')
+})
+
+test('manual in-flight state excludes stationary/tour and is released after failure', async () => {
+  const h = fixture()
+  let finish
+  h.tts.speak = () => new Promise(resolve => { finish = resolve })
+  await h.send('TEST_SPEECH', { text: 'hold manual' })
+  assert.equal(h.controls.snapshot().manualActive, true)
+  assert.equal(h.controls.canStartTour(), false)
+  await h.send('START_STATIONARY_SPEECH', { text: 'blocked', loop: true })
+  assert.match(h.socket.messages.at(-1).data.message, /等待手动播报/)
+  assert.deepEqual(h.stationaryCalls, [])
+  finish({ ok: false, error: new Error('test failure') })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(h.controls.snapshot().manualActive, false)
+  assert.equal(h.controls.canStartTour(), true)
 })

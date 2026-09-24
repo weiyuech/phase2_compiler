@@ -1,6 +1,6 @@
 # 开发维护与交接
 
-当前多机器分支版本：`1.1.0-test.1`。既有测试标签与安装包保持不变；运行或交接时同时记录源码提交号与 UI 版本，不只看版本名称。新安装包须经过下文的 Windows 检查与精确标签交付。
+当前多机器测试版本：`1.1.0-test.3`，包含升级保护和原地播报。既有测试标签与安装包保持不变；运行或交接时同时记录源码提交号、未提交改动与 UI 版本，不只看版本名称。新安装包须经过下文的 Windows 检查与精确标签交付。
 
 ## 1. 先确认正在操作哪份代码
 
@@ -37,10 +37,12 @@ npm --prefix robot-ui ci
 npm run test:all
 npm run test:ocr
 npm --prefix robot-ui run build
+npm --prefix robot-ui run test:upgrade-audio
 ```
 
 - `npm test` 只跑后端，`npm run test:ui` 只跑 UI，`test:all` 显式枚举两组文件并使用与 Windows CI 相同的并发数，避免 shell 通配符差异。
 - `test:ocr` 使用真实 Sharp、ONNX 检测/识别模型和固定图，包含 session 初始化、结果校验与 worker 关闭。无需密钥、截屏权限或机器人，不写用户设置。
+- `test:upgrade-audio` 启动真实 Electron、三个 utility 后台和三个本地模拟机器人，使用临时旧用户配置及真实 MP3，逐字节校验 PCM、资料继承、切页/分屏、独立重启与崩溃恢复；无外部 API 请求、实体机器人或扬声器播放。默认验证开发运行时；Windows CI 使用 `--executable` 验证打包程序，并通过 `--installer` 检查托盘状态下覆盖安装。所有 packaged 测试仅限干净 CI 运行器。
 - 完整原生 OCR 生命周期：`node scripts/eval-ocr-workflow.mjs --report <临时报告路径>`。默认判断/回答是受控替身，不产生 API 费用；不等于真实模型语义准确率。
 - `scripts/eval-ocr-judge-live.mjs --settings <测试账号配置> ...` 会真实调用 API，需单独授权和额度。不要把密钥或生产文本加进测试样例。
 - Windows 打包原生依赖、安装升级、OS 选区权限和实体机器人听感不能用 Mac 单元测试代替。已知边界与现场验收见 [测试安装包说明](windows-test-installer.md)。
@@ -53,6 +55,8 @@ npm --prefix robot-ui run build
 | 应用接线、共享对象与销毁 | `src/index.js`、`src/ui-bridge.js` | `tour-ui-controls`、`cruise-websocket` |
 | 机器人连接/导航 | `src/robot/listener.js`、`goal-tracker.js`、`src/task/cruise-controller.js` | `cruise-navigation`、`cruise-websocket` |
 | 点位与过渡内容 | `src/task/point-narrator.js`、`src/transit/manager.js` | `point-handoff`、`transit-pool`、`local-playback-handoff` |
+| 原地播报与手动播报 | `src/task/stationary-speech.js`、`ui-controls.js`、`Controls.vue` | `stationary-speech`、`tour-ui-controls`、`controls-tour-state` |
+| 升级进程交接 | `robot-ui/src/main/backend-restart.mjs`、`robot-ui/build/installer-exit-guard.ps1` | `backend-restart`、`installer-exit-guard`、[升级验收](three-machine-upgrade.md) |
 | 优先级、准备、句尾交接 | `src/tts/speech-coordinator.js`、`sentence-preparation.js`、`index.js` | `speech-coordinator`、`sentence-engine`、`prepared-handoff-integration` |
 | 机器人 PCM 发送与缓存 | `src/tts/audio-output-router.js`、`prepared-audio-router.js`、`prepared-audio-cache.js` | `robot-prepared-audio`、`audio-output` |
 | 弹幕生产接线与回复机会 | `src/phase2/index.js`、`barrage-decisions.js`、`barrage-timing.js` | `barrage-decisions`、`barrage-pipeline` |

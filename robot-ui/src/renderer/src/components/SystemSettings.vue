@@ -194,7 +194,7 @@
         <div class="panel-header">音频输出</div>
         <div class="panel-body">
           <p class="panel-note" style="margin: 0 0 18px">
-            统一控制巡游讲解、弹幕回复、过渡音频和手动播报测试的输出位置。
+            统一控制巡游讲解、原地播报、弹幕回复、过渡音频和手动播报测试的输出位置。
           </p>
 
           <div class="params-grid" style="max-width: 620px">
@@ -263,7 +263,7 @@ const navItems = [
 const activeSection = ref('cruise')
 const speechProfileTitles = { cruise: '巡游讲解', transit: '过渡音频与手动播报', barrage: '弹幕回复' }
 const speechProfileDescriptions = {
-  cruise: '用于机器人到达点位后的讲解：文字改写和语音合成。',
+  cruise: '用于机器人到达点位后的讲解：文字改写和语音合成。原地播报也使用本组 TTS 密钥与音色，直接朗读原文，不做 LLM 改写。',
   transit: '用于过渡音频的文字改写与语音合成，以及手动播报测试的语音合成。过渡文字、音频文件和启用开关在“播报控制 → 过渡音频”设置。',
   barrage: '用于弹幕问题判断、回复生成和回复语音合成。',
 }
@@ -580,11 +580,12 @@ async function triggerRestart() {
   if (!window.api?.restartBackend) return
   restartMsg.value = '已保存，后端重启中…'
   try {
-    await window.api.restartBackend()
-    // 给后端约 2s 启动，再更新提示
-    setTimeout(() => { restartMsg.value = '已生效，前端将自动重连' }, 2000)
+    const result = await window.api.restartBackend()
+    if (result?.ok === false) throw new Error(result.error || '无法重启后端')
+    restartMsg.value = '已重启，前端将自动重连'
   } catch (e) {
-    restartMsg.value = '重启失败：' + e.message
+    restartMsg.value = '设置已保存，重启失败：' + e.message
+    ElMessage.error(restartMsg.value)
   }
 }
 

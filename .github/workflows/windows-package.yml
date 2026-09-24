@@ -265,6 +265,25 @@ jobs:
         timeout-minutes: 5
         run: node robot-ui/scripts/machine-shell-smoke.mjs --executable release/win-unpacked/robot-live-ui.exe --shots release/machine-shell-preview
 
+      - name: Verify packaged upgrade, tray reinstall and three robot audio streams
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          $version = (Get-Content robot-ui/package.json -Raw | ConvertFrom-Json).version
+          node robot-ui/scripts/machine-upgrade-smoke.mjs --installer "release/Setup.$version.exe" --output release/machine-upgrade-smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content release/machine-upgrade-smoke/machine-upgrade-smoke.json -Raw | ConvertFrom-Json
+          if ($report.status -ne 'passed' -or -not $report.installerVerified) { throw 'Packaged upgrade or installer handoff did not pass' }
+
+      - name: Preserve upgrade verification diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: machine-upgrade-verification
+          path: release/machine-upgrade-smoke/
+          if-no-files-found: ignore
+
       - name: Upload Build Artifacts
         continue-on-error: true
         uses: actions/upload-artifact@v7
