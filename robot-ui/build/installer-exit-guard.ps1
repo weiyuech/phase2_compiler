@@ -4,8 +4,22 @@
 param(
     [string] $InstallDirectory,
     [string] $AppExecutable,
-    [switch] $FunctionsOnly
+    [switch] $FunctionsOnly,
+    [string] $DiagnosticPath
 )
+
+function Set-InstallerGuardFailure {
+    param([string] $Stage, $Failure, [long] $Elapsed = 0)
+    # Retain one small failure record in memory; never print progress or errors.
+    # Only the synthetic Windows harness requests a diagnostic output file.
+    $script:InstallerGuardFailure = @{
+        Stage = $Stage
+        ElapsedMilliseconds = $Elapsed
+        ExceptionType = $Failure.Exception.GetType().FullName
+        Message = $Failure.Exception.Message.Substring(0, [Math]::Min(2048, $Failure.Exception.Message.Length))
+        Position = [string] $Failure.InvocationInfo.PositionMessage
+    }
+}
 
 function Get-InstallerProcessSnapshot {
     @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, Name, ExecutablePath, CreationDate -OperationTimeoutSec 1 -ErrorAction Stop -WarningAction SilentlyContinue)
@@ -30,10 +44,10 @@ function Select-InstallerProcesses {
             }
         } elseif (@('ffplay.exe', 'ffmpeg.exe', 'node.exe') -icontains $process.Name) {
             # An inaccessible possible media/backend process is not proof of exit.
-            throw 'Cannot inspect a possible backend process.'
+            throw ('Cannot inspect a possible backend process: PID={0}, Name={1}.' -f $process.ProcessId, $process.Name)
         }
         if ($owned) {
-            if (-not $process.CreationDate -or $process.ProcessId -eq $PID) { throw 'Cannot establish process identity.' }
+            if (-not $process.CreationDate -or $process.ProcessId -eq $PID) { throw ('Cannot establish process identity: PID={0}, Name={1}.' -f $process.ProcessId, $process.Name) }
             $process
         }
     }
@@ -68,6 +82,7 @@ function Invoke-InstallerExitGuard {
     )
     # nsExec supplies the outer 10-second bound, including PowerShell startup.
     $watch = [Diagnostics.Stopwatch]::StartNew()
+    $script:InstallerGuardFailure = $null
     if (-not $ElapsedMilliseconds) { $ElapsedMilliseconds = { $watch.ElapsedMilliseconds }.GetNewClosure() }
     if (-not [IO.Path]::IsPathRooted($Directory) -or [IO.Path]::GetFileName($Executable) -cne $Executable -or $Executable -notmatch '(?i)\.exe$' -or $TimeoutMilliseconds -lt 1 -or $TimeoutMilliseconds -gt 8000) { return 14 }
     $roots = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -76,8 +91,16 @@ function Invoke-InstallerExitGuard {
     while ((& $ElapsedMilliseconds) -lt $TimeoutMilliseconds) {
         try {
             $snapshot = @(& $ReadProcesses)
+        } catch {
+            Set-InstallerGuardFailure 'query' $_ (& $ElapsedMilliseconds)
+            return 11
+        }
+        try {
             $remaining = @(Select-InstallerProcesses -Processes $snapshot -Executable $Executable -BackendRoots $roots)
-        } catch { return 11 } # Query failure or an uninspectable possible backend.
+        } catch {
+            Set-InstallerGuardFailure 'identity-selection' $_ (& $ElapsedMilliseconds)
+            return 11
+        }
         if ((& $ElapsedMilliseconds) -ge $TimeoutMilliseconds) { return 13 }
         if ($remaining.Count -eq 0) {
             # A second fresh snapshot also catches a backend launched during exit.
@@ -87,7 +110,10 @@ function Invoke-InstallerExitGuard {
             $emptySnapshots = 0
             foreach ($process in $remaining) {
                 if ((& $ElapsedMilliseconds) -ge $TimeoutMilliseconds) { return 13 }
-                try { $null = & $StopProcess $process } catch { return 12 }
+                try { $null = & $StopProcess $process } catch {
+                    Set-InstallerGuardFailure 'termination' $_ (& $ElapsedMilliseconds)
+                    return 12
+                }
             }
         }
         $left = $TimeoutMilliseconds - (& $ElapsedMilliseconds)
@@ -102,6 +128,12 @@ if (-not $FunctionsOnly) {
     $WarningPreference = 'SilentlyContinue'
     $InformationPreference = 'SilentlyContinue'
     try { $result = Invoke-InstallerExitGuard -Directory $InstallDirectory -Executable $AppExecutable }
-    catch { $result = 11 }
+    catch { Set-InstallerGuardFailure 'initialization' $_; $result = 11 }
+    if ($result -ne 0 -and $DiagnosticPath) {
+        try {
+            $record = @{ ExitCode = $result; Failure = $script:InstallerGuardFailure }
+            [IO.File]::WriteAllText($DiagnosticPath, ($record | ConvertTo-Json -Depth 3 -Compress))
+        } catch {} # Diagnostics never change the guard result or emit output.
+    }
     exit $result
 }

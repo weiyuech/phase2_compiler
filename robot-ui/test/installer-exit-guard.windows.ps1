@@ -53,11 +53,13 @@ $case = New-Scenario
 $case.Arguments.ReadProcesses = { throw 'Synthetic query denial' }
 $arguments = $case.Arguments
 Assert-Guard ((Invoke-InstallerExitGuard @arguments) -eq 11) 'Query failure must fail closed.'
+Assert-Guard ($script:InstallerGuardFailure.Stage -eq 'query' -and $script:InstallerGuardFailure.Message -eq 'Synthetic query denial') 'Query diagnostics must retain the exact reason without printing.'
 
 $case = New-Scenario
 $case.Arguments.ReadProcesses = { New-Snapshot 99101 'ffplay.exe' '' }
 $arguments = $case.Arguments
 Assert-Guard ((Invoke-InstallerExitGuard @arguments) -eq 11) 'Unknown backend path must fail closed.'
+Assert-Guard ($script:InstallerGuardFailure.Stage -eq 'identity-selection' -and $script:InstallerGuardFailure.Message.Contains('PID=99101')) 'Selection diagnostics must distinguish an uninspectable process.'
 
 $case = New-Scenario
 $case.Arguments.ReadProcesses = { New-Snapshot 99101 'guard-fixture.exe' 'C:\guard\guard-fixture.exe' }
@@ -126,7 +128,8 @@ try {
     Assert-Guard (-not $unrelated.HasExited) 'A stale PID identity killed an unrelated process.'
 
     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $helper + '" -InstallDirectory "' + $root + '" -AppExecutable "' + $executableName + '"'
+    $diagnosticPath = Join-Path $temporary 'guard-failure.json'
+    $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $helper + '" -InstallDirectory "' + $root + '" -AppExecutable "' + $executableName + '" -DiagnosticPath "' + $diagnosticPath + '"'
     $info = [Diagnostics.ProcessStartInfo]::new($powershell, $arguments)
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
@@ -136,6 +139,9 @@ try {
     $stdout = $guard.StandardOutput.ReadToEndAsync()
     $stderr = $guard.StandardError.ReadToEndAsync()
     Assert-Guard ($guard.WaitForExit(10000)) 'The real Windows guard exceeded 10 seconds.'
+    if ($guard.ExitCode -ne 0 -and (Test-Path -LiteralPath $diagnosticPath)) {
+        Write-Output ('Windows guard diagnostic: ' + [IO.File]::ReadAllText($diagnosticPath))
+    }
     Assert-Guard ($guard.ExitCode -eq 0) ('Windows guard failed with exit code ' + $guard.ExitCode)
     Assert-Guard ($stdout.Result.Length -eq 0 -and $stderr.Result.Length -eq 0) 'The helper must remain silent for the nsExec timeout.'
     foreach ($fixture in @($ui, $utility, $media)) { Assert-Guard ($fixture.WaitForExit(1000)) 'An owned process survived success.' }
