@@ -22,11 +22,18 @@ function Set-InstallerGuardFailure {
 }
 
 function Get-InstallerProcessSnapshot {
-    @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, Name, ExecutablePath, CreationDate -OperationTimeoutSec 1 -ErrorAction Stop -WarningAction SilentlyContinue)
+    @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, Name, ExecutablePath, CreationDate -OperationTimeoutSec 1 -ErrorAction Stop -WarningAction SilentlyContinue)
+}
+
+function Test-InstallerProcessIdentity {
+    param($First, $Second)
+    return ($First -and $Second -and $First.CreationDate -and $Second.CreationDate -and
+        $First.ProcessId -eq $Second.ProcessId -and $First.Name -ieq $Second.Name -and
+        $First.CreationDate.ToUniversalTime().Ticks -eq $Second.CreationDate.ToUniversalTime().Ticks)
 }
 
 function Select-InstallerProcesses {
-    param([object[]] $Processes, [string] $Executable, [System.Collections.Generic.HashSet[string]] $BackendRoots)
+    param([object[]] $Processes, [string] $Executable, [System.Collections.Generic.HashSet[string]] $BackendRoots, [hashtable] $KnownProcesses = @{})
 
     # Electron utilityProcess backends use the same executable as the GUI. Keep
     # roots discovered on the first snapshot even after the GUI has disappeared.
@@ -36,20 +43,50 @@ function Select-InstallerProcesses {
             [void] $BackendRoots.Add([IO.Path]::Combine($directory, 'resources\backend').TrimEnd('\') + '\')
         }
     }
+    $selected = @{}
     foreach ($process in $Processes) {
         $owned = $process.Name -ieq $Executable
         if ($process.ExecutablePath) {
             foreach ($root in $BackendRoots) {
                 if ($process.ExecutablePath.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { $owned = $true }
             }
-        } elseif (@('ffplay.exe', 'ffmpeg.exe', 'node.exe') -icontains $process.Name) {
-            # An inaccessible possible media/backend process is not proof of exit.
-            throw ('Cannot inspect a possible backend process: PID={0}, Name={1}.' -f $process.ProcessId, $process.Name)
         }
+        # A captured child stays ours after its parent exits or its path becomes
+        # unreadable. A recycled PID with another creation time inherits nothing.
+        $known = $KnownProcesses[[int] $process.ProcessId]
+        if ($known -and $known.Name -ieq $process.Name -and -not $process.CreationDate) {
+            throw ('Cannot recheck a captured process identity: PID={0}, Name={1}.' -f $process.ProcessId, $process.Name)
+        }
+        if (Test-InstallerProcessIdentity $process $known) { $owned = $true }
         if ($owned) {
-            if (-not $process.CreationDate -or $process.ProcessId -eq $PID) { throw ('Cannot establish process identity: PID={0}, Name={1}.' -f $process.ProcessId, $process.Name) }
-            $process
+            $selected[[int] $process.ProcessId] = $process
         }
+    }
+    # Generic node.exe processes do not belong to this application: both the
+    # legacy and current packaged backends use Electron utilityProcess, whose
+    # executable is the app itself. Media outside the bundled root only belongs
+    # to us if this snapshot proves an owned parent existed before that child.
+    do {
+        $added = $false
+        foreach ($process in $Processes) {
+            if ($selected.ContainsKey([int] $process.ProcessId) -or @('ffplay.exe', 'ffmpeg.exe') -inotcontains $process.Name) { continue }
+            $parent = $selected[[int] $process.ParentProcessId]
+            if (-not $parent) { continue }
+            if (-not $parent.CreationDate -or -not $process.CreationDate) {
+                throw ('Cannot establish child process identity: PID={0}, Name={1}.' -f $process.ProcessId, $process.Name)
+            }
+            if ($parent.CreationDate.ToUniversalTime() -gt $process.CreationDate.ToUniversalTime()) { continue }
+            $selected[[int] $process.ProcessId] = $process
+            $added = $true
+        }
+    } while ($added)
+    # Keep the snapshot order for predictable termination and test assertions.
+    foreach ($process in $Processes) {
+        if (-not $selected.ContainsKey([int] $process.ProcessId)) { continue }
+        if (-not $process.CreationDate -or $process.ProcessId -eq $PID) { throw ('Cannot establish process identity: PID={0}, Name={1}.' -f $process.ProcessId, $process.Name) }
+        if (-not $process.ExecutablePath) { throw ('Cannot inspect an owned process: PID={0}, Name={1}.' -f $process.ProcessId, $process.Name) }
+        $KnownProcesses[[int] $process.ProcessId] = $process
+        $process
     }
 }
 
@@ -87,6 +124,7 @@ function Invoke-InstallerExitGuard {
     if (-not [IO.Path]::IsPathRooted($Directory) -or [IO.Path]::GetFileName($Executable) -cne $Executable -or $Executable -notmatch '(?i)\.exe$' -or $TimeoutMilliseconds -lt 1 -or $TimeoutMilliseconds -gt 8000) { return 14 }
     $roots = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     [void] $roots.Add([IO.Path]::Combine([IO.Path]::GetFullPath($Directory), 'resources\backend').TrimEnd('\') + '\')
+    $knownProcesses = @{}
     $emptySnapshots = 0
     while ((& $ElapsedMilliseconds) -lt $TimeoutMilliseconds) {
         try {
@@ -96,7 +134,7 @@ function Invoke-InstallerExitGuard {
             return 11
         }
         try {
-            $remaining = @(Select-InstallerProcesses -Processes $snapshot -Executable $Executable -BackendRoots $roots)
+            $remaining = @(Select-InstallerProcesses -Processes $snapshot -Executable $Executable -BackendRoots $roots -KnownProcesses $knownProcesses)
         } catch {
             Set-InstallerGuardFailure 'identity-selection' $_ (& $ElapsedMilliseconds)
             return 11

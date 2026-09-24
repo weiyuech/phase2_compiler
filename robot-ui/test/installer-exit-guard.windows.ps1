@@ -8,8 +8,8 @@ $helper = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\build\installer-ex
 function Assert-Guard($Condition, [string] $Message) {
     if (-not $Condition) { throw $Message }
 }
-function New-Snapshot([int] $Number, [string] $Name, [string] $Path) {
-    [pscustomobject] @{ ProcessId = $Number; Name = $Name; ExecutablePath = $Path; CreationDate = [DateTime]::UtcNow }
+function New-Snapshot([int] $Number, [string] $Name, [string] $Path, [int] $Parent = 0, [int] $CreatedSeconds = 0) {
+    [pscustomobject] @{ ProcessId = $Number; ParentProcessId = $Parent; Name = $Name; ExecutablePath = $Path; CreationDate = [DateTime]::new(2026, 1, 1, 0, 0, 0, [DateTimeKind]::Utc).AddSeconds($CreatedSeconds) }
 }
 function New-Scenario {
     $state = [pscustomobject] @{ Time = 0; Reads = 0; Killed = @(); Scenario = '' }
@@ -56,10 +56,66 @@ Assert-Guard ((Invoke-InstallerExitGuard @arguments) -eq 11) 'Query failure must
 Assert-Guard ($script:InstallerGuardFailure.Stage -eq 'query' -and $script:InstallerGuardFailure.Message -eq 'Synthetic query denial') 'Query diagnostics must retain the exact reason without printing.'
 
 $case = New-Scenario
-$case.Arguments.ReadProcesses = { New-Snapshot 99101 'ffplay.exe' '' }
+$case.Arguments.ReadProcesses = {
+    New-Snapshot 99101 'node.exe' ''
+    New-Snapshot 99102 'ffplay.exe' ''
+    New-Snapshot 99103 'ffmpeg.exe' ''
+}
 $arguments = $case.Arguments
-Assert-Guard ((Invoke-InstallerExitGuard @arguments) -eq 11) 'Unknown backend path must fail closed.'
-Assert-Guard ($script:InstallerGuardFailure.Stage -eq 'identity-selection' -and $script:InstallerGuardFailure.Message.Contains('PID=99101')) 'Selection diagnostics must distinguish an uninspectable process.'
+Assert-Guard ((Invoke-InstallerExitGuard @arguments) -eq 0 -and $case.State.Killed.Count -eq 0) 'Unrelated inaccessible generic processes must not block an upgrade or be terminated.'
+
+$case = New-Scenario
+$case.Arguments.ReadProcesses = {
+    New-Snapshot 99101 'guard-fixture.exe' 'C:\guard\guard-fixture.exe'
+    New-Snapshot 99102 'ffplay.exe' '' 99101 1
+}
+$arguments = $case.Arguments
+Assert-Guard ((Invoke-InstallerExitGuard @arguments) -eq 11) 'An owned media child with an unknown path must fail closed.'
+Assert-Guard ($script:InstallerGuardFailure.Stage -eq 'identity-selection' -and $script:InstallerGuardFailure.Message.Contains('PID=99102')) 'Selection diagnostics must distinguish an uninspectable owned process.'
+
+$case = New-Scenario
+$case.Arguments.ReadProcesses = { New-Snapshot 99101 'guard-fixture.exe' '' }
+$arguments = $case.Arguments
+Assert-Guard ((Invoke-InstallerExitGuard @arguments) -eq 11) 'The known app executable with an unknown path must fail closed.'
+
+$case = New-Scenario
+$state = $case.State
+$case.Arguments.ReadProcesses = {
+    $state.Reads++
+    if ($state.Reads -eq 1) {
+        New-Snapshot 99101 'guard-fixture.exe' 'C:\guard\guard-fixture.exe'
+        New-Snapshot 99102 'ffplay.exe' 'C:\external media\ffplay.exe' 99101 1
+    } else {
+        New-Snapshot 99102 'ffplay.exe' '' 99101 1
+    }
+}.GetNewClosure()
+$arguments = $case.Arguments
+Assert-Guard ((Invoke-InstallerExitGuard @arguments) -eq 11) 'A captured owned child with unreadable path stays owned after its parent disappears.'
+Assert-Guard (($state.Killed -join ',') -eq '99101,99102' -and $state.Reads -eq 2) 'Only the proven parent and child should have been terminated before the unreadable orphan blocked verification.'
+
+$case = New-Scenario
+$state = $case.State
+$case.Arguments.ReadProcesses = {
+    $state.Reads++
+    if ($state.Reads -eq 1) {
+        New-Snapshot 99101 'guard-fixture.exe' 'C:\guard\guard-fixture.exe'
+        New-Snapshot 99102 'ffplay.exe' 'C:\external media\ffplay.exe' 99101 1
+    } else {
+        New-Snapshot 99102 'ffplay.exe' '' 0 10
+    }
+}.GetNewClosure()
+$arguments = $case.Arguments
+Assert-Guard ((Invoke-InstallerExitGuard @arguments) -eq 0 -and ($state.Killed -join ',') -eq '99101,99102') 'A reused media PID must not inherit ownership from an exited process.'
+
+$case = New-Scenario
+$state = $case.State
+$case.Arguments.ReadProcesses = {
+    $state.Reads++
+    if ($state.Reads -eq 1) { New-Snapshot 99101 'guard-fixture.exe' 'C:\guard\guard-fixture.exe' 0 10 }
+    New-Snapshot 99102 'ffplay.exe' '' 99101 1
+}.GetNewClosure()
+$arguments = $case.Arguments
+Assert-Guard ((Invoke-InstallerExitGuard @arguments) -eq 0 -and ($state.Killed -join ',') -eq '99101') 'An older unrelated child whose parent PID was reused must not become owned.'
 
 $case = New-Scenario
 $case.Arguments.ReadProcesses = { New-Snapshot 99101 'guard-fixture.exe' 'C:\guard\guard-fixture.exe' }
