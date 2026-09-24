@@ -11,10 +11,12 @@ const hook = installer.slice(installer.indexOf('!macro customCheckAppRunning'), 
 test('NSIS gates replacement on a bounded, checked helper exit and fails closed', () => {
   assert.match(hook, /File \/oname=\$PLUGINSDIR\\installer-exit-guard\.ps1/)
   assert.match(hook, /nsExec::Exec \/TIMEOUT=10000[^\r\n]+-NoProfile -NonInteractive[^\r\n]+-File/)
+  assert.match(hook, /-NonInteractive -InputFormat None -ExecutionPolicy Bypass -File/)
   assert.match(hook, /-InstallDirectory "\$INSTDIR\\\." -AppExecutable "\$\{APP_EXECUTABLE_FILENAME\}"/)
   assert.match(hook, /Pop \$0[\s\S]*\$\{If\} \$0 != 0[\s\S]*MessageBox MB_OK\|MB_ICONSTOP[\s\S]*\/SD IDOK\s+SetErrorLevel 1\s+Abort/)
   assert.match(hook, /IfFileExists "\$WINDIR\\Sysnative\\WindowsPowerShell\\v1\.0\\powershell\.exe"/)
   assert.match(hook, /FileWrite \$3 "phase=guard-completed\$\\r\$\\nresult=\$0/)
+  assert.match(hook, /FileOpen \$3 "\$TEMP\\robot-live-installer-exit-status\.log" a\s+FileSeek \$3 0 END/)
   assert.match(hook, /-DiagnosticPath "\$TEMP\\robot-live-installer-exit-diagnostic\.json"/)
   assert.doesNotMatch(hook, /taskkill|Sleep 1500|RMDir|Delete /)
   assert.match(installer, /vc_redist\.x64\.exe[^\r\n]+\/install \/quiet \/norestart/)
@@ -34,4 +36,5 @@ test('Windows installer guard: production orchestration and live synthetic proce
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   assert.match(result.stdout, /PASS: shutdown orchestration/)
   assert.match(result.stdout, /PASS: real Windows query/)
+  assert.match(result.stdout, /PASS: open redirected stdin/)
 })

@@ -185,12 +185,15 @@ try {
 
     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $diagnosticPath = Join-Path $temporary 'guard-failure.json'
-    $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $helper + '" -InstallDirectory "' + $root + '" -AppExecutable "' + $executableName + '" -DiagnosticPath "' + $diagnosticPath + '"'
+    $arguments = '-NoLogo -NoProfile -NonInteractive -InputFormat None -ExecutionPolicy Bypass -File "' + $helper + '" -InstallDirectory "' + $root + '" -AppExecutable "' + $executableName + '" -DiagnosticPath "' + $diagnosticPath + '"'
     $info = [Diagnostics.ProcessStartInfo]::new($powershell, $arguments)
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
+    # Match nsExec's pipe contract: no input arrives and the parent never closes
+    # stdin before completion. An EOF-producing spawnSync test hid the hang.
+    $info.RedirectStandardInput = $true
     $guard = [Diagnostics.Process]::Start($info)
     $stdout = $guard.StandardOutput.ReadToEndAsync()
     $stderr = $guard.StandardError.ReadToEndAsync()
@@ -199,6 +202,9 @@ try {
         Write-Output ('Windows guard diagnostic: ' + [IO.File]::ReadAllText($diagnosticPath))
     }
     Assert-Guard ($guard.ExitCode -eq 0) ('Windows guard failed with exit code ' + $guard.ExitCode)
+    $diagnostic = [IO.File]::ReadAllText($diagnosticPath) | ConvertFrom-Json
+    Assert-Guard ($diagnostic.Phase -eq 'completed' -and $diagnostic.ExitCode -eq 0) 'The helper must execute and complete while stdin remains open.'
+    Write-Output 'PASS: open redirected stdin does not block helper startup or completion within 10 seconds'
     Assert-Guard ($stdout.Result.Length -eq 0 -and $stderr.Result.Length -eq 0) 'The helper must remain silent for the nsExec timeout.'
     foreach ($fixture in @($ui, $utility, $media)) { Assert-Guard ($fixture.WaitForExit(1000)) 'An owned process survived success.' }
     Assert-Guard (-not $unrelated.HasExited) 'An unrelated media process was terminated.'

@@ -27,9 +27,13 @@
   ; bounds the entire PowerShell invocation, including startup or a stuck CIM call.
   ; Use -File arguments so spaces/apostrophes in installation paths stay literal.
   ; Append \. so even a drive-root path never ends in a backslash before a quote.
-  nsExec::Exec /TIMEOUT=10000 `"$2" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-exit-guard.ps1" -InstallDirectory "$INSTDIR\." -AppExecutable "${APP_EXECUTABLE_FILENAME}" -DiagnosticPath "$TEMP\robot-live-installer-exit-diagnostic.json"`
+  ; nsExec leaves a redirected stdin pipe open. -NonInteractive only disables
+  ; prompts; -InputFormat None prevents PowerShell waiting for input before -File.
+  ; Integration reference: https://nsis.sourceforge.io/PowerShell_support
+  nsExec::Exec /TIMEOUT=10000 `"$2" -NoLogo -NoProfile -NonInteractive -InputFormat None -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-exit-guard.ps1" -InstallDirectory "$INSTDIR\." -AppExecutable "${APP_EXECUTABLE_FILENAME}" -DiagnosticPath "$TEMP\robot-live-installer-exit-diagnostic.json"`
   Pop $0
   FileOpen $3 "$TEMP\robot-live-installer-exit-status.log" a
+  FileSeek $3 0 END
   FileWrite $3 "phase=guard-completed$\r$\nresult=$0$\r$\n"
   FileClose $3
   ${If} $0 != 0
