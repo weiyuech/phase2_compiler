@@ -12,10 +12,11 @@ export function getTourState(tour) {
 }
 
 /** These UI handlers never take ownership away from a running/paused tour. */
-export function registerTourControls({ uiBridge, tour, tts, stationaryTts, logger = console }) {
+export function registerTourControls({ uiBridge, tour, tts, stationaryTts, stationaryLlm, logger = console }) {
   let manualActive = false
   const stationary = new StationarySpeech({
     tts: stationaryTts,
+    llm: stationaryLlm,
     onState: state => {
       publishStationaryState()
       if (state.state === 'failed') {

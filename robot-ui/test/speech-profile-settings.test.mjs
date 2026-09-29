@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { DEFAULT_STATIONARY_PROMPT } from '../../src/llm/stationary-prompt.js'
 import { DEFAULT_OCR_JUDGE_PROMPT } from '../../src/phase2/ocr/judge-prompt.js'
 import { speechProfileKeys } from '../../src/config/speech-profiles.js'
 
@@ -13,11 +14,12 @@ const { descriptor, errors } = parse(source)
 assert.deepEqual(errors, [])
 assert.deepEqual(compileTemplate({ source: descriptor.template.content, filename: 'SystemSettings.vue', id: 'speech-profiles' }).errors, [])
 const script = compileScript(descriptor, { id: 'speech-profiles' }).content
-const createComponent = new Function('Vue', 'ElMessageBox', 'ElMessage', 'window', 'setTimeout', 'DEFAULT_OCR_JUDGE_PROMPT', script
+const createComponent = new Function('Vue', 'ElMessageBox', 'ElMessage', 'window', 'setTimeout', 'DEFAULT_OCR_JUDGE_PROMPT', 'DEFAULT_STATIONARY_PROMPT', script
   .replace(/import \{ ref, reactive, onMounted, onBeforeUnmount, watch \} from 'vue'/, 'const { ref, reactive, onMounted, onBeforeUnmount, watch } = Vue')
   .replace(/import \{ ElMessageBox, ElMessage \}\s+from 'element-plus'/, '')
   .replace(/import AudioDiagnostics from '.\/AudioDiagnostics.vue'/, 'const AudioDiagnostics = {}')
   .replace(/import \{ DEFAULT_OCR_JUDGE_PROMPT \} from '[^']+'/u, '')
+  .replace(/import \{ DEFAULT_STATIONARY_PROMPT \} from '[^']+'/u, '')
   .replace('export default', 'return'))
 
 function fixture(t) {
@@ -35,7 +37,7 @@ function fixture(t) {
     restartBackend: async () => { restarts++ },
   }
   const component = createComponent({ ...Vue, onMounted() {}, onBeforeUnmount: fn => cleanups.push(fn) },
-    { prompt: async () => ({ value: 'test-password' }) }, { error: msg => errors.push(msg), success() {} }, { api }, () => 1, DEFAULT_OCR_JUDGE_PROMPT)
+    { prompt: async () => ({ value: 'test-password' }) }, { error: msg => errors.push(msg), success() {} }, { api }, () => 1, DEFAULT_OCR_JUDGE_PROMPT, DEFAULT_STATIONARY_PROMPT)
   const scope = Vue.effectScope()
   const state = scope.run(() => component.setup({ wsRef: null }, { expose() {} }))
   t.after(() => { for (const cleanup of cleanups) cleanup(); scope.stop() })

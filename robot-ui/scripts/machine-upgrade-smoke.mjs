@@ -533,7 +533,25 @@ try {
     const library = (await command(current[id - 1], 'GET_TTS_CACHE_LIST', {}, 'TTS_CACHE_LIST')).data.items
     assert.deepEqual(library.map(entry => entry.hash), [id === 1 ? 'legacy-library' : `machine-${id}`])
   }
-  if (options.installer) report.installerVerified = true
+  if (options.installer) {
+    await closeApp()
+    // Exercise the files actually extracted by NSIS after an overwrite, not
+    // just win-unpacked. Missing native DLLs/models must block delivery.
+    const nativeReport = join(output, 'installed-runtime.json')
+    const native = spawnSync(executable, [join(root, 'robot-ui/scripts/verify-packaged-runtime.mjs'),
+      '--backend-root', join(installDirectory, 'resources/backend'), '--report', nativeReport], {
+      env: { ...isolatedEnvironment(), ELECTRON_RUN_AS_NODE: '1' },
+      windowsHide: true, timeout: 180000, maxBuffer: 4 * 1024 * 1024,
+    })
+    await writeFile(join(output, 'installed-runtime.log'), Buffer.concat([native.stdout || Buffer.alloc(0), native.stderr || Buffer.alloc(0)]))
+    assert.equal(native.status, 0, native.error?.message || 'Installed native audio/OCR verification failed')
+    const verified = JSON.parse(await readFile(nativeReport, 'utf8'))
+    assert.equal(verified.status, 'passed')
+    assert.ok(verified.checks.every(check => check.status === 'passed'))
+    report.installedRuntime = { status: verified.status, checks: verified.checks.map(check => check.name) }
+    report.installerVerified = true
+    pass('NSIS-installed and overwritten app loads its own ONNX/Sharp modules, models and audio tools')
+  }
   pass('reopening preserves each machine’s own data and library without automatic navigation or playback')
   report.status = 'passed'
 } catch (error) {

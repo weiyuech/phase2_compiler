@@ -56,12 +56,17 @@ test('real speech clients keep profiles independent: manual uses transit, statio
   services.transitTts.speak = async () => { calls.push('transit'); return { ok: true } }
   services.tts.speak = async () => { calls.push('cruise'); return { ok: true } }
   assert.equal(services.stationaryTts, services.tts)
-  const controls = registerTourControls({ uiBridge: { on: (key, fn) => { handlers[key] = fn }, broadcast() {} }, tour: { isRunning: false }, tts: services.manualTts, stationaryTts: services.stationaryTts, logger: { log() {}, error() {} } })
+  services.llm.primary.rewriteCustom = async (_system, input) => {
+    assert.match(input, /stationary/)
+    calls.push('cruise-llm')
+    return '原地改写稿'
+  }
+  const controls = registerTourControls({ uiBridge: { on: (key, fn) => { handlers[key] = fn }, broadcast() {} }, tour: { isRunning: false }, tts: services.manualTts, stationaryTts: services.stationaryTts, stationaryLlm: services.llm, logger: { log() {}, error() {} } })
   await handlers.onTestSpeech('manual')
   assert.deepEqual(calls, ['transit'])
   handlers.onStartStationarySpeech({ text: 'stationary', loop: false })
   await controls.stationary.finished
-  assert.deepEqual(calls, ['transit', 'cruise'])
+  assert.deepEqual(calls, ['transit', 'cruise-llm', 'cruise'])
 })
 
 test('blank independent profiles cannot borrow credentials from process.env', async t => {

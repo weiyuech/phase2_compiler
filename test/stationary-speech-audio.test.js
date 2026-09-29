@@ -123,6 +123,7 @@ async function fixture(t, { destination = 'robot', blankCruise = false } = {}) {
     uiBridge: { on: (name, handler) => handlers.set(name, handler), broadcast: (type, data) => events.push({ type, data }) },
     tour: { isRunning: false, isPaused: false },
     tts: services.manualTts, stationaryTts: services.stationaryTts,
+    stationaryLlm: { rewriteStationary: async text => ({ text }) },
     logger: { log() {}, error() {} },
   })
   assert.ok(controls.stationary instanceof StationarySpeech)

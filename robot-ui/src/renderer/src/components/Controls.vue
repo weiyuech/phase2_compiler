@@ -104,8 +104,15 @@
               <span v-if="stationaryActive && stationaryIteration > 0"> · 第 {{ stationaryIteration }} 轮</span>
             </div>
           </div>
-          <p class="hint speech-profile-hint">使用“系统设置 → 巡游讲解”的配置。</p>
-          <el-input v-model="stationaryText" placeholder="输入原地播报文字…" type="textarea" :rows="4" aria-label="原地播报文字" />
+          <p class="hint speech-profile-hint">使用“系统设置 → 巡游讲解”的 LLM 与音色，先改写再播报；循环时提前改写下一轮。专用提示词可在“系统设置 → 改写提示词”中调整。</p>
+          <div class="stationary-view-switch" role="group" aria-label="查看原文或改写稿">
+            <button type="button" :aria-pressed="stationaryView === 'original'" @click="stationaryView = 'original'">原文</button>
+            <button type="button" :aria-pressed="stationaryView === 'rewritten'" @click="stationaryView = 'rewritten'">改写稿<span v-if="stationaryRewrittenIteration"> · 第 {{ stationaryRewrittenIteration }} 轮</span></button>
+          </div>
+          <el-input v-if="stationaryView === 'original'" v-model="stationaryText" placeholder="输入原地播报文字…" type="textarea" :rows="4" aria-label="原地播报文字" :readonly="stationaryActive || stationaryCommandPending" />
+          <el-input v-else :model-value="stationaryRewrittenText" placeholder="开始播报后，这里显示每轮生成的改写稿" type="textarea" :rows="4" aria-label="原地播报改写稿" readonly />
+          <p class="hint">切换仅用于查看；始终播报每轮改写稿。{{ stationaryActive ? '运行中的原文保持不变。' : '' }}</p>
+          <p v-if="stationaryView === 'rewritten' && stationaryActive && stationaryIteration > stationaryRewrittenIteration" class="hint">正在生成第 {{ stationaryIteration }} 轮{{ stationaryRewrittenIteration ? '，当前显示上一轮改写稿。' : '改写稿…' }}</p>
           <div class="btn-row test-actions">
             <el-checkbox v-model="stationaryLoop" :disabled="stationaryActive || stationaryCommandPending">循环播报</el-checkbox>
             <el-button type="primary" :disabled="!canStartStationary" @click="startStationary">开始播报</el-button>
@@ -153,6 +160,9 @@ const tourStatus = ref('idle')   // idle | running | paused | finished
 const tourStateKnown = ref(false)
 const tourIsActive = computed(() => tourStatus.value === 'running' || tourStatus.value === 'paused')
 const stationaryText = ref('')
+const stationaryView = ref('original')
+const stationaryRewrittenText = ref('')
+const stationaryRewrittenIteration = ref(0)
 const stationaryLoop = ref(false)
 const stationaryState = ref('idle')
 const stationaryStateKnown = ref(false)
@@ -206,7 +216,7 @@ const stationaryDisabledReason = computed(() => {
   if (stationaryCommandPending.value) return '指令已发送，等待后端确认…'
   if (stationaryActive.value) return ''
   if (manualActive.value || manualPending.value) return '请等待手动播报结束，再开始原地播报'
-  if (!stationaryText.value.trim()) return '请输入要朗读的文字；默认播报一次'
+  if (!stationaryText.value.trim()) return '请输入播报资料，系统将改写后朗读；默认播报一次'
   return ''
 })
 const canStartStationary = computed(() => !stationaryDisabledReason.value && !stationaryActive.value)
@@ -255,6 +265,9 @@ function handleMessage(raw) {
         stationaryActive.value = data.active
         stationaryIteration.value = Number.isInteger(data.iteration) && data.iteration >= 0 ? data.iteration : 0
         stationaryMessage.value = typeof data.message === 'string' ? data.message : ''
+        stationaryRewrittenText.value = typeof data.rewrittenText === 'string' ? data.rewrittenText : ''
+        stationaryRewrittenIteration.value = Number.isInteger(data.rewrittenIteration) && data.rewrittenIteration >= 0 ? data.rewrittenIteration : 0
+        if ((data.active || !stationaryText.value.trim()) && typeof data.originalText === 'string' && data.originalText) stationaryText.value = data.originalText
         if (data.active) stationaryLoop.value = data.loop
         manualActive.value = data.manualActive
         manualPending.value = false
@@ -600,6 +613,10 @@ const tourStatusClass = computed(() => ({
 .card-footer { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
 .log-download { padding: 0; min-height: 24px; height: auto; color: var(--text-dim); }
 .test-actions { margin-top: 12px; }
+.stationary-view-switch { display: flex; gap: 4px; margin: 10px 0 8px; }
+.stationary-view-switch button { border: 1px solid var(--border); border-radius: 6px; background: var(--bg2); color: var(--text-dim); padding: 5px 12px; font: inherit; font-size: 12px; cursor: pointer; }
+.stationary-view-switch button[aria-pressed="true"] { color: var(--text); border-color: var(--accent, #409eff); background: rgba(64, 158, 255, .12); }
+.stationary-view-switch button:focus-visible { outline: 2px solid var(--accent, #409eff); outline-offset: 2px; }
 .status-pill { display: inline-flex; flex-wrap: wrap; font-size: 11px; padding: 2px 9px; border-radius: 20px; }
 .status-pill.running { background: rgba(74,222,128,.12); color: var(--green); }
 .status-pill.paused { background: rgba(245,158,11,.12); color: var(--amber); }

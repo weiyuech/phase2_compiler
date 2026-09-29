@@ -61,6 +61,30 @@ function syncIdle(socket) {
   socket.reply('STATIONARY_SPEECH_STATE', stationaryState())
 }
 
+test('rewrite view follows rounds and reconnect snapshots; viewing never sends a playback command', async t => {
+  const h = fixture(t)
+  syncIdle(h.socket)
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState({ active: true, state: 'playing', loop: true, iteration: 2,
+    originalText: '固定原文', rewrittenText: '第二轮的改写稿', rewrittenIteration: 2 }))
+  assert.equal(h.state.stationaryText.value, '固定原文')
+  assert.equal(h.state.stationaryRewrittenText.value, '第二轮的改写稿')
+  const sent = h.socket.sent.length
+  h.state.stationaryView.value = 'rewritten'
+  await Vue.nextTick()
+  h.state.stationaryView.value = 'original'
+  await Vue.nextTick()
+  assert.equal(h.socket.sent.length, sent)
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState({ active: true, state: 'preparing', loop: true, iteration: 3,
+    originalText: '固定原文', rewrittenText: '第二轮的改写稿', rewrittenIteration: 2 }))
+  assert.equal(h.state.stationaryRewrittenIteration.value, 2)
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState({ state: 'completed', iteration: 3,
+    originalText: '固定原文', rewrittenText: '第三轮的改写稿', rewrittenIteration: 3 }))
+  assert.equal(h.state.stationaryRewrittenText.value, '第三轮的改写稿')
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState())
+  assert.equal(h.state.stationaryRewrittenText.value, '')
+  assert.equal(h.state.stationaryText.value, '固定原文', 'backend restart must not clear the original draft')
+})
+
 test('page entry requests a tour snapshot and withholds manual testing until it arrives', t => {
   const h = fixture(t)
   assert.deepEqual(h.socket.sent.map(message => message.type), initialQueries)
@@ -205,7 +229,7 @@ test('stationary card binds raw text, explicit loop option, backend status, and 
   assert.match(descriptor.template.content, /:disabled="!canStopStationary" @click="stopStationary"/)
   assert.match(descriptor.template.content, /:disabled="!canStartTour" @click="startTour"/)
   assert.match(descriptor.template.content, /系统设置 → 巡游讲解/)
-  assert.match(descriptor.template.content, /使用“系统设置 → 巡游讲解”的配置。/)
+  assert.match(descriptor.template.content, /使用“系统设置 → 巡游讲解”的 LLM 与音色，先改写再播报/)
 })
 
 for (const loop of [false, true]) {

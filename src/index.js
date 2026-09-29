@@ -136,7 +136,7 @@ const phase2 = initPhase2({
   onBarrageSpeechEnd: updateCruisingDucking,
 })
 
-const tourControls = registerTourControls({ uiBridge, tour, tts: manualTts, stationaryTts })
+const tourControls = registerTourControls({ uiBridge, tour, tts: manualTts, stationaryTts, stationaryLlm: llm })
 
 // ── State snapshot for late-joining UI clients ────────────────────────────────
 

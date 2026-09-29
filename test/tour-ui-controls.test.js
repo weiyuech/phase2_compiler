@@ -32,7 +32,8 @@ function fixture(source = bridgeSource) {
   const tts = { speak: async text => { calls.push(text); return { ok: true } } }
   const stationaryCalls = []
   const stationaryTts = { speak: async (text, options) => { stationaryCalls.push({ text, options }); return { ok: true } } }
-  const controls = registerTourControls({ uiBridge: bridge, tour, tts, stationaryTts, logger })
+  const stationaryLlm = { rewriteStationary: async text => ({ text: `改写：${text}` }) }
+  const controls = registerTourControls({ uiBridge: bridge, tour, tts, stationaryTts, stationaryLlm, logger })
   bridge.start(0)
   const socket = new EventEmitter()
   socket.readyState = 1
@@ -172,7 +173,7 @@ test('stationary commands use only the cruise service, publish state and query w
   await h.send('START_STATIONARY_SPEECH', { text: 'private stationary draft', loop: false })
   await h.controls.stationary.finished
   assert.deepEqual(h.calls, [])
-  assert.deepEqual(h.stationaryCalls.map(call => call.text), ['private stationary draft'])
+  assert.deepEqual(h.stationaryCalls.map(call => call.text), ['改写：private stationary draft'])
   await h.send('GET_STATIONARY_SPEECH_STATE')
   assert.equal(h.socket.messages.at(-1).type, 'STATIONARY_SPEECH_STATE')
   assert.equal(h.socket.messages.at(-1).data.state, 'completed')

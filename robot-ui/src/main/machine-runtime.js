@@ -6,6 +6,7 @@ import { RollingLog } from '../../../src/diagnostics/rolling-log.js'
 import { createDiagnosticsReport } from '../../../src/diagnostics/report.js'
 import { seedMachineProfile, backendEnvironment } from '../../../src/packaging/machine-profile.js'
 import { DEFAULT_OCR_JUDGE_PROMPT, resolveOcrJudgePrompt } from '../../../src/phase2/ocr/judge-prompt.js'
+import { readStationaryPrompt, readStationaryOptions, writeStationaryPrompt } from '../../../src/llm/stationary-prompt-store.js'
 import { speechProfileKeys, speechProfileMigration, selectSpeechProfileChanges } from '../../../src/config/speech-profiles.js'
 import { createBackendRestarter } from './backend-restart.mjs'
 
@@ -33,6 +34,7 @@ function buildPath() {
 }
 const BANNED_WORDS_PATH = join(CONFIG_DIR, 'banned-words.txt')
 const LLM_PROMPT_PATH   = join(CONFIG_DIR, 'llm-system-prompt.txt')
+const STATIONARY_PROMPT_PATH = join(CONFIG_DIR, 'stationary-prompt.txt')
 const BARRAGE_PROMPT_NAME_PATH = join(CONFIG_DIR, 'barrage-prompt-name.txt')
 const BARRAGE_PROMPT_GENERAL_PATH = join(CONFIG_DIR, 'barrage-prompt-general.txt')
 const BARRAGE_PROMPT_JUDGE_PATH = join(CONFIG_DIR, 'barrage-prompt-judge.txt')
@@ -661,6 +663,18 @@ ipcMain.handle('read-barrage-prompt-name', () => {
     const text = readFileSync(BARRAGE_PROMPT_NAME_PATH, 'utf-8')
     return { ok: true, text }
   } catch (e) { return { ok: false, error: e.message, text: '' } }
+})
+
+ipcMain.handle('read-stationary-prompt', () => {
+  try { return { ok: true, text: readStationaryPrompt(STATIONARY_PROMPT_PATH), ...readStationaryOptions(STATIONARY_PROMPT_PATH) } }
+  catch (e) { return { ok: false, error: e.message } }
+})
+
+ipcMain.handle('write-stationary-prompt', (_, text, stylePrompt, customEnabled) => {
+  try {
+    writeStationaryPrompt(text, STATIONARY_PROMPT_PATH, stylePrompt, customEnabled)
+    return { ok: true }
+  } catch (e) { return { ok: false, error: e.message } }
 })
 
 ipcMain.handle('write-barrage-prompt-name', (_, text) => {
