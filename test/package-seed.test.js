@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { preparePackageSeed, verifyPackageSeed } from '../robot-ui/scripts/prepare-package-seed.mjs'
 import { seedPackagedUserData } from '../src/packaging/seed-user-data.js'
 import { SEED_CONFIG_FILES, SEED_DATA_FILES, SEED_EMPTY_DIRECTORIES, SEED_MODEL_FILES } from '../src/packaging/seed-manifest.js'
-import { contents, files, fixture, put } from './package-seed-fixture.js'
+import { contents, files, fixture, put, PRIVATE_ROBOT_DIAGNOSTIC_FILES } from './package-seed-fixture.js'
 
 const templates = fileURLToPath(new URL('../robot-ui/packaging/defaults/', import.meta.url))
 const marker = '.robot-live-package-seed.json'
@@ -18,6 +18,7 @@ test('seed staging allowlists models and reviewed defaults, without reading or c
     'data/tour-list.json', 'data/transit-audio.json', 'data/barrage-knowledge/config.json',
     'data/tts-cache/private.mp3', 'data/tts-cache/private.txt', 'data/barrage-ocr-log.txt',
     'data/audio-diagnostics.log', 'data/backend.log.1', 'data/robot-pcm-cache/pcm-private.pcm',
+    ...PRIVATE_ROBOT_DIAGNOSTIC_FILES,
     'data/flatfiles/private/route/1.json', 'data/barrage-audio/private.mp3', 'data/temp-tts-play-1-1.mp3',
   ]
   for (const file of liveFiles) put(root, file, `PRIVATE_LIVE_FIXTURE:${file}`)
@@ -34,9 +35,10 @@ test('seed staging allowlists models and reviewed defaults, without reading or c
 test('rebuilding a marked generated stage drops stale resources, but preserves an unowned directory', t => {
   const root = fixture(t)
   const staged = preparePackageSeed({ projectRoot: root })
-  put(staged, 'data/backend.log', 'stale generated content')
+  const staleFiles = ['data/backend.log', ...PRIVATE_ROBOT_DIAGNOSTIC_FILES]
+  for (const file of staleFiles) put(staged, file, `PRIVATE_STALE_FIXTURE:${file}`)
   preparePackageSeed({ projectRoot: root })
-  assert.equal(existsSync(join(staged, 'data/backend.log')), false)
+  for (const file of staleFiles) assert.equal(existsSync(join(staged, file)), false, file)
   rmSync(join(staged, marker))
   put(staged, 'keep.txt', 'unowned content')
   const before = contents(staged)
@@ -78,7 +80,8 @@ test('final-resource verification rejects extra files, altered defaults and chan
   rmSync(join(staged, marker))
   const verify = () => verifyPackageSeed({ backendRoot: staged, projectRoot: root })
   assert.doesNotThrow(verify)
-  for (const file of ['.env', 'config/admin.json', 'data/backend.log', 'data/tts-cache/transcript.txt']) {
+  for (const file of ['.env', 'config/admin.json', 'data/backend.log', 'data/tts-cache/transcript.txt',
+    ...PRIVATE_ROBOT_DIAGNOSTIC_FILES]) {
     const target = put(staged, file, 'PRIVATE_FIXTURE')
     assert.throws(verify, /Unexpected|allowlist/)
     rmSync(target)
@@ -97,6 +100,7 @@ test('new packaged user data starts empty/local/disabled with no models, admin c
   const root = fixture(t), staged = preparePackageSeed({ projectRoot: root }), userData = join(root, 'new-user')
   put(staged, 'config/admin.json', 'must not seed')
   put(staged, 'data/backend.log', 'must not seed')
+  for (const file of PRIVATE_ROBOT_DIAGNOSTIC_FILES) put(staged, file, `PRIVATE_LOG_MUST_NOT_SEED:${file}`)
   const result = seedPackagedUserData({ packaged: true, projectRoot: staged, userDataDir: userData })
   assert.equal(result.dataCreated, true)
   assert.equal(result.environmentCreated, true)
@@ -110,6 +114,7 @@ test('new packaged user data starts empty/local/disabled with no models, admin c
   for (const file of SEED_EMPTY_DIRECTORIES) assert.deepEqual(readdirSync(join(userData, 'data', file)), [])
   assert.equal(existsSync(join(userData, 'config/admin.json')), false)
   assert.equal(existsSync(join(userData, 'data/models')), false)
+  for (const file of PRIVATE_ROBOT_DIAGNOSTIC_FILES) assert.equal(existsSync(join(userData, file)), false, file)
 })
 
 test('upgrade preserves every existing data/config/environment byte and does not restore missing data defaults', t => {
@@ -121,6 +126,7 @@ test('upgrade preserves every existing data/config/environment byte and does not
   put(userData, 'data/transit-audio.json', '{"enabled":true,"text":"USER_TEXT"}')
   put(userData, 'data/tts-cache/recording.mp3', 'USER_AUDIO_FIXTURE')
   put(userData, 'data/flatfiles/custom/route/99.json', '{"body":"USER_CONTENT"}')
+  for (const file of PRIVATE_ROBOT_DIAGNOSTIC_FILES) put(userData, file, `USER_DIAGNOSTIC_FIXTURE:${file}`)
   const before = contents(userData)
   const result = seedPackagedUserData({ packaged: true, projectRoot: staged, userDataDir: userData })
   assert.deepEqual(result, { dataCreated: false, environmentCreated: false, configCreated: [] })

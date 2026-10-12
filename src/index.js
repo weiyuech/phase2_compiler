@@ -24,6 +24,8 @@ import { AudioOutputRouter }           from './tts/audio-output-router.js'
 import { applyAudioOutputConfig }      from './tts/audio-output-config.js'
 import { SpeechCoordinator }           from './tts/speech-coordinator.js'
 import { AudioDiagnostics }            from './diagnostics/audio-diagnostics.js'
+import { RobotDiagnostics }            from './diagnostics/robot-diagnostics.js'
+import { registerDiagnosticsFlush }    from './diagnostics/flush.js'
 import { startBackendLogCapture }      from './diagnostics/backend-log.js'
 import { TransitAudioManager }         from './transit/manager.js'
 import { RobotListener }               from './robot/listener.js'
@@ -42,6 +44,9 @@ import { safeJoin }                    from './safe-path.js'
 const diagnosticsDirectory = process.env.DIAGNOSTICS_DIR || process.env.USER_DATA_DIR || join(process.cwd(), 'data')
 const backendLogCapture = startBackendLogCapture({ directory: diagnosticsDirectory })
 const audioDiagnostics = new AudioDiagnostics({ directory: diagnosticsDirectory })
+const robotDiagnostics = new RobotDiagnostics({ directory: diagnosticsDirectory })
+
+registerDiagnosticsFlush(process.parentPort, [audioDiagnostics, robotDiagnostics, backendLogCapture])
 
 const kb = await createKnowledgeBaseProvider({
   KB_FLATFILE_DIR: join(DATA_DIR, 'flatfiles'),
@@ -57,11 +62,12 @@ await barrageProvider.initialize()
 const healthy = await kb.healthCheck()
 if (!healthy) process.exit(1)
 
-const robot = new RobotListener(
-  process.env.ROBOT_URL
+const robot = new RobotListener({
+  ...(process.env.ROBOT_URL
     ? { url: process.env.ROBOT_URL }
-    : { port: parseInt(process.env.ROBOT_PORT || '8765') }
-)
+    : { port: parseInt(process.env.ROBOT_PORT || '8765') }),
+  diagnostics: robotDiagnostics,
+})
 
 const audioOutput = new AudioOutputRouter({
   robot,
@@ -794,7 +800,7 @@ async function shutdown() {
   const audioCleanup = audioOutput.destroy()
   robot.stop()
   await Promise.race([
-    Promise.allSettled([audioCleanup, audioDiagnostics.destroy(), backendLogCapture?.destroy?.(), phase2.destroy?.()]),
+    Promise.allSettled([audioCleanup, audioDiagnostics.destroy(), robotDiagnostics.destroy(), backendLogCapture?.destroy?.(), phase2.destroy?.()]),
     new Promise(resolve => setTimeout(resolve, 1000)),
   ])
   // stopTunnel().finally(() => process.exit(0))

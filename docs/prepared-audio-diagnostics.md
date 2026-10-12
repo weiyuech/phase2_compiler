@@ -97,7 +97,7 @@ the packaged-runtime gate. Do not widen this pin without testing both platforms.
 ## Exporting a choppiness report
 
 Open **系统设置 → 音频诊断** at any time, including while connected. Recording is
-automatic. After a glitch, optionally press **刚才卡顿**, then **导出音频诊断**.
+automatic. After a glitch, optionally press **刚才卡顿**, then **导出诊断日志**.
 The default text/JSON report contains timing, preparation/wait states, anonymous
 session/utterance IDs, cancellations, fixed error codes, packet summaries,
 backlog, event-loop/resource statistics, versions and retained time range.
@@ -118,6 +118,38 @@ Development storage is project `data/`; packaged storage is Electron `userData`.
 Including **raw backend logs** is an explicit checkbox plus native privacy warning:
 those existing logs can contain spoken/OCR text, paths, documents and URLs. Review
 before sharing. Exported files are user-owned and are never cleaned up by rotation.
+
+## Automatic robot connection and point diagnostics
+
+The top-bar **导出诊断日志** button includes structured robot diagnostics by
+default. Customers only need to export that one file after a problem; they do
+not need a terminal, packet capture, debug switch, or access to robot internals.
+This recording requires an app build containing the new recorder. Older exports
+cannot retrospectively recover commands and replies that were never recorded.
+
+The report distinguishes connection attempts that never opened from connections
+that opened and later closed. It records fixed error/close codes, elapsed time,
+reconnect delay and time since the last heartbeat. Each point command has a local
+ID linking its confirmation, ignored replies, comparison results, relevant
+heartbeat transitions and final outcome. These IDs do not change robot messages.
+An arrival heartbeat received before an accepted confirmation is recorded as
+such, so an “arrived” display can be compared with the actual command wait.
+
+Robot history and failure snapshots each have a separate **1 MiB total** budget.
+Unchanged heartbeats are summarized; a failure retains bounded preceding context
+in the incident history so ordinary later traffic cannot overwrite it. Subsequent
+failures still rotate out older incidents. Recording is asynchronous and bounded;
+disk trouble must not block navigation or speech. Export briefly asks only the
+selected machine's backend to flush its local writers. If it has stopped, fails,
+or does not respond within one second, persisted history is still exported and
+`metadata.diagnosticsFlush` records that limitation.
+
+Default reports contain comparison flags, value types, numeric point IDs and
+per-run fingerprints of map/path/object identities. They exclude raw protocol
+messages, connection addresses, credentials and map/path/object names. The
+Chinese findings describe observed failures and do not claim to identify a
+robot-side defect, Wi-Fi outage, or other unobserved cause. Nothing uploads
+automatically, and runtime histories are excluded from installer seeds.
 
 ## Verification and release gate
 

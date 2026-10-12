@@ -1,12 +1,8 @@
 {
   "name": "robot-live-ui",
-  "version": "1.1.0-test.4",
+  "version": "1.1.0-test.5",
   "description": "Robot Live System Control Panel",
-  "author": "weiyuech",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/weiyuech/phase2_compiler.git"
-  },
+  "author": "Robot Live System",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
@@ -32,6 +28,7 @@
     "vue": "^3.4.21"
   },
   "build": {
+    "publish": null,
     "appId": "com.robot.live",
     "productName": "机器人直播控制台",
     "icon": "build/icon.png",

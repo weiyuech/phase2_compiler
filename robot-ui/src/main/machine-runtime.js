@@ -9,6 +9,7 @@ import { DEFAULT_OCR_JUDGE_PROMPT, resolveOcrJudgePrompt } from '../../../src/ph
 import { readStationaryPrompt, readStationaryOptions, writeStationaryPrompt } from '../../../src/llm/stationary-prompt-store.js'
 import { speechProfileKeys, speechProfileMigration, selectSpeechProfileChanges } from '../../../src/config/speech-profiles.js'
 import { createBackendRestarter } from './backend-restart.mjs'
+import { flushBackendDiagnostics } from './diagnostics-flush.mjs'
 
 
 // One closure per machine: settings, backend, IPC and OCR selection never share state.
@@ -284,6 +285,7 @@ const backendRestarter = createBackendRestarter({
 // 而不是让对方去 %APPDATA% 里翻目录。后端崩了也能用（全在主进程里跑）。
 
 async function buildDiagnosticsReport(includeBackendLogs = false) {
+  const diagnosticsFlush = await flushBackendDiagnostics(_backendProcess)
   // A failed backend cannot answer a flush request. Persisted audio history is
   // still exportable; never wait indefinitely on a live or crashed process.
   if (_backendLog) await Promise.race([_backendLog.flush(), new Promise(resolve => setTimeout(resolve, 500))])
@@ -292,7 +294,7 @@ async function buildDiagnosticsReport(includeBackendLogs = false) {
     metadata: {
       appVersion: app.getVersion(), electronVersion: process.versions.electron,
       nodeVersion: process.versions.node, platform: process.platform, arch: process.arch,
-      packaged: app.isPackaged,
+      packaged: app.isPackaged, machineId: profile.id, diagnosticsFlush,
       backendStatus: _backendProcess ? 'running' : (_lastBackendExit ? 'exited' : 'not-running'),
       backendEntryExists: existsSync(join(PROJECT_ROOT, 'src/index.js')),
       dependenciesExist: existsSync(join(PROJECT_ROOT, 'node_modules')),

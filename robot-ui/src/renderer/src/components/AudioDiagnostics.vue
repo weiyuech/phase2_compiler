@@ -2,7 +2,7 @@
   <div class="audio-diagnostics">
     <div class="panel-header">音频诊断</div>
     <div class="diagnostics-body">
-      <p class="intro">自动记录最近的音频时序，无需手动开启。听到卡顿后可以直接导出，或先点击“刚才卡顿”标记时间。</p>
+      <p class="intro">自动记录机器人连接、点位确认和音频时序，无需手动开启。出现问题后点击顶部“导出诊断日志”即可；故障前的近期记录会自动保留。</p>
       <div class="status" :class="{ warning: !connected || snapshot?.storage?.status === 'error' }">
         {{ statusText }}
         <span v-if="snapshot?.storage?.errorCode">（{{ snapshot.storage.errorCode }}）</span>
@@ -20,9 +20,10 @@
 
       <div class="actions">
         <el-button :disabled="!connected" @click="markGlitch">刚才卡顿</el-button>
-        <el-button type="primary" :loading="exporting" @click="exportReport">导出音频诊断</el-button>
+        <el-button type="primary" :loading="exporting" @click="exportReport">导出诊断日志</el-button>
       </div>
       <el-checkbox v-model="includeBackendLogs">同时包含原始后台日志</el-checkbox>
+      <p class="note">默认导出已包含机器人连接与点位故障记录，无需勾选。原始后台日志仅用于进一步排查，可能包含业务文字。</p>
 
     </div>
   </div>

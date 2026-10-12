@@ -14,6 +14,7 @@ import { createRequire } from 'node:module'
 import ffmpeg from 'ffmpeg-static'
 import { parse as parseEnv } from 'dotenv'
 import { upgradeSmokeOptions } from './machine-upgrade-options.mjs'
+import { verifyMachineDiagnosticExports } from './diagnostics-export-smoke.mjs'
 
 const require = createRequire(import.meta.url)
 const root = resolve(import.meta.dirname, '../..')
@@ -389,6 +390,11 @@ try {
   }
   if (options.installer) await runInstaller('initial')
   let current = await launch()
+  report.diagnostics = await verifyMachineDiagnosticExports({
+    app, machine, output, ids, packaged: options.packaged,
+    appVersion: JSON.parse(await readFile(join(root, 'robot-ui/package.json'), 'utf8')).version,
+  })
+  pass('default diagnostic export flushes each real utility backend and includes isolated private robot records without raw logs')
   await assertPreserved()
   const migrated = parseEnv(await readFile(join(profile, '.env')))
   for (const [key, value] of Object.entries(parseEnv(legacyEnv))) assert.equal(migrated[key], value, `Legacy setting ${key} changed`)

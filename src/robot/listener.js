@@ -15,7 +15,7 @@ import { GoalTracker, GoalError } from './goal-tracker.js'
  *   'disconnected'  ()
  */
 export class RobotListener extends EventEmitter {
-  constructor({ port = 8765, host, url = null, ackTimeoutMs, arrivalTimeoutMs } = {}) {
+  constructor({ port = 8765, host, url = null, ackTimeoutMs, arrivalTimeoutMs, diagnostics } = {}) {
     super()
     this.port            = port
     this.host            = host
@@ -29,6 +29,12 @@ export class RobotListener extends EventEmitter {
     this._lastStatusStr  = ''
     this._reconnectTimer = null
     this._stopped        = false
+    this.diagnostics = diagnostics
+    this._diagnosticAttemptId = 0
+    this._diagnosticConnection = null
+    this._lastHeartbeatDiagnosticKey = null
+    this._lastHeartbeatDiagnosticAt = null
+    this._diagnosticHeartbeatCount = 0
     this._goals = new GoalTracker({
       send: obj => this._send(obj),
       emit: (event, data) => {
@@ -40,7 +46,35 @@ export class RobotListener extends EventEmitter {
         ageMs: this.lastHeartbeatAt == null ? Infinity : performance.now() - this.lastHeartbeatAt,
       }),
       ackTimeoutMs, arrivalTimeoutMs,
+      diagnostics: { event: (type, fields) => this._diagnostic(type, fields) },
     })
+  }
+
+  _newDiagnosticConnection(direction) {
+    const connection = { attemptId: ++this._diagnosticAttemptId, direction,
+      startedAt: performance.now(), openedAt: null }
+    this._diagnosticConnection = connection
+    this._diagnostic('robot-connection-attempt', {}, connection)
+    return connection
+  }
+
+  _diagnostic(type, fields = {}, connection = this._diagnosticConnection) {
+    // Deliberately omit URLs, socket close reasons, raw messages and error.message.
+    // Diagnostics cannot alter connection, timer, or navigation behavior.
+    try {
+      const now = performance.now()
+      this.diagnostics?.event?.(type, {
+        attemptId: connection?.attemptId ?? 0,
+        direction: connection?.direction ?? (this.url ? 'client' : 'server'),
+        generation: this.connectionGeneration,
+        opened: connection?.openedAt != null,
+        elapsedMs: connection ? Math.round(now - connection.startedAt) : 0,
+        uptimeMs: connection?.openedAt == null ? null : Math.round(now - connection.openedAt),
+        heartbeatAgeMs: this.lastHeartbeatAt == null ? null : Math.round(now - this.lastHeartbeatAt),
+        stage: connection?.openedAt == null ? 'connect' : 'socket',
+        ...fields,
+      })?.catch?.(() => {})
+    } catch {}
   }
 
   start() {
@@ -57,6 +91,7 @@ export class RobotListener extends EventEmitter {
       // 服务端级别的 'error' 没人监听会变成未捕获异常，把整个后端一起带走。
       // 机器人端口占用只应该让机器人连接失效，播报 / 巡游 / 控制台通道要照常工作。
       this.wss.on('error', (err) => {
+        this._diagnostic('robot-connection-error', { errorCode: err.code, stage: 'listen', reason: 'socket-error' })
         console.error(
           err.code === 'EADDRINUSE'
             ? `[机器人] 端口 ${this.port} 已被占用，机器人监听未启动（其余功能不受影响）`
@@ -68,8 +103,11 @@ export class RobotListener extends EventEmitter {
         console.log('[机器人] 已连接')
         const oldSocket = this._socket
         this._resetRobotState()
+        const connection = this._newDiagnosticConnection('server')
         this._socket         = socket
         this.connectionGeneration++
+        connection.openedAt = performance.now()
+        this._diagnostic('robot-connection-open', {}, connection)
         if (oldSocket) oldSocket.close()
         this.emit('connected')
 
@@ -84,16 +122,18 @@ export class RobotListener extends EventEmitter {
           this._handleMessage(msg)
         })
 
-        socket.on('close', () => {
+        socket.on('close', (code) => {
           if (this._socket !== socket) return
           console.log('[机器人] 连接断开')
           this._socket = null
           this.connectionGeneration++
+          this._diagnostic('robot-connection-close', { closeCode: code, reason: 'closed' }, connection)
           this._resetRobotState()
           this.emit('disconnected')
         })
 
         socket.on('error', (err) => {
+          this._diagnostic('robot-connection-error', { errorCode: err.code, reason: 'socket-error' }, connection)
           console.error('[机器人] 连接错误:', err.message)
         })
       })
@@ -107,11 +147,13 @@ export class RobotListener extends EventEmitter {
       this._socket = null
     }
     console.log(`[机器人] 正在连接 WS 服务: ${this.url}`)
+    const connection = this._newDiagnosticConnection('client')
     
     let socket
     try {
       socket = new WebSocket(this.url)
     } catch (err) {
+      this._diagnostic('robot-connection-error', { errorCode: err.code, reason: 'connect-error' }, connection)
       console.log('[机器人] 创建 WebSocket 失败:', err.message)
       this._reconnect()
       return
@@ -123,6 +165,8 @@ export class RobotListener extends EventEmitter {
       console.log('[机器人] 连接成功')
       this._resetRobotState()
       this.connectionGeneration++
+      connection.openedAt = performance.now()
+      this._diagnostic('robot-connection-open', {}, connection)
       this.emit('connected')
     })
 
@@ -137,12 +181,13 @@ export class RobotListener extends EventEmitter {
       this._handleMessage(msg)
     })
 
-    socket.on('close', () => {
+    socket.on('close', (code) => {
       if (this._socket !== socket) return
       console.log('[机器人] 连接断开/关闭')
       const wasConnected = !!this._socket
       this._socket = null
       this.connectionGeneration++
+      this._diagnostic('robot-connection-close', { closeCode: code, reason: 'closed' }, connection)
       this._resetRobotState()
       if (wasConnected) {
         this.emit('disconnected')
@@ -151,6 +196,8 @@ export class RobotListener extends EventEmitter {
     })
 
     socket.on('error', (err) => {
+      this._diagnostic('robot-connection-error', { errorCode: err.code,
+        reason: connection.openedAt == null ? 'connect-error' : 'socket-error' }, connection)
       console.log('[机器人] 连接错误:', err.message)
     })
   }
@@ -158,6 +205,7 @@ export class RobotListener extends EventEmitter {
   _reconnect() {
     if (this._stopped || this._reconnectTimer) return
     console.log('[机器人] 5秒后尝试重新连接...')
+    this._diagnostic('robot-connection-retry', { retryDelayMs: 5000, reason: 'retry' })
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null
       this._connectAsClient()
@@ -166,6 +214,7 @@ export class RobotListener extends EventEmitter {
 
   stop() {
     this._stopped = true
+    this._diagnostic('robot-connection-stopped', { stage: 'stopped', reason: 'stopped' })
     this._resetRobotState()
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer)
@@ -197,7 +246,11 @@ export class RobotListener extends EventEmitter {
   // Resolves only on a correlated navigation arrival; rejects on refusal,
   // failure, timeout or cancellation. No physical stop command is implied.
   sendSetGoal(item, options) {
-    if (!this.isConnected()) throw new GoalError('ROBOT_DISCONNECTED', '机器人未连接，未发送目标点')
+    if (!this.isConnected()) {
+      const error = new GoalError('ROBOT_DISCONNECTED', '机器人未连接，未发送目标点')
+      this._goals.recordRejectedStart(item, error)
+      throw error
+    }
     return this._goals.start(item, options)
   }
 
@@ -211,6 +264,9 @@ export class RobotListener extends EventEmitter {
     this.lastMapStatus = null
     this.lastHeartbeatAt = null
     this._lastStatusStr = ''
+    this._lastHeartbeatDiagnosticKey = null
+    this._lastHeartbeatDiagnosticAt = null
+    this._diagnosticHeartbeatCount = 0
   }
 
   /**
@@ -357,6 +413,21 @@ export class RobotListener extends EventEmitter {
       this.lastMapStatus = map.status
       this.lastHeartbeatAt = performance.now()
     }
+    this._diagnosticHeartbeatCount++
+    try {
+      const fields = {
+        receivedMap: map?.name, receivedPath: task?.path_file,
+        receivedGoalId: task?.goal_id, receivedObject: task?.goal_object,
+        mapStatus: map?.status, goalStatus: task?.goal_status, objectStatus: task?.object_status,
+      }
+      const key = JSON.stringify(fields)
+      if (key !== this._lastHeartbeatDiagnosticKey || performance.now() - this._lastHeartbeatDiagnosticAt >= 10000) {
+        const reason = key !== this._lastHeartbeatDiagnosticKey ? 'changed' : 'periodic'
+        this._lastHeartbeatDiagnosticKey = key
+        this._lastHeartbeatDiagnosticAt = performance.now()
+        this._diagnostic('robot-heartbeat', { ...fields, heartbeatCount: this._diagnosticHeartbeatCount, reason })
+      }
+    } catch { /* Malformed diagnostic values cannot interrupt heartbeat handling. */ }
     this.emit('heartbeat', msg)
     this._goals.handleHeartbeat(msg)
     if (!task || !map) return

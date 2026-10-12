@@ -75,6 +75,9 @@ jobs:
       - name: Verify packaged clean defaults and resource allowlist
         run: node robot-ui/scripts/prepare-package-seed.mjs --verify release/win-unpacked/resources/backend
 
+      - name: Verify customer package contains no personal release metadata
+        run: node robot-ui/scripts/verify-packaged-privacy.mjs --resources-root release/win-unpacked/resources
+
       - name: Verify packaged Electron audio and OCR runtime
         timeout-minutes: 5
         shell: pwsh
