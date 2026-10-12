@@ -3,12 +3,39 @@ import test from 'node:test'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { verifyPackagedPrivacy } from '../scripts/verify-packaged-privacy.mjs'
+import { dirname, join, posix, win32 } from 'node:path'
+import { runInNewContext } from 'node:vm'
+import { archiveEntryNames, verifyPackagedPrivacy } from '../scripts/verify-packaged-privacy.mjs'
 
 const require = createRequire(import.meta.url)
 const asar = require('@electron/asar')
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url)))
+
+test('ASAR native read paths work with both Windows and POSIX dependency semantics', () => {
+  // Exercise the installed dependency, not a fake parser. Injecting only path
+  // lets a Mac/Linux test reproduce the actual Windows directory lookup bug.
+  const modulePath = require.resolve('@electron/asar/lib/filesystem.js')
+  const moduleRequire = createRequire(modulePath)
+  for (const paths of [posix, win32]) {
+    const exports = {}
+    runInNewContext(readFileSync(modulePath, 'utf8'), {
+      exports,
+      require: name => name === 'path' ? paths : moduleRequire(name),
+    })
+    const filesystem = new exports.Filesystem('.')
+    const file = { size: 42, offset: '0' }
+    filesystem.setHeader({ files: { out: { files: { main: { files: { 'index.js': file } } } } } }, 0)
+    const entries = filesystem.listFiles().map(archiveEntryNames)
+    const entry = entries.find(item => item.name === 'out/main/index.js')
+    assert.ok(entry, 'portable checks must find nested content on either platform')
+    assert.equal(filesystem.getFile(entry.nativeName, false), file)
+    if (paths === win32) {
+      assert.equal(entry.nativeName, 'out\\main\\index.js')
+      assert.throws(() => filesystem.getFile(entry.name, false), /not found/,
+        'a slash-only read must reproduce the Windows CI failure')
+    }
+  }
+})
 
 async function fixture(t, { app = {}, resources = {}, metadata = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'robot-package-privacy-'))

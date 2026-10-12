@@ -31,6 +31,13 @@ function inspectContent(name, content) {
   assert.ok(!/\bsourceMappingURL\s*=/.test(text), `First-party source map reference: ${name}`)
 }
 
+export function archiveEntryNames(listedName) {
+  // ASAR's stat/extract APIs split on the host path.sep. Keep its native listing
+  // for those calls; slash paths are only for portable checks and diagnostics.
+  const nativeName = listedName.replace(/^[/\\]/, '')
+  return { nativeName, name: nativeName.replaceAll('\\', '/') }
+}
+
 export function verifyPackagedPrivacy({ resourcesRoot } = {}) {
   assert.ok(resourcesRoot, 'resourcesRoot is required')
   const root = resolve(resourcesRoot)
@@ -42,9 +49,9 @@ export function verifyPackagedPrivacy({ resourcesRoot } = {}) {
   }
   const archive = join(root, 'app.asar')
   assert.ok(existsSync(archive), 'Packaged app.asar is missing')
-  const entries = asar.listPackage(archive).map(name => name.replaceAll('\\', '/').replace(/^\//, ''))
+  const entries = asar.listPackage(archive).map(archiveEntryNames)
   for (const name of ['package.json', 'out/main/index.js', 'out/preload/index.js', 'out/renderer/index.html']) {
-    assert.ok(entries.includes(name), `Packaged application file is missing: ${name}`)
+    assert.ok(entries.some(entry => entry.name === name), `Packaged application file is missing: ${name}`)
   }
   const manifest = JSON.parse(asar.extractFile(archive, 'package.json'))
   assert.equal(manifest.name, uiManifest.name, 'Packaged app identity changed')
@@ -52,14 +59,14 @@ export function verifyPackagedPrivacy({ resourcesRoot } = {}) {
   assert.ok(manifest.author === 'Robot Live System', 'Packaged author must be the neutral product author')
   assert.ok(manifest.repository === undefined, 'Source repository metadata must not be packaged')
   let appFiles = 0, backendFiles = 0
-  for (const name of entries) {
+  for (const { name, nativeName } of entries) {
     if (name.split('/').includes('node_modules')) continue
     inspectName(name)
-    const metadata = asar.statFile(archive, name, false)
+    const metadata = asar.statFile(archive, nativeName, false)
     assert.ok(!metadata.link, `First-party archive symlink is not allowed: ${name}`)
     if (metadata.files) continue
     appFiles++
-    if (textFile.test(name)) inspectContent(`app.asar/${name}`, asar.extractFile(archive, name))
+    if (textFile.test(name)) inspectContent(`app.asar/${name}`, asar.extractFile(archive, nativeName))
   }
   // Include unpacked first-party output if builder moves any out of app.asar.
   function inspectTree(directory, label) {
