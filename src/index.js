@@ -694,6 +694,29 @@ tour.on('current-removed', ({ nextIndex }) => {
 
 // ── Robot events ──────────────────────────────────────────────────────────────
 
+robot.on('audio-flow', (flow = {}) => {
+  const eventType = { waiting: 'waiting', recovered: 'resume', reset: 'error' }[flow.state]
+  if (!eventType) return
+  audioDiagnostics.event(eventType, {
+    destination: 'robot', reason: 'backpressure', direction: flow.direction,
+    bufferedBytes: flow.bufferedBytes, waitMs: flow.waitMs,
+    highWaterBytes: flow.highWaterBytes, lowWaterBytes: flow.lowWaterBytes,
+    hardLimitBytes: flow.hardLimitBytes, errorCode: flow.errorCode,
+    connectionGeneration: flow.connectionGeneration ?? robot.connectionGeneration,
+  })
+  const messages = {
+    waiting: '机器人音频发送拥堵，已暂缓后续发送，正在等待缓冲下降。',
+    recovered: '机器人音频发送缓冲已下降，发送已恢复。',
+    reset: `机器人音频发送持续拥堵，已放弃旧连接。${flow.direction === 'client'
+      ? '将在 5 秒后尝试重新连接。' : '正在等待机器人重新连接。'}连接恢复后，播放需重新开始。`,
+  }
+  const message = messages[flow.state]
+  // Persist transitions even when the renderer is closed; packet-level events
+  // remain aggregated by the diagnostics recorder instead of flooding the UI.
+  console.log(`[音频发送] ${message}`)
+  uiBridge.broadcast('AUDIO_FLOW_STATUS', { state: flow.state, message })
+})
+
 robot.on('connected', () => {
   audioDiagnostics.event('connected', { destination: audioOutput.getConfig().destination, connected: true, connectionGeneration: robot.connectionGeneration })
   if (audioOutput.isRobotDestination()) invalidateRobotSpeech()

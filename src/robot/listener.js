@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws'
 import { EventEmitter }    from 'events'
 import { GoalTracker, GoalError } from './goal-tracker.js'
+import { AUDIO_SEND_POLICY } from './audio-send-policy.js'
 
 /**
  * RobotListener
@@ -29,6 +30,9 @@ export class RobotListener extends EventEmitter {
     this._lastStatusStr  = ''
     this._reconnectTimer = null
     this._stopped        = false
+    this._audioPressure = null
+    this._audioResetTimer = null
+    this._audioFailure = null
     this.diagnostics = diagnostics
     this._diagnosticAttemptId = 0
     this._diagnosticConnection = null
@@ -108,7 +112,9 @@ export class RobotListener extends EventEmitter {
         this.connectionGeneration++
         connection.openedAt = performance.now()
         this._diagnostic('robot-connection-open', {}, connection)
-        if (oldSocket) oldSocket.close()
+        // Replacement retires the old transport completely; graceful close
+        // could otherwise flush stale PCM after the new connection takes over.
+        if (oldSocket) { try { oldSocket.terminate() } catch {} }
         this.emit('connected')
 
         socket.on('message', (raw) => {
@@ -143,7 +149,7 @@ export class RobotListener extends EventEmitter {
   _connectAsClient() {
     if (this._stopped) return
     if (this._socket) {
-      try { this._socket.close() } catch {}
+      try { this._socket.terminate() } catch {}
       this._socket = null
     }
     console.log(`[机器人] 正在连接 WS 服务: ${this.url}`)
@@ -225,7 +231,7 @@ export class RobotListener extends EventEmitter {
       const socket = this._socket
       this._socket = null
       this.connectionGeneration++
-      try { socket.close() } catch {}
+      try { socket.terminate() } catch {}
     }
   }
 
@@ -259,6 +265,7 @@ export class RobotListener extends EventEmitter {
   }
 
   _resetRobotState() {
+    this._clearAudioSendState()
     this._goals.cancel(new GoalError('ROBOT_DISCONNECTED', '机器人连接已断开，目标点等待已取消'))
     this.lastMapName = null
     this.lastMapStatus = null
@@ -267,6 +274,124 @@ export class RobotListener extends EventEmitter {
     this._lastHeartbeatDiagnosticKey = null
     this._lastHeartbeatDiagnosticAt = null
     this._diagnosticHeartbeatCount = 0
+  }
+
+  _bufferedAudioBytes(socket = this._socket) {
+    const bytes = socket?.bufferedAmount
+    return Number.isFinite(bytes) && bytes > 0 ? bytes : 0
+  }
+
+  _clearAudioPressure() {
+    if (this._audioPressure?.timer != null) clearTimeout(this._audioPressure.timer)
+    this._audioPressure = null
+  }
+
+  _clearAudioSendState() {
+    this._clearAudioPressure()
+    if (this._audioResetTimer != null) clearTimeout(this._audioResetTimer)
+    this._audioResetTimer = null
+    this._audioFailure = null
+  }
+
+  _audioFlow(state, { bufferedBytes, waitMs = 0, errorCode } = {}) {
+    const reason = state === 'waiting' ? 'audio-backpressure' : state === 'recovered' ? 'audio-drained'
+      : errorCode === 'AUDIO_BACKLOG' ? 'audio-hard-limit' : 'audio-timeout'
+    const fields = { bufferedBytes, waitMs, errorCode, direction: this.url ? 'client' : 'server',
+      highWaterBytes: AUDIO_SEND_POLICY.highWaterBytes, lowWaterBytes: AUDIO_SEND_POLICY.lowWaterBytes,
+      hardLimitBytes: AUDIO_SEND_POLICY.hardLimitBytes }
+    this._diagnostic('robot-audio-backpressure', { ...fields, stage: 'audio', reason })
+    // UI/diagnostic notification must never prevent the drain watchdog or
+    // the reset timer from being installed.
+    try { this.emit('audio-flow', { ...fields, state }) } catch {
+      console.warn('[机器人] 音频发送状态通知失败，连接保护继续执行')
+    }
+  }
+
+  _failAudioSend(socket, code, bufferedBytes, waitMs = 0) {
+    if (this._audioFailure?.socket === socket) return this._audioFailure.error
+    const message = code === 'AUDIO_BACKLOG'
+      ? `机器人音频发送积压超过安全上限 (${bufferedBytes} bytes)，正在重置连接`
+      : `机器人音频发送持续拥堵 ${Math.round(waitMs / 1000)} 秒，正在清理旧连接；连接恢复后请重新播放`
+    const error = Object.assign(new Error(message), { code, bufferedAmount: bufferedBytes, waitMs })
+    this._clearAudioPressure()
+    this._audioFailure = { socket, error }
+    this._audioFlow('reset', { bufferedBytes, waitMs, errorCode: code })
+    // Let the current send fail with its original cause before invalidating all
+    // shared-socket users. Quarantine this socket immediately in the meantime.
+    this._audioResetTimer = setTimeout(() => {
+      this._audioResetTimer = null
+      if (this._stopped || this._socket !== socket || this._audioFailure?.socket !== socket) return
+      this._socket = null
+      this.connectionGeneration++
+      this._diagnostic('robot-connection-close', { reason: code === 'AUDIO_BACKLOG' ? 'audio-hard-limit' : 'audio-timeout', errorCode: code })
+      this._resetRobotState()
+      // A graceful close can queue behind the blocked audio. Termination drops
+      // local pending writes; it cannot retract audio already at the robot.
+      try { socket.terminate() } catch {}
+      try { this.emit('disconnected') } catch {
+        console.warn('[机器人] 连接重置通知失败，旧连接已关闭，重连保护继续执行')
+      } finally {
+        if (this.url) this._reconnect()
+      }
+    }, 0)
+    return error
+  }
+
+  _checkAudioPressure() {
+    const pressure = this._audioPressure
+    if (!pressure) return
+    const { socket } = pressure
+    if (this._stopped || socket !== this._socket || socket.readyState !== WebSocket.OPEN) {
+      this._clearAudioPressure()
+      return
+    }
+    const bufferedBytes = this._bufferedAudioBytes(socket)
+    const waitMs = performance.now() - pressure.startedAt
+    if (bufferedBytes > AUDIO_SEND_POLICY.hardLimitBytes) {
+      this._failAudioSend(socket, 'AUDIO_BACKLOG', bufferedBytes, waitMs)
+      return
+    }
+    if (bufferedBytes <= pressure.resumeBytes) {
+      this._clearAudioPressure()
+      if (pressure.announced) this._audioFlow('recovered', { bufferedBytes, waitMs })
+      return
+    }
+    if (waitMs >= AUDIO_SEND_POLICY.stallTimeoutMs) {
+      this._failAudioSend(socket, 'AUDIO_SEND_TIMEOUT', bufferedBytes, waitMs)
+      return
+    }
+    if (!pressure.announced && waitMs >= AUDIO_SEND_POLICY.drainNoticeMs) {
+      pressure.announced = true
+      this._audioFlow('waiting', { bufferedBytes, waitMs })
+    }
+    if (pressure.timer == null) {
+      pressure.timer = setTimeout(() => {
+        pressure.timer = null
+        this._checkAudioPressure()
+      }, AUDIO_SEND_POLICY.pollMs)
+      pressure.timer.unref?.()
+    }
+  }
+
+  /** Poll before taking PCM from the reader. Waiting never consumes a frame or
+   * advances seq. State belongs to the connection, so stop/retry cannot evade
+   * its timeout or inherit an unlimited queue. drain waits for local writes only. */
+  getAudioSendState({ generation, drain = false } = {}) {
+    const socket = this._socket
+    if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('机器人 WebSocket 未连接，无法发送音频')
+    if (generation !== undefined && generation !== this.connectionGeneration) throw new Error('机器人连接已更换，拒绝旧音频帧')
+    if (this._audioFailure?.socket === socket) throw this._audioFailure.error
+    const bufferedBytes = this._bufferedAudioBytes(socket)
+    if (bufferedBytes > AUDIO_SEND_POLICY.hardLimitBytes) throw this._failAudioSend(socket, 'AUDIO_BACKLOG', bufferedBytes)
+    if (!this._audioPressure && (bufferedBytes >= AUDIO_SEND_POLICY.highWaterBytes || (drain && bufferedBytes > 0))) {
+      const announced = bufferedBytes >= AUDIO_SEND_POLICY.highWaterBytes
+      this._audioPressure = { socket, startedAt: performance.now(), timer: null,
+        resumeBytes: drain ? 0 : AUDIO_SEND_POLICY.lowWaterBytes, announced }
+      if (announced) this._audioFlow('waiting', { bufferedBytes })
+    } else if (drain && this._audioPressure) this._audioPressure.resumeBytes = 0
+    this._checkAudioPressure()
+    if (this._audioFailure?.socket === socket) throw this._audioFailure.error
+    return { writable: !this._audioPressure, bufferedBytes, retryAfterMs: AUDIO_SEND_POLICY.pollMs }
   }
 
   /**
@@ -287,13 +412,7 @@ export class RobotListener extends EventEmitter {
     if (generation !== undefined && generation !== this.connectionGeneration) {
       throw new Error('机器人连接已更换，拒绝旧音频帧')
     }
-    // Never let network buffering silently turn live audio into a many-second
-    // delayed queue. Normal traffic is only about 46 KB/s including base64/JSON.
-    if (socket.bufferedAmount > 256 * 1024) {
-      throw Object.assign(new Error(`机器人音频发送积压过大 (${socket.bufferedAmount} bytes)`), {
-        code: 'AUDIO_BACKLOG', bufferedAmount: socket.bufferedAmount,
-      })
-    }
+    if (this._audioFailure?.socket === socket) throw this._audioFailure.error
     const payload = JSON.stringify({
       audio: {
         type:   'pcm',
@@ -302,6 +421,11 @@ export class RobotListener extends EventEmitter {
         data: pcmChunk.toString('base64'),
       }
     })
+    const payloadBytes = Buffer.byteLength(payload)
+    const bufferedBytes = this._bufferedAudioBytes(socket)
+    if (bufferedBytes + payloadBytes > AUDIO_SEND_POLICY.hardLimitBytes) {
+      throw this._failAudioSend(socket, 'AUDIO_BACKLOG', bufferedBytes)
+    }
     const startedAt = performance.now()
     const connectionGeneration = this.connectionGeneration
     // Avoid compression work for tiny real-time frames. Callback measures local
@@ -311,15 +435,21 @@ export class RobotListener extends EventEmitter {
         onComplete?.(err || null, {
           writeMs: performance.now() - startedAt,
           bufferedAmount: socket.bufferedAmount || 0,
-          payloadBytes: Buffer.byteLength(payload), connectionGeneration,
+          payloadBytes, connectionGeneration,
           staleConnection: socket !== this._socket,
         })
       } catch { /* Diagnostic consumers must never break robot I/O. */ }
     })
+    // Arm the independent drain watchdog even if this was the last frame or
+    // the user immediately stops/pauses the narration.
+    if (this._socket === socket && this._bufferedAudioBytes(socket) >= AUDIO_SEND_POLICY.highWaterBytes) {
+      this.getAudioSendState({ generation: connectionGeneration })
+    }
   }
 
   isConnected() {
     return !!this._socket && this._socket.readyState === WebSocket.OPEN
+      && this._audioFailure?.socket !== this._socket
   }
 
   /**
@@ -382,7 +512,7 @@ export class RobotListener extends EventEmitter {
   // ── Internal ───────────────────────────────────────────────────────────────
 
   _send(obj) {
-    if (!this._socket || this._socket.readyState !== WebSocket.OPEN) {
+    if (!this.isConnected()) {
       console.warn('[机器人] 尚未连接，无法发送指令')
       return false
     }

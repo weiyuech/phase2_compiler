@@ -11,20 +11,22 @@ const EVENTS = new Set([
   'robot-recorder-start', 'robot-connection-attempt', 'robot-connection-open',
   'robot-connection-error', 'robot-connection-close', 'robot-connection-retry',
   'robot-connection-stopped', 'robot-heartbeat', 'robot-goal-sent',
-  'robot-goal-reply', 'robot-goal-heartbeat', 'robot-goal-result',
+  'robot-goal-reply', 'robot-goal-heartbeat', 'robot-goal-result', 'robot-audio-backpressure',
 ])
 const VALUE_TYPES = new Set(['undefined', 'null', 'string', 'number', 'boolean', 'object', 'array', 'unknown'])
 const STATUS = new Set(['ready', 'preparing', 'loading', 'unloaded', 'going', 'done', 'failed', 'faild', 'error', 'idle', 'unknown'])
 const ENUMS = {
   direction: new Set(['client', 'server']),
-  stage: new Set(['connect', 'socket', 'listen', 'stopped', 'preflight', 'ack', 'arrival']),
+  stage: new Set(['connect', 'socket', 'listen', 'stopped', 'preflight', 'ack', 'arrival', 'audio']),
   reason: new Set(['connect-error', 'socket-error', 'closed', 'stopped', 'retry',
     'no-pending', 'already-accepted', 'missing-reply', 'path-mismatch', 'goal-id-mismatch',
     'object-mismatch', 'accepted', 'rejected', 'map-missing', 'map-not-ready', 'before-ack',
-    'task-missing', 'navigating', 'arrived', 'navigation-failed', 'periodic', 'changed', 'failed']),
+    'task-missing', 'navigating', 'arrived', 'navigation-failed', 'periodic', 'changed', 'failed',
+    'audio-backpressure', 'audio-drained', 'audio-timeout', 'audio-hard-limit']),
   mapStatus: STATUS, goalStatus: STATUS, objectStatus: STATUS,
   errorCode: new Set(['GOAL_ACK_TIMEOUT', 'GOAL_ARRIVAL_TIMEOUT', 'GOAL_REJECTED',
     'GOAL_CANCELLED', 'INVALID_GOAL', 'MAP_NOT_READY', 'NAVIGATION_FAILED', 'ROBOT_DISCONNECTED',
+    'AUDIO_BACKLOG', 'AUDIO_SEND_TIMEOUT',
     'ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH',
     'ENETDOWN', 'ENOTFOUND', 'EAI_AGAIN', 'EADDRINUSE', 'EADDRNOTAVAIL', 'EACCES', 'EPERM',
     'EPIPE', 'ERR_INVALID_URL', 'ERR_INVALID_PROTOCOL', 'ERR_TLS_CERT_ALTNAME_INVALID',
@@ -37,7 +39,7 @@ const ENUMS = {
 const NUMBERS = new Set(['attemptId', 'generation', 'commandId', 'elapsedMs', 'uptimeMs',
   'closeCode', 'heartbeatAgeMs', 'retryDelayMs', 'ackTimeoutMs', 'arrivalTimeoutMs',
   'replyCount', 'mismatchCount', 'heartbeatCount', 'lastHeartbeatAgeMs', 'suppressedHeartbeats',
-  'expectedGoalId', 'receivedGoalId'])
+  'expectedGoalId', 'receivedGoalId', 'bufferedBytes', 'waitMs', 'highWaterBytes', 'lowWaterBytes', 'hardLimitBytes'])
 const BOOLEANS = new Set(['opened', 'pathMatches', 'goalIdMatches', 'objectMatches', 'mapMatches'])
 const IDENTITIES = ['expectedMap', 'expectedPath', 'expectedGoalId', 'expectedObject',
   'receivedMap', 'receivedPath', 'receivedGoalId', 'receivedObject']
@@ -85,6 +87,9 @@ function readEvent(input) {
 }
 
 function failure(event) {
+  if (event.type === 'robot-audio-backpressure') {
+    return ['audio-timeout', 'audio-hard-limit'].includes(event.reason)
+  }
   if (event.type === 'robot-goal-result') {
     return event.errorCode !== 'GOAL_CANCELLED' && (event.reason === 'failed' || Boolean(event.errorCode))
   }
@@ -294,13 +299,23 @@ export function robotDiagnosticFindings(events, incidents) {
     const previous = findings.get(code)
     const evidence = { runId: event.runId, ts: event.ts, type: event.type }
     for (const key of ['seq', 'attemptId', 'commandId', 'stage', 'errorCode', 'heartbeatCount',
-      'lastHeartbeatAgeMs', 'replyCount', 'mismatchCount', 'pathMatches', 'goalIdMatches', 'objectMatches']) {
+      'lastHeartbeatAgeMs', 'replyCount', 'mismatchCount', 'pathMatches', 'goalIdMatches', 'objectMatches',
+      'bufferedBytes', 'waitMs', 'highWaterBytes', 'lowWaterBytes', 'hardLimitBytes']) {
       if (event[key] !== undefined) evidence[key] = event[key]
     }
     findings.set(code, { code, summary, count: (previous?.count || 0) + 1,
       evidence: [...(previous?.evidence || []), evidence].slice(-5) })
   }
   for (const event of unique.values()) {
+    if (event.type === 'robot-audio-backpressure') {
+      if (event.reason === 'audio-backpressure') {
+        add('AUDIO_SEND_WAITING', '电脑端音频发送缓冲尚未排空，正在等待缓冲下降后继续发送或确认本段发送完成；仅凭此记录不能区分网络与机器人接收端原因。', event)
+      } else if (event.reason === 'audio-drained') {
+        add('AUDIO_SEND_DRAINED', '电脑端音频发送缓冲已降至恢复阈值，可继续发送；这不代表机器人已播放完此前音频。', event)
+      } else if (['audio-timeout', 'audio-hard-limit'].includes(event.reason)) {
+        add('AUDIO_CONNECTION_RESET', '音频发送等待超时或积压达到硬上限，App 已放弃旧连接；连接恢复后需要重新开始播放。', event)
+      }
+    }
     if (['robot-connection-close', 'robot-connection-error'].includes(event.type)) {
       if (event.opened === false && event.stage !== 'listen') {
         add('CONNECTION_NOT_ESTABLISHED', '连接尝试结束或报错前，没有记录到 WebSocket 建立成功；不能据此判定具体网络原因。', event)

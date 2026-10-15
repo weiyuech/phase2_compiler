@@ -201,29 +201,52 @@ export class VolcengineTTSWSClient {
     let settled = false
     let logId = ''
     let audioByteCount = 0
+    let closeTimer = null
+    let handshakeResponse = null
 
-    const ws = new WebSocket(this.url, {
-      headers: this._headers(requestId),
-    })
+    let ws
+    try {
+      ws = new WebSocket(this.url, {
+        headers: this._headers(requestId),
+      })
+    } catch (err) {
+      onError(err)
+      return { abort: () => {} }
+    }
 
-    const settle = (fn) => {
+    const settle = (fn, { graceful = false } = {}) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      // Dispose the provider session before calling user code. Even a thrown
+      // callback must not leave a synthesis request alive in the background.
+      try { handshakeResponse?.destroy() } catch {}
+      if (graceful && ws.readyState === WebSocket.OPEN) {
+        try { ws.close() } catch { try { ws.terminate() } catch {} }
+        // A peer that never acknowledges close must not retain one socket per
+        // finished sentence. All audio arrived before SESSION_FINISHED.
+        if (ws.readyState !== WebSocket.CLOSED) {
+          closeTimer = setTimeout(() => { try { ws.terminate() } catch {} }, 1000)
+          closeTimer.unref?.()
+        }
+      } else {
+        try { ws.terminate() } catch {}
+      }
       fn()
     }
 
     const timer = setTimeout(() => {
       settle(() => onError(new Error(`TTS V3 合成超时（${timeoutMs}ms，${characterCount} 字符）`)))
-      try { ws.terminate() } catch {}
     }, timeoutMs)
 
     ws.on('upgrade', (response) => {
+      if (settled) return
       logId = String(response.headers['x-tt-logid'] || '')
       console.log(`[TTS V3] 已连接 resource=${this.resourceId} chars=${characterCount} bytes=${byteCount}${logId ? ` logid=${logId}` : ''}`)
     })
 
     ws.on('open', () => {
+      if (settled) return
       const payload = {
         user: { uid: 'robot_live_system' },
         req_params: {
@@ -239,33 +262,34 @@ export class VolcengineTTSWSClient {
       }
 
       try {
-        ws.send(buildV3TextFrame(payload))
+        ws.send(buildV3TextFrame(payload), (err) => {
+          if (err) settle(() => onError(err))
+        })
       } catch (err) {
         settle(() => onError(err))
       }
     })
 
     ws.on('message', (data) => {
+      if (settled) return
       let frame
       try {
         frame = parseV3Frame(data)
       } catch (err) {
         settle(() => onError(err))
-        try { ws.close() } catch {}
         return
       }
 
       if (frame.messageType === 0x0f) {
         const detail = frame.json?.message || frame.json?.error || frame.text || 'unknown error'
         settle(() => onError(new Error(`TTS V3 Error ${frame.errorCode}: ${detail}${logId ? ` (logid ${logId})` : ''}`)))
-        try { ws.close() } catch {}
         return
       }
 
       if (frame.event === V3_EVENTS.TTS_RESPONSE) {
         if (frame.payload.length) {
           audioByteCount += frame.payload.length
-          onAudioChunk(frame.payload)
+          try { onAudioChunk(frame.payload) } catch (err) { settle(() => onError(err)) }
         }
         return
       }
@@ -277,16 +301,19 @@ export class VolcengineTTSWSClient {
           settle(() => onError(new Error(`TTS V3 Session ${statusCode}: ${message}${logId ? ` (logid ${logId})` : ''}`)))
         } else {
           console.log(`[TTS V3] 合成完成 chars=${characterCount} audioBytes=${audioByteCount}${logId ? ` logid=${logId}` : ''}`)
-          settle(() => onFinished({ logId, usage: frame.json?.usage || null }))
+          settle(() => onFinished({ logId, usage: frame.json?.usage || null }), { graceful: true })
         }
-        try { ws.close() } catch {}
       }
     })
 
     ws.on('unexpected-response', (_request, response) => {
+      response.on('error', (err) => settle(() => onError(err)))
+      if (settled) { response.destroy(); return }
+      handshakeResponse = response
       const chunks = []
       let size = 0
       response.on('data', (chunk) => {
+        if (settled) return
         if (size >= 8192) return
         const part = Buffer.from(chunk).subarray(0, 8192 - size)
         chunks.push(part)
@@ -296,6 +323,7 @@ export class VolcengineTTSWSClient {
         const detail = Buffer.concat(chunks).toString('utf8').trim()
         settle(() => onError(new Error(`TTS V3 握手失败 HTTP ${response.statusCode}${detail ? `: ${detail}` : ''}`)))
       })
+      response.on('aborted', () => settle(() => onError(new Error(`TTS V3 握手响应中断 HTTP ${response.statusCode}`))))
     })
 
     ws.on('error', (err) => {
@@ -303,15 +331,13 @@ export class VolcengineTTSWSClient {
     })
 
     ws.on('close', (code) => {
+      clearTimeout(closeTimer)
       settle(() => onError(new Error(`TTS V3 连接已关闭但合成未完成 (code ${code})${logId ? ` (logid ${logId})` : ''}`)))
     })
 
     return {
       abort: () => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        try { ws.terminate() } catch {}
+        settle(() => {})
       },
     }
   }

@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import ffmpegStatic from 'ffmpeg-static'
 import { PreparedAudioCache, abortedError } from './prepared-audio-cache.js'
+import { AUDIO_SEND_POLICY, nextAudioFrameDeadline } from '../robot/audio-send-policy.js'
 
 const RATE = 16000
 const BYTES_PER_MS = RATE * 2 / 1000
@@ -311,6 +312,14 @@ export class PreparedAudioOutputRouter {
     if (!packet || packet.connectionGeneration !== session.connectionGeneration) return null
     return session._needsWireBoundary || packet.sessionId !== session.id ? packet : null
   }
+  _wireDeadline(session) {
+    const packet = this._lastPacket
+    if (!packet || packet.connectionGeneration !== session.connectionGeneration) return 0
+    // Speaker handoff and final PCM tail retain the full frame duration.
+    // Within one session allow only a tiny correction of normal timer jitter.
+    if (session._needsWireBoundary || packet.sessionId !== session.id || session._offset === session.entry.byteLength) return packet.notBefore
+    return Math.max(packet.sentAt, packet.notBefore - AUDIO_SEND_POLICY.maxPacingCorrectionMs)
+  }
   playFile(owner, filePath) { this._assertReady(); return new LegacyPreparationSession(this, owner, filePath) }
   startMp3Stream(owner) { this._assertReady(); return new LegacyPreparationSession(this, owner, null) }
   stopSession(session) { session?.stop() }
@@ -408,8 +417,12 @@ class PreparedPcmSession {
   _schedule() {
     if (!this.active || this.paused || !this._readerReady || this._timer !== null) return
     const now = this.router._now()
-    if (!this._nextAt || now - this._nextAt > 200) this._nextAt = now
-    this._timer = this.router._schedule(() => this._tick(), Math.max(0, this._nextAt - now))
+    if (!this._nextAt) this._nextAt = now
+    const wireDeadline = this.router._wireDeadline(this)
+    // Round up: Node truncates fractional timer delays, which can otherwise
+    // create repeated early callbacks. Never compensate a stall with a burst.
+    const deadline = Math.max(this._nextAt, wireDeadline)
+    this._timer = this.router._schedule(() => this._tick(), Math.max(0, Math.ceil(deadline - now)))
   }
   _tick() {
     this._timer = null
@@ -438,6 +451,22 @@ class PreparedPcmSession {
           return
         }
       }
+      const wireDeadline = this.router._wireDeadline(this)
+      if (this.router._now() < wireDeadline) {
+        this._nextAt = Math.max(this._nextAt, wireDeadline)
+        this._schedule()
+        return
+      }
+      const flow = this.router.robot.getAudioSendState?.({
+        generation: this.connectionGeneration, drain: this._offset === this.entry.byteLength,
+      })
+      if (flow && !flow.writable) {
+        // Keep the unread PCM and sequence in place. The transport owns one
+        // bounded watchdog across pauses, sentence switches and user retries.
+        this._nextAt = this.router._now() + flow.retryAfterMs
+        this._schedule()
+        return
+      }
       if (!this._activated) {
         if (!this._startNotified) {
           if (this.opts.onAudioStart?.() === false) { this.stop(); return }
@@ -459,11 +488,7 @@ class PreparedPcmSession {
       }
       const now = this.router._now()
       const latenessMs = Math.max(0, now - this._nextAt)
-      // Rebase BEFORE adding this frame's duration. Rebasing only in the next
-      // scheduling call would immediately send a second frame after a stall.
-      // Start hooks can themselves take time. Anchor the new/resumed speaker's
-      // first deadline to its actual send, not to the time before those hooks.
-      if (this._needsWireBoundary || boundary || latenessMs > 200) this._nextAt = now
+      const resetPhase = this._needsWireBoundary || Boolean(boundary)
       const seq = this.sequenceState.nextSeq
       const fields = this._metadata({ seq, bytes: size, gapMs: this._lastAt === null ? null : now - this._lastAt,
         latenessMs, generation: this.generation })
@@ -477,12 +502,10 @@ class PreparedPcmSession {
       this._lastAt = now
       this.router.diagnostics?.packet?.({ ...sentFields, stage: 'scheduled_send' })
       const durationMs = size / BYTES_PER_MS
-      // Packet cadence may catch up after a short timer stall, but a sentence
-      // cannot finish before the PCM just sent has had its computed duration.
-      // Also account for several catch-up packets sent in the same turn. This
-      // is a sender estimate, not a robot playback acknowledgment or latency.
+      // At most 2 ms phase correction, no multi-frame catch-up after stalls.
+      // Completion still includes the duration of all packets just sent.
       this._estimatedEnd = Math.max(this._estimatedEnd ?? now, now) + durationMs
-      this._nextAt += durationMs
+      this._nextAt = nextAudioFrameDeadline(this._nextAt, now, durationMs, resetPhase)
       if (this._offset === this.entry.byteLength) this._nextAt = this._estimatedEnd
       this._schedule()
     } catch (err) { this.fail(err) }

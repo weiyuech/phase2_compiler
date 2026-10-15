@@ -555,6 +555,10 @@ function handleMessage(raw) {
         addLog('error', data.message)
         break
 
+      case 'AUDIO_FLOW_STATUS':
+        addLog(data.state === 'reset' ? 'error' : 'system', data.message)
+        break
+
       case 'BARRAGE_LOG':
         addLog('barrage', data.text)
         break

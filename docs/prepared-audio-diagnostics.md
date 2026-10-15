@@ -5,8 +5,10 @@
 Both output modes share **host → barrage → point narration → transit** priority.
 Preparation does not own playback. TTS is split at sentence endings, retaining
 punctuation/closing quotes and protecting common abbreviations and decimals.
-Commas are not boundaries; an unpunctuated passage stays one unit. MP3 has no
-invented sentence boundaries.
+Ordinary commas are not boundaries. Exceptionally long units are capped at 500
+Unicode code points, preferring a nearby comma/newline/space and preserving all
+spoken text; ordinary numbers and surrogate pairs are protected where possible.
+MP3 has no invented sentence boundaries.
 
 | Incoming event | Current TTS | Current MP3 |
 | --- | --- | --- |
@@ -59,16 +61,18 @@ can introduce sentence gaps: this is not a sample-gapless guarantee.
   with ffmpeg (not concatenated MP3 bytes), using voice-aware identity. Temporary
   harvesting is limited to two 16 MiB jobs; oversized harvests are skipped without
   failing playback. Existing user library files are not automatically deleted.
-- Send 640-byte PCM frames every 20 ms using one monotonic-clock timer, preserving
-  deadline catch-up/rebase behavior. The last packet can be shorter. Completion
-  includes the calculated remaining PCM duration after late/catch-up sends.
+- Send 640-byte PCM frames on a 20 ms target cadence using one monotonic-clock
+  timer. Normal timing jitter may be corrected by at most 2 ms per frame; a
+  missed-frame stall restarts the clock phase instead of triggering a burst.
+  The last packet can be shorter. Completion includes remaining PCM duration
+  and waits for local socket writes to drain; it is not a playback acknowledgment.
 - New/resumed robot speakers share a connection-scoped packet boundary: wait for
   the last sent packet's remaining PCM duration (at most 20 ms), then anchor the
   incoming schedule to its actual first send. Start hooks cannot compress packets
   one and two; host/stop cancellation still clears pending sends immediately.
   Boundary waits/gaps are recorded separately from within-clip packet statistics.
   This is minimum send spacing, not confirmation that the robot buffer is empty
-  or that audible stuttering is resolved. Existing within-clip catch-up remains.
+  or that audible stuttering is resolved.
 - Do not upload an entire clip in advance. Keep the existing robot socket and JSON
   protocol, continuous sequence within an utterance, pause/resume position and
   source-session conventions. No Python runtime, second audio socket or invented
@@ -77,9 +81,28 @@ can introduce sentence gaps: this is not a sample-gapless guarantee.
   `0–150%` changes use signed 16-bit saturation and a short live ramp without
   cancelling playback, resetting sequence numbers or changing prepared caches.
 - WebSocket write callbacks and backlog are measured; optional frame compression
-  is disabled. The existing 256 KiB backlog cutoff remains a failure limit, not a
-  latency target. Network stalls, disk read-ahead waits and event-loop stalls can
-  still interrupt delivery. The socket remains on the existing event loop.
+  is disabled. At 64 KiB of pending writes, stop taking further PCM from the
+  reader; resume at or below 16 KiB. Sequence and reader position stay unchanged
+  during the wait. The hard cap is 1 MiB (formerly 256 KiB), an emergency bound,
+  not the normal queue target. A connection-scoped watchdog survives stop/retry;
+  failure to drain below the recovery threshold within 15 seconds discards the
+  old socket. Final sentence drain waits for zero local buffered bytes.
+- A failed socket is immediately unavailable for new navigation/audio commands.
+  Reset terminates it rather than flushing old queued PCM through graceful close.
+  Client mode retries after 5 seconds; server mode waits for the robot to reconnect.
+  Existing disconnect handling stops narration/tours and clears stale goal/map
+  state; operators must restart playback. No automatic physical stop or resume
+  command is invented, and robot-side received audio cannot be erased locally.
+  Normal pause/stop alone does not reset a healthy shared connection.
+- Provider TTS failure/cancellation closes its request socket and ignores late
+  audio. Completed requests close gracefully with a bounded cleanup fallback.
+  Network stalls, disk read-ahead waits and event-loop stalls can still interrupt
+  delivery. The socket remains on the existing event loop.
+
+These thresholds are initial engineering defaults, not hardware-tuned values.
+For the October 2026 change, verification is limited to syntax, build, pure text/
+timing calculations and source review. Simulated receiver/robot tests were not
+run at the user's request; no hardware or provider-network validation was done.
 
 OCR image processing runs in one persistent worker with bounded ONNX/Sharp native
 parallelism. It executes one frame at a time and retains at most one newer waiting

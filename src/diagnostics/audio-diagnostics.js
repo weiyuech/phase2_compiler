@@ -18,12 +18,13 @@ const EVENT_ALIASES = {
 }
 const ENUMS = {
   destination: new Set(['local', 'robot']),
+  direction: new Set(['client', 'server']),
   source: new Set(['tts', 'mp3', 'file', 'transit', 'point', 'barrage', 'manual', 'unknown']),
   reason: new Set(['host', 'barrage', 'tour-pause', 'stop', 'skip', 'replacement', 'disconnect', 'destination-change', 'boundary', 'finished', 'cancelled', 'error',
-    'preparing', 'sentence-wait', 'ready', 'owner', 'operator', 'tour', 'preparation', 'priority', 'read-ahead']),
+    'preparing', 'sentence-wait', 'ready', 'owner', 'operator', 'tour', 'preparation', 'priority', 'read-ahead', 'backpressure']),
   kind: new Set(['tts', 'file', 'mp3']),
   storage: new Set(['memory', 'disk']),
-  errorCode: new Set(['ENOENT', 'EACCES', 'EPERM', 'ENOSPC', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'IO_ERROR', 'AUDIO_BACKLOG', 'AUDIO_OWNERSHIP_CONFLICT', 'OTHER']),
+  errorCode: new Set(['ENOENT', 'EACCES', 'EPERM', 'ENOSPC', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'IO_ERROR', 'AUDIO_BACKLOG', 'AUDIO_SEND_TIMEOUT', 'AUDIO_OWNERSHIP_CONFLICT', 'OTHER']),
 }
 const NUMBERS = new Set([
   'seq', 'bytes', 'frames', 'durationMs', 'prepareMs', 'decodeMs', 'synthesisMs',
@@ -35,7 +36,7 @@ const NUMBERS = new Set([
   'eventLoopP99Ms', 'eventLoopMaxMs', 'cpuPercent', 'rssBytes', 'heapBytes',
   'generation', 'connectionGeneration', 'offsetBytes', 'memoryBytes', 'diskBytes', 'entries', 'activeDecodes', 'payloadBytes',
   'socketWrites', 'failedWrites', 'staleWrites', 'maxPayloadBytes', 'diagnosticDroppedRecords', 'diagnosticDiscardedBytes', 'diagnosticTruncatedRecords', 'diagnosticStoredBytes',
-  'robotVolumePercent', 'clippedSamples',
+  'robotVolumePercent', 'clippedSamples', 'highWaterBytes', 'lowWaterBytes', 'hardLimitBytes',
 ])
 const BOOLEANS = new Set(['connected', 'ducking', 'barrageEnabled', 'ocrEnabled', 'paused', 'prepared', 'compressed', 'playbackAcknowledged', 'staleConnection', 'failed', 'ramped'])
 

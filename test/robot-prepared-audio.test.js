@@ -685,7 +685,7 @@ test('late final short packet keeps its actual PCM tail before completing the se
   prepared.release()
 })
 
-test('short-stall catch-up packets accumulate PCM duration in the sender completion estimate', async t => {
+test('a missed-frame stall restarts pacing without sending a catch-up burst', async t => {
   const clock = fakeClock()
   const h = await harness(t, clock)
   fakeDecode(h.router, 2560)
@@ -695,10 +695,16 @@ test('short-stall catch-up packets accumulate PCM duration in the sender complet
   clock.advance(0)
   clock.stall(85)
   clock.advance(0)
-  assert.equal(h.robot.frames.length, 4)
+  assert.equal(h.robot.frames.length, 2)
   assert.equal(session.isActive(), true)
-  clock.advance(59)
-  assert.equal(session.isActive(), true, 'three catch-up frames require60ms of PCM duration')
+  clock.advance(19)
+  assert.equal(h.robot.frames.length, 2)
+  clock.advance(1)
+  assert.equal(h.robot.frames.length, 3)
+  clock.advance(20)
+  assert.equal(h.robot.frames.length, 4)
+  clock.advance(19)
+  assert.equal(session.isActive(), true, 'the final packet retains its full PCM duration')
   clock.advance(1)
   assert.equal((await session.promise).ok, true)
   prepared.release()
@@ -1000,11 +1006,12 @@ test('audio send disables compression, reports callback timing, and enforces bac
   callback(null)
   assert.ok(metric.writeMs >= 0)
   assert.equal(metric.bufferedAmount, 3)
-  robot._socket.bufferedAmount = 256 * 1024 + 1
+  robot._socket.bufferedAmount = 1024 * 1024 + 1
   assert.throws(() => robot.sendAudioFrame(Buffer.alloc(640), 2), /积压/)
   robot._socket.bufferedAmount = 0
   robot.connectionGeneration++
   assert.throws(() => robot.sendAudioFrame(Buffer.alloc(640), 2, { generation: 0 }), /更换/)
+  robot.stop()
 })
 
 test('robot connection changes do not invalidate local sentence generation', async t => {

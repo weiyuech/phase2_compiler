@@ -12,6 +12,53 @@ export function throwIfAborted(signal) {
 // common abbreviations/initials and decimal points before considering a period.
 const ABBREVIATIONS = /(?:\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e)|(?:\b[A-Za-z]\.)+[A-Za-z])\.$/i
 const CLOSERS = /[”’"'」』）)\]】》]/
+const MAX_SENTENCE_CODEPOINTS = 500
+const NUMBER_CHARACTER = /[0-9０-９]/u
+
+function splitsNumber(characters, index) {
+  const left = characters[index - 1], right = characters[index]
+  return (NUMBER_CHARACTER.test(left || '') && /[0-9０-９.,，．]/u.test(right || ''))
+    || (/[.,，．]/u.test(left || '') && NUMBER_CHARACTER.test(right || ''))
+}
+
+function splitLongSentence(sentence) {
+  if (sentence.length <= MAX_SENTENCE_CODEPOINTS) return [sentence]
+  // Count code points rather than UTF-16 units, so a fallback cut never splits
+  // a surrogate pair. Short sentences retain the existing punctuation rules.
+  const characters = Array.from(sentence)
+  const parts = []
+  let start = 0
+  while (characters.length - start > MAX_SENTENCE_CODEPOINTS) {
+    const limit = start + MAX_SENTENCE_CODEPOINTS
+    const minimum = start + Math.floor(MAX_SENTENCE_CODEPOINTS / 2)
+    let end = limit
+    let separatorFound = false
+    for (let boundary = limit; boundary >= minimum; boundary--) {
+      if (/[，,、\s]/u.test(characters[boundary - 1]) && !splitsNumber(characters, boundary)) {
+        end = boundary
+        separatorFound = true
+        break
+      }
+    }
+    if (!separatorFound) {
+      // Keep an ordinary decimal/thousands-separated number together when a
+      // nearby cut is available. An exceptionally long numeric token is still
+      // bounded by the same limit rather than becoming an unbounded TTS unit.
+      while (end > minimum && splitsNumber(characters, end)) end--
+      if (splitsNumber(characters, end)) end = limit
+    }
+    // Keep punctuation and all spoken content. Trim only the new boundaries,
+    // matching the existing sentence-boundary whitespace normalization and
+    // avoiding whitespace-only synthesis requests after a long whitespace run.
+    const part = characters.slice(start, end).join('').trim()
+    if (part) parts.push(part)
+    start = end
+  }
+  const tail = characters.slice(start).join('').trim()
+  if (tail) parts.push(tail)
+  return parts
+}
+
 export function splitSentences(text) {
   const value = String(text || '').trim()
   if (!value) return []
@@ -35,7 +82,7 @@ export function splitSentences(text) {
   }
   const tail = value.slice(start).trim()
   if (tail) sentences.push(tail)
-  return sentences
+  return sentences.flatMap(splitLongSentence)
 }
 
 export function snapshotVoice(client) {
