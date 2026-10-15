@@ -315,14 +315,18 @@ for (const offset of [0, 7, 19.5]) {
     assert.equal(h.robot.frames.length, 1)
     clock.advance(19.75 - offset)
     assert.equal(h.robot.frames.length, 1)
-    clock.advance(0.25)
+    // Production timers round fractional delays upward, never before the
+    // previous packet's deadline (at most one millisecond of rounding).
+    const firstSendAt = offset + Math.ceil(20 - offset)
+    clock.advance(firstSendAt - 19.75)
     assert.equal(starts, 1)
     assert.equal(h.robot.frames.length, 2)
     clock.advance(19)
     assert.equal(h.robot.frames.length, 2, 'packet two must not catch up immediately after the gate')
     clock.advance(1)
     assert.equal(h.robot.frames.length, 3)
-    assert.equal(h.events.filter(e => e.type === 'handoff' && e.reason === 'boundary')[0].gapMs, 20)
+    const handoffGap = h.events.filter(e => e.type === 'handoff' && e.reason === 'boundary')[0].gapMs
+    assert.ok(handoffGap >= 20 && handoffGap < 21)
     clock.advance(40)
     assert.equal((await upper.promise).ok, true)
     lower.stop()
@@ -341,7 +345,9 @@ test('cross-session gate uses the actual short final packet duration, even for t
   await upper.ready; clock.advance(0.25)
   assert.equal(h.robot.frames.length, 2)
   clock.advance(0.0625)
-  assert.equal(h.robot.frames.length, 3, '10-byte tail needs 0.3125ms, not a padded 20ms')
+  assert.equal(h.robot.frames.length, 2, 'fractional tail completion rounds upward, never early')
+  clock.advance(0.6875)
+  assert.equal(h.robot.frames.length, 3, '10-byte tail rounds to 1ms, not a padded 20ms')
   clock.advance(40)
   assert.equal((await upper.promise).ok, true)
 })
@@ -598,7 +604,7 @@ test('robot gain is exact at 100 percent and handles zero, half and saturated bo
     h.router.setConfig({ robotVolumePercent: percent })
     const session = h.router.playPrepared({}, prepared, { managed: true })
     await session.ready
-    clock.advance(prepared.durationMs)
+    clock.advance(Math.ceil(prepared.durationMs))
     await session.promise
     return Buffer.concat(h.robot.frames.map(frame => frame.buffer))
   }

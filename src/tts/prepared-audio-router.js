@@ -418,7 +418,9 @@ class PreparedPcmSession {
     if (!this.active || this.paused || !this._readerReady || this._timer !== null) return
     const now = this.router._now()
     if (!this._nextAt) this._nextAt = now
-    const wireDeadline = this.router._wireDeadline(this)
+    // An incoming speaker must first claim/pause the old sender. _tick still
+    // enforces the wire boundary before notifying start or consuming PCM.
+    const wireDeadline = this._activated ? this.router._wireDeadline(this) : 0
     // Round up: Node truncates fractional timer delays, which can otherwise
     // create repeated early callbacks. Never compensate a stall with a burst.
     const deadline = Math.max(this._nextAt, wireDeadline)

@@ -100,9 +100,11 @@ can introduce sentence gaps: this is not a sample-gapless guarantee.
   delivery. The socket remains on the existing event loop.
 
 These thresholds are initial engineering defaults, not hardware-tuned values.
-For the October 2026 change, verification is limited to syntax, build, pure text/
-timing calculations and source review. Simulated receiver/robot tests were not
-run at the user's request; no hardware or provider-network validation was done.
+For the October 2026 change, verification includes syntax, build, source review,
+pure text/timing calculations, controlled transport regressions and loopback
+provider cleanup tests. Release also runs the Windows packaged-runtime and
+installer gates. These software checks do not establish real robot performance;
+no hardware or production-provider network validation was done.
 
 OCR image processing runs in one persistent worker with bounded ONNX/Sharp native
 parallelism. It executes one frame at a time and retains at most one newer waiting
