@@ -130,9 +130,15 @@ export class PreparedAudioCache {
 
   async reserveDisk(bytes) {
     return this._locked(async () => {
-      for (const entry of this._unused('disk')) {
-        if (this.diskBytes + bytes <= this.maxDiskBytes) break
-        await this._evict(entry)
+      // Decoder output reserves each chunk. Avoid allocating/sorting the LRU
+      // inventory on that hot path when the existing capacity already suffices.
+      // An impossible request must not discard warm entries before it fails.
+      if (bytes > this.maxDiskBytes) throw Object.assign(new Error('机器人音频磁盘缓存已达上限'), { code: 'AUDIO_CACHE_LIMIT' })
+      if (this.diskBytes + bytes > this.maxDiskBytes) {
+        for (const entry of this._unused('disk')) {
+          if (this.diskBytes + bytes <= this.maxDiskBytes) break
+          await this._evict(entry)
+        }
       }
       if (this.diskBytes + bytes > this.maxDiskBytes) throw Object.assign(new Error('机器人音频磁盘缓存已达上限'), { code: 'AUDIO_CACHE_LIMIT' })
       this.diskBytes += bytes
@@ -141,9 +147,15 @@ export class PreparedAudioCache {
 
   async reserveMemory(bytes, optional = false) {
     return this._locked(async () => {
-      for (const entry of this._unused('memory')) {
-        if (this.memoryBytes + bytes <= this.maxMemoryBytes) break
-        await this._evict(entry)
+      if (bytes > this.maxMemoryBytes) {
+        if (optional) return false
+        throw Object.assign(new Error('机器人音频内存缓存已达上限'), { code: 'AUDIO_CACHE_LIMIT' })
+      }
+      if (this.memoryBytes + bytes > this.maxMemoryBytes) {
+        for (const entry of this._unused('memory')) {
+          if (this.memoryBytes + bytes <= this.maxMemoryBytes) break
+          await this._evict(entry)
+        }
       }
       if (this.memoryBytes + bytes > this.maxMemoryBytes) {
         if (optional) return false

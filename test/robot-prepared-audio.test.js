@@ -40,12 +40,19 @@ async function harness(t, options = {}) {
   t.after(async () => { await router.destroy(); await rm(directory, { recursive: true, force: true }) })
   return { directory, router, robot, events, packets }
 }
-function fakeClock() {
+function fakeClock({ quantumMs = 0, rounding = 'relative' } = {}) {
   let now = 0, id = 0
   const tasks = new Map()
   return {
     now: () => now,
-    schedule: (fn, delay) => { const taskId = ++id; tasks.set(taskId, { fn, at: now + delay }); return taskId },
+    schedule: (fn, delay) => {
+      const taskId = ++id
+      const at = !quantumMs ? now + delay : rounding === 'global'
+        ? Math.ceil((now + delay) / quantumMs) * quantumMs
+        : now + Math.ceil(delay / quantumMs) * quantumMs
+      tasks.set(taskId, { fn, at })
+      return taskId
+    },
     unschedule: taskId => tasks.delete(taskId),
     pending: () => tasks.size,
     advance(ms) {
@@ -94,6 +101,26 @@ function coordinatedEngine(t, router, coordinator, role) {
   t.after(() => engine.destroy())
   return engine
 }
+
+test('stopping or replacing output during large input hashing cancels before decode and leaves preparation reusable', async t => {
+  const h = await harness(t)
+  const decodeCalls = fakeDecode(h.router)
+  const input = Buffer.alloc(4 * 1024 * 1024, 0x33)
+  for (const stop of [
+    () => h.router.stopAll(),
+    () => h.router.setConfig({ destination: 'local' }),
+  ]) {
+    const preparing = h.router.prepareBuffer(input)
+    stop()
+    await assert.rejects(preparing, { code: 'AUDIO_CANCELLED' })
+    assert.equal(decodeCalls(), 0)
+    assert.equal(h.router._preparations.size, 0)
+    h.router.setConfig({ destination: 'robot' })
+  }
+  const prepared = await h.router.prepareBuffer(Buffer.from('replacement'))
+  assert.equal(decodeCalls(), 1)
+  prepared.release()
+})
 
 test('same prepared audio is byte-identical through cruise TTS and real barrage-manager TTS', async t => {
   const clock = fakeClock()
@@ -610,7 +637,26 @@ test('robot gain is exact at 100 percent and handles zero, half and saturated bo
   }
 
   assert.deepEqual(await playAt(100), original)
+  let measured = h.events.filter(event => event.type === 'robot_audio_sent').at(-1)
+  assert.equal(measured.pcmPeak, 30000)
+  assert.equal(measured.pcmSamples, 5)
+  assert.equal(measured.pcmNonzeroSamples, 5)
+  const frameSignal = h.packets.filter(packet => packet.stage === 'scheduled_send').at(-1)
+  assert.equal(frameSignal.pcmSamples, 5)
+  assert.equal(frameSignal.pcmNonzeroSamples, 5)
+  assert.equal(frameSignal.pcmPeak, 30000)
+  assert.equal(frameSignal.pcmSumSquares, 2 * 10000 ** 2 + 2 * 30000 ** 2 + 12345 ** 2)
+  assert.ok(h.packets.filter(packet => packet.stage === 'socket_write').every(packet => packet.pcmSamples === undefined))
+  assert.equal(measured.audioDurationMs, original.length / 32)
+  assert.ok(Math.abs(measured.pcmRms - Math.sqrt((2 * 10000 ** 2 + 2 * 30000 ** 2 + 12345 ** 2) / 5)) < 0.001)
   assert.deepEqual(await playAt(0), pcm16(0, 0, 0, 0, 0))
+  measured = h.events.filter(event => event.type === 'robot_audio_sent').at(-1)
+  assert.equal(measured.pcmSamples, 5)
+  assert.equal(measured.pcmNonzeroSamples, 0)
+  assert.equal(measured.pcmPeak, 0)
+  assert.equal(measured.pcmRms, 0)
+  assert.equal(measured.robotVolumePercent, 0)
+  assert.equal(h.packets.filter(packet => packet.stage === 'scheduled_send').at(-1).pcmNonzeroSamples, 0)
   assert.deepEqual(await playAt(50), pcm16(5000, -5000, 15000, -15000, 6173))
   assert.deepEqual(await playAt(150), pcm16(15000, -15000, 32767, -32768, 18518))
   assert.deepEqual(original, pcm16(10000, -10000, 30000, -30000, 12345))
@@ -649,6 +695,117 @@ test('active robot volume update ramps for 100ms without cancelling or resetting
   assert.deepEqual(h.robot.frames.map(frame => frame.seq), Array.from({ length: 10 }, (_, index) => index + 1))
   assert.ok(h.events.some(event => event.type === 'robot_volume_change' && event.robotVolumePercent === 0 && event.ramped))
   prepared.release()
+})
+
+for (const rounding of ['relative', 'global']) {
+  test(`router retains nominal cadence with ${rounding} coarse timer rounding and a short PCM tail`, async t => {
+    // Unit-clock integration through the production router, not a claim about
+    // Windows timer resolution or the receiving robot's playback behavior.
+    const quantumMs = 15.625
+    const clock = fakeClock({ quantumMs, rounding })
+    const h = await harness(t, clock)
+    const original = Buffer.alloc(640 * 500 + 128)
+    for (let index = 0; index < original.length; index++) original[index] = index % 251
+    h.router._decode = async (_source, write) => write(original)
+    const prepared = await h.router.prepareBuffer(Buffer.from(`coarse-${rounding}`))
+    t.after(() => prepared.release())
+    const sentAt = []
+    const send = h.robot.sendAudioFrame.bind(h.robot)
+    h.robot.sendAudioFrame = (...args) => { sentAt.push(clock.now()); return send(...args) }
+    const session = h.router.playPrepared({}, prepared, { managed: true })
+    await session.ready
+    const audioDurationMs = original.length / 32
+    clock.advance(audioDurationMs + 3 * quantumMs)
+    assert.equal(session.isActive(), false, 'timer rounding must not accumulate into persistent sender slowdown')
+    assert.equal((await session.promise).ok, true)
+    assert.deepEqual(h.robot.frames.map(frame => frame.seq), Array.from({ length: 501 }, (_, index) => index + 1))
+    assert.deepEqual(Buffer.concat(h.robot.frames.map(frame => frame.buffer)), original)
+    assert.equal(h.robot.frames.at(-1).buffer.length, 128, 'the final PCM frame must not be padded or dropped')
+    const gaps = sentAt.slice(1).map((at, index) => at - sentAt[index])
+    assert.ok(gaps.every(gap => gap >= 10 && gap <= 2 * quantumMs), 'correction must remain bounded without packet bursts')
+    assert.ok(gaps.some(gap => gap < 20), 'ordinary late wakes must permit bounded correction')
+    assert.ok(gaps.some(gap => gap > 20), 'the clock must actually exercise coarse late wakes')
+    const completed = h.events.find(event => event.type === 'robot_audio_sent')
+    assert.ok(completed.elapsedMs >= audioDurationMs)
+    assert.ok(completed.elapsedMs <= audioDurationMs + 2 * quantumMs)
+    assert.ok(completed.elapsedMs - sentAt.at(-1) >= 128 / 32, 'completion must retain the entire final PCM tail')
+    assert.equal(clock.pending(), 0)
+  })
+}
+
+test('coarse router clock resets pacing after pause, backpressure and stalls without losing PCM', async t => {
+  const clock = fakeClock({ quantumMs: 15.625 })
+  const h = await harness(t, clock)
+  const original = Buffer.alloc(640 * 24 + 128)
+  for (let index = 0; index < original.length; index++) original[index] = index % 251
+  h.router._decode = async (_source, write) => write(original)
+  const prepared = await h.router.prepareBuffer(Buffer.from('coarse-recovery'))
+  t.after(() => prepared.release())
+  const sentAt = []
+  const send = h.robot.sendAudioFrame.bind(h.robot)
+  h.robot.sendAudioFrame = (...args) => { sentAt.push(clock.now()); return send(...args) }
+  let blocked = false
+  h.robot.getAudioSendState = () => ({ writable: !blocked, retryAfterMs: 20 })
+  const session = h.router.playPrepared({}, prepared, { managed: true })
+  await session.ready
+  clock.advance(70)
+  const beforePause = sentAt.length
+  session.pause('host')
+  assert.equal(clock.pending(), 0)
+  clock.advance(45)
+  assert.equal(sentAt.length, beforePause)
+  session.resume('host')
+  clock.advance(0)
+  assert.equal(sentAt.length, beforePause + 1)
+  clock.advance(19)
+  assert.equal(sentAt.length, beforePause + 1, 'resume must start a fresh full-frame interval')
+  clock.advance(12.25)
+  assert.equal(sentAt.length, beforePause + 2)
+
+  blocked = true
+  const beforeBlock = sentAt.length
+  clock.advance(100)
+  assert.equal(sentAt.length, beforeBlock, 'backpressure cannot consume PCM or sequence numbers')
+  assert.equal(clock.pending(), 1)
+  blocked = false
+  for (let step = 0; sentAt.length === beforeBlock && step < 40; step++) clock.advance(1)
+  assert.equal(sentAt.length, beforeBlock + 1)
+  clock.advance(sentAt.at(-1) + 19 - clock.now())
+  assert.equal(sentAt.length, beforeBlock + 1, 'recovery cannot repay blocked time with a compressed interval')
+  clock.advance(13)
+  assert.equal(sentAt.length, beforeBlock + 2)
+  assert.ok(sentAt.at(-1) - sentAt.at(-2) >= 20)
+
+  const beforeStall = sentAt.length
+  clock.stall(200)
+  clock.advance(0)
+  assert.equal(sentAt.length, beforeStall + 1, 'an overdue callback may send only one packet')
+  assert.equal(clock.pending(), 1)
+  clock.advance(19)
+  assert.equal(sentAt.length, beforeStall + 1)
+  clock.advance(13)
+  assert.equal(sentAt.length, beforeStall + 2)
+  assert.ok(sentAt.at(-1) - sentAt.at(-2) >= 20)
+  clock.advance(1000)
+  assert.equal(session.isActive(), false)
+  assert.equal((await session.promise).ok, true)
+  assert.deepEqual(h.robot.frames.map(frame => frame.seq), Array.from({ length: 25 }, (_, index) => index + 1))
+  assert.deepEqual(Buffer.concat(h.robot.frames.map(frame => frame.buffer)), original)
+  const completed = h.events.find(event => event.type === 'robot_audio_sent')
+  assert.ok(completed.elapsedMs - sentAt.at(-1) >= 128 / 32)
+  assert.equal(clock.pending(), 0)
+
+  blocked = true
+  const cancelled = h.router.playPrepared({}, prepared, { managed: true })
+  await cancelled.ready
+  clock.advance(0)
+  assert.equal(clock.pending(), 1)
+  cancelled.stop()
+  assert.equal((await cancelled.promise).aborted, true)
+  assert.equal(clock.pending(), 0, 'cancellation must remove a pending recovery poll')
+  blocked = false
+  clock.advance(1000)
+  assert.equal(sentAt.length, 25, 'cancelled recovery must never send stale PCM')
 })
 
 test('a stall over 200ms rebases before sending and never bursts a second packet', async t => {

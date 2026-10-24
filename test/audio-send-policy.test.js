@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { AUDIO_SEND_POLICY, nextAudioFrameDeadline } from '../src/robot/audio-send-policy.js'
+import { AUDIO_SEND_POLICY, nextAudioFrameDeadline, audioFrameWireDeadline, scheduleAudioFrame } from '../src/robot/audio-send-policy.js'
 import { splitSentences } from '../src/tts/sentence-preparation.js'
 
 // Pure calculations/text only: no robot, socket, provider or fake transport.
@@ -12,16 +12,53 @@ test('audio thresholds leave room for recovery before the emergency bound', () =
   assert.ok(p.pollMs < p.stallTimeoutMs)
 })
 
-test('ordinary jitter keeps clock phase but never requires a catch-up burst', () => {
+test('ordinary jitter preserves nominal phase independently of bounded wire spacing', () => {
   const due = 1000
   for (const lateness of [0, 0.2, 0.8, 1, 2, 5, 10, 19.9]) {
     const sentAt = due + lateness
     const next = nextAudioFrameDeadline(due, sentAt, 20)
-    assert.ok(next - sentAt >= 18)
-    assert.ok(next - sentAt <= 20)
-    assert.ok(next >= due + 20)
+    assert.equal(next, due + 20)
+    const wire = audioFrameWireDeadline(sentAt, 20)
+    assert.ok(Math.abs(wire - sentAt - 10) < 1e-9)
+    assert.ok(Math.max(next, wire) - sentAt >= 10 - 1e-9)
   }
   assert.equal(nextAudioFrameDeadline(due, due + 0.8, 20), due + 20)
+})
+
+test('coarse timer rounding does not accumulate permanent sender slowdown', () => {
+  // Deadline arithmetic only: these are clock rounding models, not a robot.
+  // The regression used to turn a 15.625 ms tick into a 31.25 ms send cadence.
+  for (const quantum of [1, 4, 10, 15.625, 16]) {
+    for (const rounding of ['relative', 'global']) {
+      let sentAt = 0, nominal = 20
+      const count = 5000
+      for (let i = 0; i < count; i++) {
+        const previous = sentAt
+        const wire = audioFrameWireDeadline(previous, 20)
+        const delay = scheduleAudioFrame(() => {}, {
+          deadline: nominal, wireDeadline: wire, now: previous,
+          schedule: (_callback, wait) => wait,
+        })
+        sentAt = rounding === 'relative'
+          ? previous + Math.ceil(delay / quantum) * quantum
+          : Math.ceil((previous + delay) / quantum) * quantum
+        assert.ok(sentAt - previous >= 10, `${quantum} ${rounding}: compressed spacing`)
+        nominal = nextAudioFrameDeadline(nominal, sentAt, 20)
+      }
+      assert.ok(sentAt >= count * 20, 'must not run faster than the nominal audio clock')
+      assert.ok(sentAt - count * 20 <= quantum * 2, `${quantum} ${rounding}: accumulated drift ${sentAt - count * 20}ms`)
+    }
+  }
+})
+
+test('handoff and final-tail guards preserve every sample duration', () => {
+  for (const duration of [1, 4, 10, 20]) {
+    assert.equal(audioFrameWireDeadline(1000, duration, true), 1000 + duration)
+  }
+  assert.equal(scheduleAudioFrame(() => {}, {
+    deadline: 1000, wireDeadline: 1010.25, now: 1000,
+    schedule: (_callback, wait) => wait,
+  }), 11)
 })
 
 test('missed frames and handoffs retain a fresh full frame interval', () => {

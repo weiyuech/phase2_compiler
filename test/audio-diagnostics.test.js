@@ -118,6 +118,263 @@ test('socket completion measurements never double-count scheduled packets', asyn
   assert.equal(summary.clippedSamples, 10)
 })
 
+test('packet fast path preserves numeric filtering, aliases and producer ownership', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  const input = Object.freeze({ utteranceId: '/private/secret.mp3', seq: 1, bytes: 640,
+    sentAtMs: 0, bufferedBytes: null, bufferedAmount: 9.87654, sendCallbackMs: null,
+    writeMs: 2.34567, pcmBufferedBytes: Infinity, clippedSamples: -1, payloadBytes: '999',
+    text: 'PRIVATE_TEXT', pcm: Buffer.from('PRIVATE_PCM') })
+  diagnostics.packet(input)
+  diagnostics.packet({ ...input, seq: 2, sentAtMs: 20, bufferedBytes: 0, bufferedAmount: 900,
+    sendCallbackMs: -1, writeMs: 99, clippedSamples: NaN })
+  diagnostics.packet({ stage: 'socket_write', failed: 'true', staleConnection: 1,
+    bytes: 1000, payloadBytes: 1e16, bufferedAmount: -1, writeMs: NaN })
+  await diagnostics.flush()
+  const summary = diagnostics.snapshot().lastSummary
+  assert.equal(summary.frames, 2)
+  assert.equal(summary.bytes, 1280)
+  assert.equal(summary.cadenceSamples, 1)
+  assert.equal(summary.maxGapMs, 20)
+  assert.equal(summary.maxBufferedBytes, 9.877)
+  assert.equal(summary.maxSendCallbackMs, 2.346)
+  assert.equal(summary.maxPcmBufferedBytes, 0)
+  assert.equal(summary.maxPayloadBytes, 0)
+  assert.equal(summary.clippedSamples, 0)
+  assert.equal(summary.failedWrites, 0)
+  assert.equal(summary.staleWrites, 0)
+  assert.equal(input.bufferedBytes, null)
+  const saved = await readRollingLog({ directory, name: 'audio-diagnostics.log' })
+  assert.equal(saved.includes('PRIVATE_'), false)
+  assert.equal(saved.includes('/private/'), false)
+})
+
+test('packet fast path excludes inherited and non-enumerable ordinary fields', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  const input = Object.create({ bytes: 640, failed: true, stage: 'socket_write' })
+  Object.defineProperty(input, 'seq', { value: 1000 })
+  Object.defineProperty(input, 'pcmBufferedBytes', { value: 9999 })
+  input.bufferedAmount = 25
+  diagnostics.packet(input)
+  const totals = diagnostics.snapshot().totals
+  assert.equal(totals.frames, 1)
+  assert.equal(totals.bytes, 0)
+  assert.equal(totals.socketWrites, 0)
+  assert.equal(totals.maxPcmBufferedBytes, 0)
+  assert.equal(totals.maxBufferedBytes, 25)
+})
+
+test('live PCM summary measures post-gain frames before completion with weighted RMS and no callback duplication', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  const first = { sessionId: 'private-audio.mp3', stage: 'scheduled_send', seq: 1, bytes: 640,
+    sentAtMs: 0, pcmPeak: 100, pcmSumSquares: 320 * 100 ** 2, pcmSamples: 320,
+    pcmNonzeroSamples: 320, robotVolumePercent: 125 }
+  const second = { ...first, seq: 2, bytes: 320, sentAtMs: 20, pcmPeak: 300,
+    pcmSumSquares: 160 * 300 ** 2, pcmSamples: 160, pcmNonzeroSamples: 160 }
+  diagnostics.packet(first)
+  diagnostics.packet({ ...first, stage: 'socket_write' })
+  diagnostics.packet(second)
+  diagnostics.packet({ ...second, stage: 'socket_write' })
+  await diagnostics.flush()
+  const summary = diagnostics.snapshot().lastSummary
+  assert.equal(summary.frames, 2)
+  assert.equal(summary.socketWrites, 2)
+  assert.equal(summary.pcmSamples, 480)
+  assert.equal(summary.pcmNonzeroSamples, 480)
+  assert.equal(summary.pcmPeak, 300)
+  assert.equal(summary.pcmRms, Math.sqrt((320 * 100 ** 2 + 160 * 300 ** 2) / 480))
+  assert.equal(summary.robotVolumePercent, 125)
+  assert.equal(summary.pcmSumSquares, undefined)
+  assert.equal(diagnostics.snapshot().events.some(event => event.type === 'playback-end'), false)
+  const saved = (await readAudioHistory({ directory })).find(event => event.type === 'packet-summary')
+  assert.equal(saved.pcmSamples, 480)
+  assert.equal(saved.pcmPeak, 300)
+  assert.equal(saved.pcmRms, Math.round(summary.pcmRms * 1000) / 1000)
+  assert.equal(JSON.stringify(saved).includes('private-audio.mp3'), false)
+  await diagnostics.flush()
+  assert.deepEqual(diagnostics.snapshot().lastSummary, summary)
+})
+
+test('live PCM windows do not carry previous-session levels across pause, boundary or generation changes', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  const packet = (sessionId, level, extra = {}) => diagnostics.packet({
+    sessionId, bytes: 640, pcmSamples: 320, pcmNonzeroSamples: level ? 320 : 0,
+    pcmPeak: level, pcmSumSquares: 320 * level ** 2, generation: 1, connectionGeneration: 1, ...extra,
+  })
+  packet('first', 1000)
+  diagnostics.event('pause', { sessionId: 'first' })
+  diagnostics.event('resume', { sessionId: 'first' })
+  packet('first', 100)
+  await diagnostics.flush()
+  assert.equal(diagnostics.snapshot().lastSummary.pcmPeak, 100)
+  assert.equal(diagnostics.snapshot().lastSummary.pcmSamples, 320)
+  packet('first', 2000)
+  diagnostics.event('boundary', { sessionId: 'first' })
+  packet('first', 200)
+  packet('second', 0)
+  await diagnostics.flush()
+  assert.equal(diagnostics.snapshot().lastSummary.pcmRms, 0)
+  assert.equal(diagnostics.snapshot().lastSummary.pcmSamples, 320)
+  packet('second', 3000)
+  packet('second', 300, { generation: 2 })
+  packet('second', 30, { generation: 2, connectionGeneration: 2 })
+  await diagnostics.flush()
+  assert.equal(diagnostics.snapshot().lastSummary.pcmPeak, 30)
+  assert.equal(diagnostics.snapshot().lastSummary.pcmSamples, 320)
+  packet('second', 4000)
+  diagnostics.event('boundary', { sessionId: 'second' })
+  diagnostics.packet({ sessionId: 'second', bytes: 640 })
+  await diagnostics.flush()
+  assert.equal(diagnostics.snapshot().lastSummary.pcmSamples, undefined)
+})
+
+test('invalid or incomplete PCM metadata is omitted rather than reported as silence', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  const valid = { bytes: 640, pcmSamples: 320, pcmNonzeroSamples: 320,
+    pcmPeak: 100, pcmSumSquares: 320 * 100 ** 2 }
+  for (const patch of [
+    { pcmSamples: 100 }, { pcmSamples: -1 }, { pcmNonzeroSamples: 321 },
+    { pcmPeak: 32769 }, { pcmPeak: NaN }, { pcmSumSquares: Infinity },
+    { pcmSumSquares: 10 }, { pcmSumSquares: 1e14 }, { pcmSumSquares: undefined },
+    { pcmNonzeroSamples: 0 }, { pcmPeak: 0, pcmSumSquares: 0 },
+  ]) diagnostics.packet({ ...valid, ...patch })
+  await diagnostics.flush()
+  assert.equal(diagnostics.snapshot().lastSummary.frames, 11)
+  assert.equal(diagnostics.snapshot().lastSummary.pcmSamples, undefined)
+  assert.equal(diagnostics.snapshot().lastSummary.pcmPeak, undefined)
+  assert.equal(diagnostics.snapshot().lastSummary.pcmRms, undefined)
+})
+
+test('recent cadence measures slow continuous sends and recovers independently of cumulative maxima', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  for (let i = 0; i < 21; i++) diagnostics.packet({ sessionId: 'voice', seq: i + 1, bytes: 640, sentAtMs: i * 25 })
+  await diagnostics.flush()
+  const slow = diagnostics.snapshot().lastSummary
+  assert.equal(slow.audioDurationMs, 420)
+  assert.equal(slow.cadenceSamples, 20)
+  assert.equal(slow.cadenceAudioMs, 400)
+  assert.equal(slow.activeSendMs, 500)
+  assert.equal(slow.sendRateRatio, 0.8)
+  assert.equal(slow.sendLagMs, 100)
+  assert.ok(slow.capturedAt <= diagnostics.snapshot().capturedAt)
+
+  for (let i = 1; i <= 20; i++) diagnostics.packet({ sessionId: 'voice', seq: 21 + i, bytes: 640, sentAtMs: 500 + i * 20 })
+  await diagnostics.flush()
+  const normal = diagnostics.snapshot().lastSummary
+  assert.equal(normal.sendRateRatio, 1)
+  assert.equal(normal.sendLagMs, 0)
+  assert.equal(normal.maxGapMs, 20)
+  assert.equal(diagnostics.snapshot().totals.maxGapMs, 25)
+  const saved = (await readAudioHistory({ directory })).filter(event => event.type === 'packet-summary')
+  assert.equal(saved[0].sendRateRatio, 0.8)
+  assert.equal(saved[1].cadenceSamples, 20)
+  assert.equal(saved[1].capturedAt, normal.capturedAt)
+})
+
+test('compensated timing jitter is not a sustained send shortfall and the final partial frame is not counted as an interval', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  let sentAtMs = 0
+  diagnostics.packet({ sessionId: 'voice', seq: 1, bytes: 640, sentAtMs })
+  const gaps = [60, 12, 12, 12, 12, 12]
+  for (let i = 0; i < 24; i++) {
+    sentAtMs += gaps[i % gaps.length]
+    diagnostics.packet({ sessionId: 'voice', seq: i + 2, bytes: 640, sentAtMs })
+  }
+  diagnostics.packet({ sessionId: 'voice', seq: 26, bytes: 320, sentAtMs: sentAtMs + 20 })
+  diagnostics.event('robot_audio_sent', { sessionId: 'voice', audioDurationMs: 510, elapsedMs: 510, playbackAcknowledged: false })
+  await diagnostics.flush()
+  const summary = diagnostics.snapshot().lastSummary
+  assert.equal(summary.maxGapMs, 60)
+  assert.equal(summary.late50Count, 4)
+  assert.equal(summary.audioDurationMs, 510)
+  assert.equal(summary.cadenceSamples, 25)
+  assert.equal(summary.cadenceAudioMs, 500)
+  assert.equal(summary.activeSendMs, 500)
+  assert.equal(summary.sendRateRatio, 1)
+  assert.equal(summary.sendLagMs, 0)
+})
+
+test('cadence uses preceding partial-frame duration and excludes pauses, session and connection boundaries', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  const packet = (sessionId, seq, bytes, sentAtMs, connectionGeneration = 1) =>
+    diagnostics.packet({ sessionId, seq, bytes, sentAtMs, connectionGeneration })
+  packet('first', 1, 640, 0)
+  packet('first', 2, 320, 20)
+  packet('first', 3, 640, 30)
+  diagnostics.event('pause', { sessionId: 'first' })
+  diagnostics.event('resume', { sessionId: 'first' })
+  packet('first', 4, 640, 9030)
+  packet('first', 5, 640, 9050)
+  packet('second', 1, 640, 10000)
+  packet('second', 2, 640, 10020)
+  packet('second', 3, 640, 20000, 2)
+  packet('second', 4, 640, 20020, 2)
+  diagnostics.event('boundary', { sessionId: 'second' })
+  packet('second', 5, 640, 30000, 2)
+  packet('second', 6, 640, 30020, 2)
+  await diagnostics.flush()
+  const summary = diagnostics.snapshot().lastSummary
+  assert.equal(summary.cadenceSamples, 6)
+  assert.equal(summary.cadenceAudioMs, 110)
+  assert.equal(summary.activeSendMs, 110)
+  assert.equal(summary.sendRateRatio, 1)
+  assert.equal(summary.sendLagMs, 0)
+  assert.equal(summary.maxGapMs, 20)
+})
+
+test('idle windows and late socket callbacks preserve the dated last send sample without double-counting audio', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  diagnostics.packet({ sessionId: 'voice', seq: 1, bytes: 640, sentAtMs: 0 })
+  diagnostics.packet({ sessionId: 'voice', seq: 2, bytes: 640, sentAtMs: 20 })
+  await diagnostics.flush()
+  const summary = diagnostics.snapshot().lastSummary
+  await diagnostics.flush()
+  assert.deepEqual(diagnostics.snapshot().lastSummary, summary)
+  diagnostics.packet({ sessionId: 'voice', seq: 2, bytes: 640, stage: 'socket_write', writeMs: 7 })
+  await diagnostics.flush()
+  assert.deepEqual(diagnostics.snapshot().lastSummary, summary)
+  assert.equal(diagnostics.snapshot().totals.audioDurationMs, 40)
+  assert.equal(diagnostics.snapshot().totals.cadenceSamples, 1)
+})
+
+test('finished-session PCM summaries retain numeric evidence without accepting content or claiming playback', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  diagnostics.event('robot_audio_sent', { sessionId: 'private-file.mp3', audioDurationMs: 250,
+    elapsedMs: 275, robotVolumePercent: 150, pcmPeak: 30000, pcmRms: 1234.567,
+    pcmNonzeroSamples: 3500, pcmSamples: 4000, playbackAcknowledged: false,
+    pcm: 'DO_NOT_STORE', text: 'DO_NOT_STORE' })
+  await diagnostics.flush()
+  const finish = (await readAudioHistory({ directory })).find(event => event.type === 'playback-end')
+  assert.equal(finish.audioDurationMs, 250)
+  assert.equal(finish.robotVolumePercent, 150)
+  assert.equal(finish.pcmPeak, 30000)
+  assert.equal(finish.pcmRms, 1234.567)
+  assert.equal(finish.pcmNonzeroSamples, 3500)
+  assert.equal(finish.pcmSamples, 4000)
+  assert.equal(finish.playbackAcknowledged, false)
+  assert.equal(JSON.stringify(finish).includes('DO_NOT_STORE'), false)
+  assert.equal(JSON.stringify(finish).includes('private-file.mp3'), false)
+})
+
 test('opaque utterance correlation survives different sentence sessions and bounded ID eviction', async t => {
   const directory = await temporary(t)
   const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false })
@@ -135,6 +392,23 @@ test('opaque utterance correlation survives different sentence sessions and boun
   const events = await readAudioHistory({ directory })
   assert.ok(events.filter(event => event.type === 'prepared').every(event => event.utteranceId === 's1'))
   assert.equal(JSON.stringify(events).includes('private-sentence-'), false)
+})
+
+test('consecutive ID shortcut preserves LRU eviction and never reuses an evicted opaque ID', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  diagnostics.event('prepared', { sessionId: 'long-session' })
+  for (let i = 0; i < 127; i++) diagnostics.event('prepared', { sessionId: `other-${i}` })
+  for (let i = 0; i < 100; i++) diagnostics.packet({ sessionId: 'long-session', bytes: 640 })
+  diagnostics.event('prepared', { sessionId: 'new-session' })
+  diagnostics.event('prepared', { sessionId: 'long-session' })
+  assert.equal(diagnostics.snapshot().events.at(-1).sessionId, 's1')
+  diagnostics.event('prepared', { sessionId: 'other-0' })
+  assert.equal(diagnostics.snapshot().events.at(-1).sessionId, 's130')
+  diagnostics.event('prepared', { sessionId: 'other-0' })
+  assert.equal(diagnostics.snapshot().events.at(-1).sessionId, 's130')
+  assert.equal(diagnostics._ids.size, 128)
 })
 
 test('two segments stay under the TOTAL category cap and discard oldest history', async t => {

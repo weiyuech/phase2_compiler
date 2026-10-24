@@ -399,6 +399,51 @@ test('reused transit prepared text loops from sentence zero without another synt
   source.release()
 })
 
+for (const mode of ['stop', 'arrival']) {
+  test(`${mode} of reusable transit cancels obsolete prefetch and frees synthesis for foreground speech`, async t => {
+    const coordinator = new SpeechCoordinator()
+    const transit = fixture(t, { coordinator, role: 'transit' })
+    const barrage = fixture(t, { coordinator, role: 'barrage' })
+    const scheduler = transit.engine._sentenceOptions.scheduler
+    barrage.engine._sentenceOptions.scheduler = scheduler
+    const preparing = transit.engine.prepareText('当前句。待合成二。待合成三。')
+    await nextTurn()
+    transit.calls[0].ready()
+    const source = await preparing
+    t.after(() => source.release())
+    let arriving = false
+    const playback = transit.engine.speakPreparedText(source, { shouldFinish: () => arriving })
+    await nextTurn()
+    assert.equal(transit.plays.length, 1)
+    assert.equal(transit.calls.length, 3)
+    assert.equal(scheduler.running, 2)
+
+    const incoming = barrage.engine.speak('新的回答。')
+    await nextTurn()
+    assert.equal(barrage.calls.length, 0, 'both provider slots are occupied by transit prefetch')
+    if (mode === 'stop') transit.engine.stop()
+    else { arriving = true; transit.plays[0].done.resolve({ ok: true }) }
+    const ended = await playback
+    assert.equal(mode === 'stop' ? ended.aborted : ended.ok, true)
+    await nextTurn()
+    assert.ok(transit.calls.slice(1).every(call => call.aborted), 'unused provider calls must be aborted before waiting for their responses')
+    assert.equal(source.signal.aborted, false)
+    assert.equal(source.units.size, 0)
+    assert.equal(barrage.calls.length, 1, 'foreground synthesis must start without obsolete calls finishing or timing out')
+    for (const call of transit.calls.slice(1)) { call.ready(); call.error(new Error('late obsolete response')) }
+    barrage.calls[0].ready()
+    await nextTurn()
+    assert.equal(barrage.plays.length, 1)
+    assert.equal(transit.plays.length, 1)
+    barrage.plays[0].done.resolve({ ok: true })
+    assert.equal((await incoming).ok, true)
+    await nextTurn()
+    assert.equal(scheduler.running, 0)
+    assert.equal(scheduler.queue.length, 0)
+    assert.equal(coordinator.jobs.size, 0)
+  })
+}
+
 for (const robot of [false, true]) {
   test(`transit arrival finishes active sentence and discards prepared remainder (${robot ? 'robot' : 'local'})`, async t => {
     const h = fixture(t, { role: 'transit', robot })

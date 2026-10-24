@@ -11,7 +11,7 @@ const exec = promisify(execFile)
 const defaultRoot = fileURLToPath(new URL('../../', import.meta.url))
 const SHA = /^[0-9a-f]{40}$/
 const TEST_TAG = /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-test\.(?:0|[1-9]\d*)$/
-const NATIVE_CHECKS = ['runtime', 'packaged-layout', 'ffmpeg-pcm', 'ffplay', 'windows-pause-resume', 'sharp', 'onnx-models', 'ocr-pipeline', 'packaged-native-bindings']
+const NATIVE_CHECKS = ['runtime', 'packaged-layout', 'audio-send-cadence', 'ffmpeg-pcm', 'ffplay', 'windows-pause-resume', 'sharp', 'onnx-models', 'ocr-pipeline', 'packaged-native-bindings']
 const fail = message => { throw new Error(message) }
 
 /** Pure guard: neither a branch build nor a local shell can publish a release. */

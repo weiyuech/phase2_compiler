@@ -256,25 +256,32 @@ export class PreparedTextSource {
     }
     const text = this.sentences[index]
     const key = sentenceCacheKey(text, this.client)
-    const unit = { handle: null, scheduled: null, promise: null }
+    const unit = { handle: null, scheduled: null, promise: null, controller: null }
     this.units.set(index, unit)
     const cached = this.cache.acquire(key)
     if (cached) {
       unit.handle = cached
       unit.promise = Promise.resolve({ text, index, key, buffer: cached.buffer })
     } else {
+      // A reusable source can finish a playback early without being destroyed.
+      // Retiring its window must also cancel obsolete synthesis, so those calls
+      // cannot keep the shared provider slots occupied until their timeout.
+      unit.controller = new AbortController()
+      const signal = unit.controller.signal
+      const cancel = () => unit.controller.abort()
+      this.signal.addEventListener('abort', cancel, { once: true })
       const started = performance.now()
       this.diagnostics?.event?.('prepare-start', { source: this.role === 'cruise' ? 'point' : this.role, sessionId: this.sessionId, sentenceIndex: index })
       unit.scheduled = this.scheduler.enqueue(async () => {
-        throwIfAborted(this.signal)
+        throwIfAborted(signal)
         const reusable = this.cache.acquire(key)
         if (reusable) return reusable
-        const buffer = await synthesizeSentence(this.client, text, { signal: this.signal, maxBytes: this.cache.maxBytes })
-        throwIfAborted(this.signal)
+        const buffer = await synthesizeSentence(this.client, text, { signal, maxBytes: this.cache.maxBytes })
+        throwIfAborted(signal)
         return this.cache.insert(key, buffer)
-      }, { signal: this.signal, priority: this.priority(speculative) })
+      }, { signal, priority: this.priority(speculative) })
       unit.promise = unit.scheduled.then(handle => {
-        if (this.signal.aborted || !this.isCurrent() || this.units.get(index) !== unit) {
+        if (signal.aborted || this.signal.aborted || !this.isCurrent() || this.units.get(index) !== unit) {
           handle.release()
           throw abortError()
         }
@@ -282,7 +289,7 @@ export class PreparedTextSource {
         this.diagnostics?.event?.('prepared', { source: this.role === 'cruise' ? 'point' : this.role, sessionId: this.sessionId,
           sentenceIndex: index, synthesisMs: performance.now() - started, bytes: handle.buffer.length })
         return { text, index, key, buffer: handle.buffer }
-      })
+      }).finally(() => this.signal.removeEventListener('abort', cancel))
     }
     unit.promise.catch(() => {}) // Prefetch errors surface when this unit is needed.
     return unit.promise
@@ -297,6 +304,7 @@ export class PreparedTextSource {
   releaseBefore(index) {
     for (const [oldIndex, unit] of this.units) {
       if (oldIndex >= index) continue
+      unit.controller?.abort()
       unit.handle?.release()
       this.units.delete(oldIndex)
     }
@@ -305,7 +313,6 @@ export class PreparedTextSource {
   release() {
     this.controller.abort()
     this._external?.removeEventListener('abort', this._abortExternal)
-    for (const unit of this.units.values()) unit.handle?.release()
-    this.units.clear()
+    this.releaseBefore(this.length)
   }
 }

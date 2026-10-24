@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { setImmediate as nextTurn } from 'node:timers/promises'
+import { getEventListeners } from 'node:events'
 import {
   splitSentences, snapshotVoice, sentenceCacheKey, SynthesisScheduler,
   SentenceBufferCache, PreparedTextSource, synthesizeSentence,
@@ -120,4 +121,46 @@ test('prepared source bounds its window and reuses frozen voice cache across loo
   source.release()
   await assert.rejects(source.get(1), { name: 'AbortError' })
   assert.ok([...cache.entries.values()].every(entry => entry.refs === 0))
+})
+
+test('retiring a reusable source window cancels active and queued synthesis without retaining listeners', async t => {
+  const calls = []
+  const cache = new SentenceBufferCache({ maxBytes: 1024 })
+  const scheduler = new SynthesisScheduler({ concurrency: 1 })
+  const client = { synthesizeStream(text, chunk, finish, error) {
+    const call = { text, aborted: 0, ready() { chunk(Buffer.from(text)); finish() }, error,
+      abort() { this.aborted++ } }
+    calls.push(call)
+    return call
+  } }
+  const source = new PreparedTextSource('一。二。三。', client, { cache, scheduler })
+  t.after(() => source.release())
+  source.prefetch(0)
+  const first = source.get(0), second = source.get(1)
+  const discarded = [assert.rejects(first, { name: 'AbortError' }), assert.rejects(second, { name: 'AbortError' })]
+  await nextTurn()
+  assert.deepEqual(calls.map(call => call.text), ['一。'])
+  assert.equal(scheduler.queue.length, 2)
+  source.releaseBefore(2)
+  await Promise.all(discarded)
+  await nextTurn()
+  assert.equal(calls[0].aborted, 1)
+  assert.deepEqual(calls.map(call => call.text), ['一。', '三。'], 'retired queued sentence must never open a provider call')
+  assert.equal(scheduler.running, 1)
+  assert.equal(scheduler.queue.length, 0)
+  assert.equal(source.signal.aborted, false, 'window retirement must preserve the reusable source')
+  calls[0].ready(); calls[0].error(new Error('late retired response'))
+  calls[1].ready()
+  assert.equal((await source.get(2)).text, '三。')
+  assert.equal(cache.entries.size, 1, 'late cancelled audio must not enter the voice cache')
+  assert.equal(getEventListeners(source.signal, 'abort').length, 0)
+  source.releaseBefore(source.length)
+  assert.ok([...cache.entries.values()].every(entry => entry.refs === 0))
+
+  const retry = source.get(0)
+  await nextTurn()
+  assert.equal(calls.length, 3)
+  calls[2].ready()
+  assert.equal((await retry).text, '一。', 'a cancelled unit may be freshly prepared on the next loop')
+  assert.equal(getEventListeners(source.signal, 'abort').length, 0)
 })

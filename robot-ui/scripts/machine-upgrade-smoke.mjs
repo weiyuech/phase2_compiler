@@ -14,6 +14,7 @@ import { createRequire } from 'node:module'
 import ffmpeg from 'ffmpeg-static'
 import { parse as parseEnv } from 'dotenv'
 import { upgradeSmokeOptions } from './machine-upgrade-options.mjs'
+import { assertReceivedPcmCadence, summarizeReceivedPcmCadence } from './machine-upgrade-cadence.mjs'
 import { verifyMachineDiagnosticExports } from './diagnostics-export-smoke.mjs'
 
 const require = createRequire(import.meta.url)
@@ -315,10 +316,16 @@ function verifyFrames(id, start, complete = false, label = '') {
   assert.ok(actual.equals(expected.subarray(0, actual.length)), `Machine ${id} PCM differs from its decoded MP3`)
   if (complete) assert.equal(actual.length, expected.length, `Machine ${id} PCM is truncated`)
   const maxGapMs = frames.slice(1).reduce((max, frame, index) => Math.max(max, frame.at - frames[index].at), 0)
+  // Only complete uninterrupted captures qualify for the aggregate rate gate.
+  // Machine 2's intentionally restarted/crashed partial clips remain content
+  // checks; its recovered complete clip and machine 1/3 complete clips qualify.
+  const cadence = complete ? summarizeReceivedPcmCadence(frames) : null
+  report.audio.push({ machine: id, label, complete, frames: frames.length, bytes: actual.length,
+    sha256: digest(actual), maxGapMs: Math.round(maxGapMs), ...(cadence ? { cadence } : {}) })
   // This is a broad interruption bound, not a hardware audibility assertion.
   // Keep measured packet gaps in the report for later robot-side comparison.
   assert.ok(maxGapMs < 1000, `Machine ${id} PCM stalled for ${Math.round(maxGapMs)} ms`)
-  report.audio.push({ machine: id, label, complete, frames: frames.length, bytes: actual.length, sha256: digest(actual), maxGapMs: Math.round(maxGapMs) })
+  if (cadence) assertReceivedPcmCadence(cadence)
 }
 async function assertQuiet(current) {
   const before = endpoints.map(endpoint => [endpoint.frames.length, endpoint.goals])
