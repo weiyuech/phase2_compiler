@@ -81,8 +81,10 @@ can introduce sentence gaps: this is not a sample-gapless guarantee.
   between full frames in the same uninterrupted session. Feeding the wire guard
   back into the nominal clock can accumulate late wakeups instead of recovering
   them. Windows timer rounding is one possible source; the customer log does not
-  identify the operating-system cause. A wakeup at least one whole frame late restarts the nominal
-  phase; no loop sends several frames in one callback to repay the delay.
+  identify the operating-system cause. Lateness up to 200 ms retains the nominal
+  phase and is recovered gradually; lateness above 200 ms restarts it. Actual
+  congestion waits, start/handoff and resume always start a fresh phase, so those
+  waits cannot trigger catch-up. No loop sends several frames in one callback.
   Early timer wakeups recheck both deadlines before sending. This is a target
   cadence, not a zero-jitter guarantee. The final packet can be shorter;
   completion preserves its full remaining PCM duration and waits for local
@@ -130,6 +132,36 @@ installer gates, including a real-timer cadence measurement using the production
 scheduling helpers in both unpacked and installed Electron. It does not create a
 robot/socket fixture or contact a provider. These software checks do not establish real robot performance;
 no hardware or production-provider network validation was done.
+
+### Pacing regression comparison
+
+All versions target 640 bytes of PCM per 20 ms, or 50 full frames per second.
+The queue size is a byte bound, not a sending interval. The source comparison is:
+
+| Version | Recovery behavior | Local outgoing queue protection |
+| --- | --- | --- |
+| `v1.1.0-test.5` | Retained delays up to 200 ms, without the later 10 ms minimum spacing guard. | Failed above 256 KiB. |
+| `v1.1.0-test.6` | Reset phase at one full frame of lateness; coupled nominal timing to a maximum 2 ms correction per frame. Coarse wakes could permanently slow delivery. | Pause at 64 KiB, resume at 16 KiB, 1 MiB hard limit and 15 s watchdog. |
+| `v1.1.0-test.7` | Separated nominal timing from wire spacing; allows up to 10 ms correction, but still resets phase at one full frame of lateness. | Same as test.6. |
+| `v1.1.0-test.8` | Retains delays up to 200 ms, with the test.7 10 ms minimum full-frame spacing and explicit lifecycle/congestion resets. | Same as test.6 and test.7. |
+
+For example, a full frame due at 1000 ms but sent at 1030 ms made test.7 set the
+next nominal deadline to 1050 ms. The follow-up retains 1020 ms as the nominal
+deadline, while the wire guard permits the next actual send no earlier than
+1040 ms. Further frames gradually regain the sample clock; the nominal target
+remains 20 ms, not a permanent 10 ms interval. At most 200 ms of retained phase
+delay can be repaid at a time, without bypassing the queue checks or sending
+multiple frames from one callback. Cancellation and asynchronous send failure
+still stop the pending timer. Final completion retains the conservative queued
+PCM tail, even when earlier frames recovered their timing.
+
+The 200 ms bound restores a behavior present before the backlog changes; it is
+not a measured optimum for the robot. The reported onset after 2–3 hours makes
+long-run drift and accumulated resource pressure relevant, but does not prove
+either cause. Session clocks reset between sentences, and a zero local backlog
+does not reveal the receiver's audio reserve. Tests include four hours of pure
+deadline arithmetic with isolated 20–190 ms delays, plus existing router lifecycle
+regressions; these are not a four-hour wall-clock Windows or robot playback test.
 
 OCR image processing runs in one persistent worker with bounded ONNX/Sharp native
 parallelism. It executes one frame at a time and retains at most one newer waiting
@@ -194,6 +226,11 @@ The latest roughly one-second `packet-summary` contains:
 | `activeSendMs` | Sum of those intervals' measured elapsed time. |
 | `sendRateRatio` | `cadenceAudioMs / activeSendMs`; `1.00` matches the audio sample clock. Omitted when no elapsed interval exists. |
 | `sendLagMs` | Positive difference `activeSendMs - cadenceAudioMs` for that summary, not receiver latency. |
+| `pacingCorrections`, `pacingCorrectionMs` | Count and total duration of shortened same-session intervals used to recover nominal timing. |
+| `pacingRebases`, `pacingRebaseMs` | Count and discarded nominal delay when ordinary lateness exceeds 200 ms. Explicit playback/congestion resets are excluded. |
+| `runStartedAt` | Start timestamp of this diagnostic run; totals reset on a new run. |
+| `totalActiveSendMs`, `totalCadenceAudioMs`, `totalCadenceSamples` | Comparable interval totals since run start, repeated in each summary so log rotation does not erase them. |
+| `totalPacingCorrectionMs`, `totalPacingRebases`, `totalPacingRebaseMs` | Run totals for recovered interval time and large-stall phase resets. |
 | `capturedAt` | Summary timestamp, used to distinguish current measurements from retained ones. |
 | `pcmSamples`, `pcmNonzeroSamples`, `pcmPeak`, `pcmRms` | Post-gain signal measurements for observed frames in the latest contiguous session within the summary. RMS is weighted by sample count, including short final frames. |
 | `robotVolumePercent` | Last observed robot output volume setting in that signal window. |
@@ -208,6 +245,15 @@ the summary must be at most three seconds old, contain at least ten comparable
 intervals over at least 200 ms, and show a rate below `0.90`. A stale or disconnected
 display retains its last data with an explicit label. A rate near `1.00` still
 does not establish audible continuity.
+
+To assess accumulated sender drift, subtract `totalCadenceAudioMs` from
+`totalActiveSendMs`, or compare changes between two summaries of the same run.
+Keep the sign: a later short interval can repay an earlier late one. Do not sum
+positive-only `sendLagMs` windows, which would count the lateness but discard its
+recovery. Totals cover comparable active intervals, not pauses, between-session
+waits, end-of-clip drain, receiver queue depth, or total audible silence. The
+additional counters are included starting with test.8; older installers
+cannot supply them retroactively.
 
 On completed robot audio, `robot_audio_sent` now includes `audioDurationMs`,
 `elapsedMs`, `robotVolumePercent`, `pcmSamples`, `pcmNonzeroSamples`, `pcmPeak`

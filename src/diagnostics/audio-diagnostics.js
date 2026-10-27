@@ -38,6 +38,9 @@ const NUMBERS = new Set([
   'socketWrites', 'failedWrites', 'staleWrites', 'maxPayloadBytes', 'diagnosticDroppedRecords', 'diagnosticDiscardedBytes', 'diagnosticTruncatedRecords', 'diagnosticStoredBytes',
   'robotVolumePercent', 'clippedSamples', 'highWaterBytes', 'lowWaterBytes', 'hardLimitBytes',
   'audioDurationMs', 'cadenceAudioMs', 'activeSendMs', 'cadenceSamples', 'sendRateRatio', 'sendLagMs', 'capturedAt',
+  'pacingCorrections', 'pacingCorrectionMs', 'pacingRebases', 'pacingRebaseMs',
+  'runStartedAt', 'totalActiveSendMs', 'totalCadenceAudioMs', 'totalCadenceSamples',
+  'totalPacingCorrectionMs', 'totalPacingRebases', 'totalPacingRebaseMs',
   'pcmPeak', 'pcmRms', 'pcmNonzeroSamples', 'pcmSamples',
 ])
 const BOOLEANS = new Set(['connected', 'ducking', 'barrageEnabled', 'ocrEnabled', 'paused', 'prepared', 'compressed', 'playbackAcknowledged', 'staleConnection', 'failed', 'ramped'])
@@ -47,6 +50,7 @@ const PACKET_NUMBERS = new Set([
   'seq', 'bytes', 'sentAtMs', 'scheduledAtMs', 'gapMs', 'latenessMs',
   'generation', 'connectionGeneration', 'pcmBufferedBytes', 'payloadBytes', 'clippedSamples',
   'robotVolumePercent', 'pcmPeak', 'pcmSumSquares', 'pcmSamples', 'pcmNonzeroSamples',
+  'pacingCorrectionMs', 'pacingRebaseMs',
 ])
 
 function safeNumber(value) {
@@ -109,7 +113,8 @@ function batch() {
   return { frames: 0, bytes: 0, maxGapMs: 0, maxLatenessMs: 0, late30Count: 0, late50Count: 0,
     maxBufferedBytes: 0, maxPcmBufferedBytes: 0, maxSendCallbackMs: 0, sequenceGaps: 0, socketWrites: 0, failedWrites: 0,
     staleWrites: 0, maxPayloadBytes: 0, clippedSamples: 0,
-    audioDurationMs: 0, cadenceAudioMs: 0, activeSendMs: 0, cadenceSamples: 0 }
+    audioDurationMs: 0, cadenceAudioMs: 0, activeSendMs: 0, cadenceSamples: 0,
+    pacingCorrections: 0, pacingCorrectionMs: 0, pacingRebases: 0, pacingRebaseMs: 0 }
 }
 
 export class AudioDiagnostics {
@@ -244,6 +249,12 @@ export class AudioDiagnostics {
       stats.maxSendCallbackMs = Math.max(stats.maxSendCallbackMs, fields.sendCallbackMs || 0)
       stats.sequenceGaps += seqGap
       stats.clippedSamples += fields.clippedSamples || 0
+      // Only the scheduled-send producer reports these decisions. Socket
+      // completion samples above must never count the same transition again.
+      stats.pacingCorrections += fields.pacingCorrectionMs > 0 ? 1 : 0
+      stats.pacingCorrectionMs += fields.pacingCorrectionMs || 0
+      stats.pacingRebases += fields.pacingRebaseMs > 0 ? 1 : 0
+      stats.pacingRebaseMs += fields.pacingRebaseMs || 0
     }
     if (candidate) {
       candidate.sent = sent
@@ -292,6 +303,16 @@ export class AudioDiagnostics {
     if (this._closed) return
     if (this._batch.frames || this._batch.socketWrites) {
       const summary = { ...this._batch, capturedAt: Date.now(),
+        // Retain run totals in every rolling summary: an export hours later
+        // need not contain the startup records. Keep both durations rather
+        // than summing positive-only window lag, which ignores later recovery.
+        runStartedAt: this.startedAt,
+        totalActiveSendMs: this._totals.activeSendMs,
+        totalCadenceAudioMs: this._totals.cadenceAudioMs,
+        totalCadenceSamples: this._totals.cadenceSamples,
+        totalPacingCorrectionMs: this._totals.pacingCorrectionMs,
+        totalPacingRebases: this._totals.pacingRebases,
+        totalPacingRebaseMs: this._totals.pacingRebaseMs,
         p95GapMs: percentile(this._gaps, 0.95), p99GapMs: percentile(this._gaps, 0.99),
         sendLagMs: Math.max(0, this._batch.activeSendMs - this._batch.cadenceAudioMs),
         ...(this._batch.activeSendMs > 0

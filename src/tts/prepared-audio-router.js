@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import ffmpegStatic from 'ffmpeg-static'
 import { PreparedAudioCache, abortedError } from './prepared-audio-cache.js'
 import { hashAudioBuffer } from './audio-buffer-hash.js'
-import { audioFrameWireDeadline, nextAudioFrameDeadline, scheduleAudioFrame } from '../robot/audio-send-policy.js'
+import { AUDIO_SEND_POLICY, audioFrameWireDeadline, nextAudioFrameDeadline, scheduleAudioFrame } from '../robot/audio-send-policy.js'
 
 const RATE = 16000
 const BYTES_PER_MS = RATE * 2 / 1000
@@ -519,9 +519,14 @@ class PreparedPcmSession {
       const now = this.router._now()
       const latenessMs = Math.max(0, now - this._nextAt)
       const resetPhase = this._needsWireBoundary || Boolean(boundary) || this._resetPacing
+      const priorPacket = this.router._lastPacket
+      const continuous = !resetPhase && this._lastAt !== null
+        && priorPacket?.sessionId === this.id && priorPacket.connectionGeneration === this.connectionGeneration
       const seq = this.sequenceState.nextSeq
       const fields = this._metadata({ seq, bytes: size, gapMs: this._lastAt === null ? null : now - this._lastAt,
-        latenessMs, generation: this.generation })
+        latenessMs, generation: this.generation,
+        pacingCorrectionMs: continuous ? Math.max(0, priorPacket.notBefore - now) : 0,
+        pacingRebaseMs: !resetPhase && latenessMs > AUDIO_SEND_POLICY.maxRecoverableLatenessMs ? latenessMs : 0 })
       const sentFields = this.router._sendFrame(this, chunk, seq, fields)
       if (!this.active) return
       if (boundary) this.router.diagnostics?.event?.('handoff', this._metadata({ reason: 'boundary', gapMs: now - boundary.sentAt }))
@@ -534,7 +539,8 @@ class PreparedPcmSession {
       this.router.diagnostics?.packet?.({ ...sentFields, stage: 'scheduled_send' })
       const durationMs = size / BYTES_PER_MS
       // Correct ordinary jitter against the nominal phase; the separate wire
-      // guard bounds physical spacing. Never repay a missed frame with a burst.
+      // guard bounds physical spacing. Recover moderate stalls gradually; a
+      // large stall or transport wait starts a fresh phase without a burst.
       this._estimatedEnd = Math.max(this._estimatedEnd ?? now, now) + durationMs
       this._nextAt = nextAudioFrameDeadline(this._nextAt, now, durationMs, resetPhase)
       if (this._offset === this.entry.byteLength) this._nextAt = this._estimatedEnd

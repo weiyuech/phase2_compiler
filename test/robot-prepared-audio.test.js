@@ -777,7 +777,7 @@ test('coarse router clock resets pacing after pause, backpressure and stalls wit
   assert.ok(sentAt.at(-1) - sentAt.at(-2) >= 20)
 
   const beforeStall = sentAt.length
-  clock.stall(200)
+  clock.stall(500)
   clock.advance(0)
   assert.equal(sentAt.length, beforeStall + 1, 'an overdue callback may send only one packet')
   assert.equal(clock.pending(), 1)
@@ -820,12 +820,16 @@ test('a stall over 200ms rebases before sending and never bursts a second packet
   clock.advance(0)
   assert.equal(h.robot.frames.length, 2)
   assert.equal(clock.pending(), 1)
-  assert.equal(h.packets.find(packet => packet.stage === 'scheduled_send' && packet.seq === 2).latenessMs, 480)
+  const latePacket = h.packets.find(packet => packet.stage === 'scheduled_send' && packet.seq === 2)
+  assert.equal(latePacket.latenessMs, 480)
+  assert.equal(latePacket.pacingRebaseMs, 480)
+  assert.equal(latePacket.pacingCorrectionMs, 0)
   clock.advance(19)
   assert.equal(h.robot.frames.length, 2)
   clock.advance(41)
   assert.equal((await session.promise).ok, true)
   assert.equal(h.robot.frames.length, 4)
+  assert.equal(h.packets.filter(packet => packet.stage === 'scheduled_send' && packet.pacingRebaseMs > 0).length, 1)
   prepared.release()
 })
 
@@ -848,7 +852,7 @@ test('late final short packet keeps its actual PCM tail before completing the se
   prepared.release()
 })
 
-test('a missed-frame stall restarts pacing without sending a catch-up burst', async t => {
+test('moderate stalls recover with bounded spacing and preserve the queued PCM tail', async t => {
   const clock = fakeClock()
   const h = await harness(t, clock)
   fakeDecode(h.router, 2560)
@@ -860,17 +864,108 @@ test('a missed-frame stall restarts pacing without sending a catch-up burst', as
   clock.advance(0)
   assert.equal(h.robot.frames.length, 2)
   assert.equal(session.isActive(), true)
-  clock.advance(19)
+  clock.advance(9)
   assert.equal(h.robot.frames.length, 2)
   clock.advance(1)
   assert.equal(h.robot.frames.length, 3)
-  clock.advance(20)
+  clock.advance(10)
   assert.equal(h.robot.frames.length, 4)
-  clock.advance(19)
-  assert.equal(session.isActive(), true, 'the final packet retains its full PCM duration')
+  assert.equal(clock.pending(), 1)
+  const sent = h.packets.filter(packet => packet.stage === 'scheduled_send')
+  assert.deepEqual(sent.map(packet => packet.pacingRebaseMs), [0, 0, 0, 0])
+  assert.deepEqual(sent.map(packet => packet.pacingCorrectionMs), [0, 0, 10, 10])
+  clock.advance(39)
+  assert.equal(session.isActive(), true, 'completion retains the time needed by all queued PCM')
   clock.advance(1)
   assert.equal((await session.promise).ok, true)
   prepared.release()
+})
+
+test('cancelling a moderate-stall recovery clears its only timer and never sends the remaining PCM', async t => {
+  const clock = fakeClock()
+  const h = await harness(t, clock)
+  fakeDecode(h.router, 640 * 20)
+  const prepared = await h.router.prepareBuffer(Buffer.from('cancel-recovery'))
+  t.after(() => prepared.release())
+  const session = h.router.playPrepared({}, prepared, { managed: true })
+  await session.ready
+  clock.advance(0)
+  clock.stall(100)
+  clock.advance(0)
+  assert.equal(h.robot.frames.length, 2)
+  assert.equal(clock.pending(), 1)
+  session.stop()
+  assert.equal((await session.promise).aborted, true)
+  assert.equal(clock.pending(), 0)
+  clock.advance(1000)
+  assert.equal(h.robot.frames.length, 2)
+})
+
+test('backpressure during catch-up preserves PCM and starts a fresh full interval after recovery', async t => {
+  const clock = fakeClock()
+  const h = await harness(t, clock)
+  const original = Buffer.alloc(640 * 20, 0x31)
+  h.router._decode = async (_source, write) => write(original)
+  const prepared = await h.router.prepareBuffer(Buffer.from('pressure-in-recovery'))
+  t.after(() => prepared.release())
+  let blocked = false
+  h.robot.getAudioSendState = () => ({ writable: !blocked, retryAfterMs: 20 })
+  const session = h.router.playPrepared({}, prepared, { managed: true })
+  await session.ready
+  clock.advance(0)
+  clock.stall(100)
+  clock.advance(0)
+  clock.advance(10)
+  assert.equal(h.robot.frames.length, 3)
+  blocked = true
+  clock.advance(100)
+  assert.equal(h.robot.frames.length, 3)
+  assert.equal(clock.pending(), 1)
+  blocked = false
+  clock.advance(10)
+  assert.equal(h.robot.frames.length, 4)
+  const recovered = h.packets.find(packet => packet.stage === 'scheduled_send' && packet.seq === 4)
+  assert.equal(recovered.pacingRebaseMs, 0, 'an intentional transport wait is not discarded scheduler debt')
+  assert.equal(recovered.pacingCorrectionMs, 0)
+  clock.advance(19)
+  assert.equal(h.robot.frames.length, 4, 'congestion wait must not be repaid at the catch-up rate')
+  clock.advance(1)
+  assert.equal(h.robot.frames.length, 5)
+  clock.advance(1000)
+  assert.equal((await session.promise).ok, true)
+  assert.deepEqual(Buffer.concat(h.robot.frames.map(frame => frame.buffer)), original)
+  assert.deepEqual(h.robot.frames.map(frame => frame.seq), Array.from({ length: 20 }, (_, i) => i + 1))
+  assert.equal(clock.pending(), 0)
+})
+
+test('an asynchronous socket failure during catch-up cancels subsequent frames', async t => {
+  const clock = fakeClock()
+  const h = await harness(t, clock)
+  fakeDecode(h.router, 640 * 20)
+  const prepared = await h.router.prepareBuffer(Buffer.from('failed-recovery'))
+  t.after(() => prepared.release())
+  const send = h.robot.sendAudioFrame.bind(h.robot)
+  let failWrite
+  h.robot.sendAudioFrame = (buffer, seq, opts) => {
+    if (seq === 3) {
+      send(buffer, seq)
+      failWrite = () => opts.onComplete(Object.assign(new Error('socket closed'), { code: 'ECONNRESET' }), {})
+    } else send(buffer, seq, opts)
+  }
+  const session = h.router.playPrepared({}, prepared, { managed: true })
+  const rejected = assert.rejects(session.promise, { code: 'ECONNRESET' })
+  await session.ready
+  clock.advance(0)
+  clock.stall(100)
+  clock.advance(0)
+  clock.advance(10)
+  assert.equal(h.robot.frames.length, 3)
+  assert.equal(clock.pending(), 1)
+  failWrite()
+  await rejected
+  assert.equal(clock.pending(), 0)
+  clock.advance(1000)
+  assert.equal(h.robot.frames.length, 3)
 })
 
 test('pause reasons retain PCM/sequence; managed finish does not restore another source', async t => {

@@ -282,6 +282,159 @@ test('recent cadence measures slow continuous sends and recovers independently o
   assert.equal(saved[1].capturedAt, normal.capturedAt)
 })
 
+test('pacing summaries carry run totals across windows without counting recovered lag or socket callbacks twice', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  await diagnostics.flush()
+  const packet = (seq, sentAtMs, extra = {}) => {
+    const fields = { sessionId: 'voice', seq, bytes: 640, sentAtMs, ...extra }
+    diagnostics.packet({ ...fields, stage: 'scheduled_send' })
+    diagnostics.packet({ ...fields, stage: 'socket_write' })
+  }
+  packet(1, 0, { pacingCorrectionMs: 0, pacingRebaseMs: 0 })
+  packet(2, 40)
+  assert.equal(diagnostics.writer.queuedBytes, 0)
+  await diagnostics.flush()
+  const slow = diagnostics.snapshot().lastSummary
+  assert.equal(slow.sendLagMs, 20)
+  assert.equal(slow.totalActiveSendMs, 40)
+  assert.equal(slow.totalCadenceAudioMs, 20)
+  assert.equal(slow.totalCadenceSamples, 1)
+
+  packet(3, 50, { pacingCorrectionMs: 10 })
+  packet(4, 60, { pacingCorrectionMs: 10 })
+  await diagnostics.flush()
+  const recovered = diagnostics.snapshot().lastSummary
+  assert.equal(recovered.pacingCorrections, 2)
+  assert.equal(recovered.pacingCorrectionMs, 20)
+  assert.equal(recovered.pacingRebases, 0)
+  assert.equal(recovered.totalPacingCorrectionMs, 20)
+  assert.equal(recovered.totalActiveSendMs, 60)
+  assert.equal(recovered.totalCadenceAudioMs, 60)
+  assert.equal(recovered.totalCadenceSamples, 3)
+  // The first window had 20 ms of lag, all repaid by this faster window.
+  assert.equal(recovered.totalActiveSendMs - recovered.totalCadenceAudioMs, 0)
+  assert.equal(recovered.sendLagMs, 0)
+  assert.equal(recovered.runStartedAt, diagnostics.startedAt)
+
+  packet(5, 360, { pacingRebaseMs: 280 })
+  await diagnostics.flush()
+  const rebased = diagnostics.snapshot().lastSummary
+  assert.equal(rebased.pacingCorrections, 0)
+  assert.equal(rebased.pacingCorrectionMs, 0)
+  assert.equal(rebased.pacingRebases, 1)
+  assert.equal(rebased.pacingRebaseMs, 280)
+  assert.equal(rebased.totalPacingCorrectionMs, 20)
+  assert.equal(rebased.totalPacingRebases, 1)
+  assert.equal(rebased.totalPacingRebaseMs, 280)
+  assert.equal(rebased.totalActiveSendMs - rebased.totalCadenceAudioMs, 280)
+  assert.equal(diagnostics.snapshot().totals.pacingCorrections, 2)
+  assert.equal(diagnostics.snapshot().totals.pacingRebases, 1)
+})
+
+test('run cadence excludes session and pause gaps while a new diagnostics run starts fresh counters', async t => {
+  const directory = await temporary(t)
+  const first = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => first.destroy())
+  const packet = (sessionId, seq, sentAtMs, extra = {}) =>
+    first.packet({ sessionId, seq, sentAtMs, bytes: 640, ...extra })
+  packet('first', 1, 0)
+  packet('first', 2, 30)
+  first.event('pause', { sessionId: 'first' })
+  first.event('resume', { sessionId: 'first' })
+  packet('first', 3, 10000)
+  packet('first', 4, 10010, { pacingCorrectionMs: 10 })
+  packet('second', 1, 20000)
+  packet('second', 2, 20020)
+  await first.flush()
+  const summary = first.snapshot().lastSummary
+  assert.equal(summary.totalActiveSendMs, 60)
+  assert.equal(summary.totalCadenceAudioMs, 60)
+  assert.equal(summary.totalCadenceSamples, 3)
+  assert.equal(summary.totalPacingCorrectionMs, 10)
+  assert.equal(summary.totalPacingRebases, 0)
+  await first.destroy()
+
+  const second = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => second.destroy())
+  second.packet({ sessionId: 'first', seq: 1, sentAtMs: 0, bytes: 640 })
+  await second.flush()
+  assert.notEqual(second.runId, first.runId)
+  const fresh = second.snapshot().lastSummary
+  for (const field of ['totalActiveSendMs', 'totalCadenceAudioMs', 'totalCadenceSamples',
+    'totalPacingCorrectionMs', 'totalPacingRebases', 'totalPacingRebaseMs']) assert.equal(fresh[field], 0)
+  assert.equal(fresh.runStartedAt, second.startedAt)
+  const saved = (await readAudioHistory({ directory })).filter(event => event.type === 'packet-summary')
+  assert.equal(saved.at(-1).runId, second.runId)
+  assert.equal(saved.at(-1).totalCadenceSamples, 0)
+  assert.equal(saved.at(-2).runId, first.runId)
+  assert.equal(saved.at(-2).totalCadenceSamples, 3)
+})
+
+test('pacing telemetry rejects invalid numbers, private metadata and caller-supplied lifetime totals', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  const secret = 'PRIVATE_PACING_https://secret.example/token_/private/audio.mp3'
+  for (const value of [-1, NaN, Infinity, 1e16, '10', secret]) {
+    diagnostics.packet({ sessionId: secret, bytes: 640, pacingCorrectionMs: value, pacingRebaseMs: value,
+      pacingRebaseReason: secret, totalPacingRebases: 999, totalActiveSendMs: 999, runStartedAt: secret })
+  }
+  const inherited = Object.create({ pacingCorrectionMs: 10, pacingRebaseMs: 250 })
+  inherited.bytes = 640
+  diagnostics.packet(inherited)
+  diagnostics.packet({ bytes: 640, pacingCorrectionMs: 1.23456, pacingRebaseMs: 250.98765 })
+  await diagnostics.flush()
+  const summary = diagnostics.snapshot().lastSummary
+  assert.equal(summary.pacingCorrections, 1)
+  assert.equal(summary.pacingCorrectionMs, 1.235)
+  assert.equal(summary.pacingRebases, 1)
+  assert.equal(summary.pacingRebaseMs, 250.988)
+  assert.equal(summary.totalPacingRebases, 1)
+  assert.equal(summary.runStartedAt, diagnostics.startedAt)
+  const saved = await readRollingLog({ directory, name: 'audio-diagnostics.log' })
+  assert.equal(saved.includes(secret), false)
+  assert.equal(JSON.stringify(diagnostics.snapshot()).includes(secret), false)
+})
+
+test('diagnostics export retains lifetime pacing counters after the early packet summaries rotate away', async t => {
+  const directory = await temporary(t)
+  const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })
+  t.after(() => diagnostics.destroy())
+  diagnostics.packet({ sessionId: 'voice', seq: 1, sentAtMs: 0, bytes: 640 })
+  diagnostics.packet({ sessionId: 'voice', seq: 2, sentAtMs: 250, bytes: 640, pacingRebaseMs: 230 })
+  diagnostics.packet({ sessionId: 'voice', seq: 3, sentAtMs: 260, bytes: 640, pacingCorrectionMs: 10 })
+  await diagnostics.flush()
+  // Exercise the real bounded writer, without a per-packet persistence path.
+  for (let i = 0; i < 4096; i++) {
+    diagnostics.event('runtime', { eventLoopP99Ms: 20, eventLoopMaxMs: 40, cpuPercent: 10,
+      rssBytes: 134217728, heapBytes: 67108864, diagnosticDroppedRecords: 0,
+      diagnosticDiscardedBytes: 0, diagnosticTruncatedRecords: 0, diagnosticStoredBytes: HISTORY_BYTES })
+    if (i % 64 === 63) await diagnostics.flush()
+  }
+  assert.equal((await readAudioHistory({ directory })).some(event => event.type === 'packet-summary'), false)
+  diagnostics.packet({ sessionId: 'voice', seq: 4, sentAtMs: 280, bytes: 640 })
+  await diagnostics.flush()
+  const report = JSON.parse(await createDiagnosticsReport({ directory }))
+  const summaries = report.audio.events.filter(event => event.type === 'packet-summary')
+  assert.equal(summaries.length, 1)
+  const retained = summaries[0]
+  assert.equal(retained.frames, 1)
+  assert.equal(retained.pacingCorrections, 0)
+  assert.equal(retained.pacingRebases, 0)
+  assert.equal(retained.runStartedAt, diagnostics.startedAt)
+  assert.equal(retained.runId, diagnostics.runId)
+  assert.equal(retained.totalActiveSendMs, 280)
+  assert.equal(retained.totalCadenceAudioMs, 60)
+  assert.equal(retained.totalCadenceSamples, 3)
+  assert.equal(retained.totalPacingCorrectionMs, 10)
+  assert.equal(retained.totalPacingRebases, 1)
+  assert.equal(retained.totalPacingRebaseMs, 230)
+  assert.equal(diagnostics.writer.droppedRecords, 0)
+  assert.ok(await size(join(directory, 'audio-diagnostics.log')) + await size(join(directory, 'audio-diagnostics.log.1')) <= HISTORY_BYTES)
+})
+
 test('compensated timing jitter is not a sustained send shortfall and the final partial frame is not counted as an interval', async t => {
   const directory = await temporary(t)
   const diagnostics = new AudioDiagnostics({ directory, runtimeMetrics: false, flushMs: 60000 })

@@ -8,14 +8,17 @@ export const AUDIO_SEND_POLICY = Object.freeze({
   pollMs: 20,
   drainNoticeMs: 250,
   maxPacingCorrectionMs: 10,
+  maxRecoverableLatenessMs: 200,
 })
 
 // Keep the nominal clock independent of the minimum physical packet spacing.
 // Feeding that spacing back into this deadline permanently accumulates coarse
 // Windows timer rounding (20 ms requests can wake about 31 ms apart).
-// Missing a whole frame discards the timing debt rather than creating a burst.
+// Retain a bounded delay against that clock. A single late frame must not
+// permanently lower the average rate; the wire guard repays it gradually.
+// Only a large stall or explicit playback/transport boundary starts a new phase.
 export function nextAudioFrameDeadline(deadline, sentAt, durationMs, resetPhase = false) {
-  const base = resetPhase || sentAt - deadline >= durationMs ? sentAt : deadline
+  const base = resetPhase || sentAt - deadline > AUDIO_SEND_POLICY.maxRecoverableLatenessMs ? sentAt : deadline
   return base + durationMs
 }
 
