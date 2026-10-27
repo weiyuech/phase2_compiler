@@ -34,7 +34,7 @@ test('atomic profile updates cannot change another profile or unrelated environm
   assert.throws(() => selectSpeechProfileChanges('__proto__', {}), /Unknown/)
 })
 
-test('real speech clients use three independent LLM/TTS profiles; manual speech uses transit', async t => {
+test('real speech clients keep profiles independent: manual uses transit, stationary uses cruise', async t => {
   const env = { SPEECH_PROFILES_VERSION: '1' }
   for (const [prefix, name] of [['', 'cruise'], ['TRANSIT_', 'transit'], ['BARRAGE_', 'barrage']]) {
     env[prefix + 'TTS_API_KEY'] = name + '-tts'
@@ -55,9 +55,18 @@ test('real speech clients use three independent LLM/TTS profiles; manual speech 
   const handlers = {}, calls = []
   services.transitTts.speak = async () => { calls.push('transit'); return { ok: true } }
   services.tts.speak = async () => { calls.push('cruise'); return { ok: true } }
-  registerTourControls({ uiBridge: { on: (key, fn) => { handlers[key] = fn }, broadcast() {} }, tour: { isRunning: false }, tts: services.manualTts, logger: { log() {}, error() {} } })
+  assert.equal(services.stationaryTts, services.tts)
+  services.llm.primary.rewriteCustom = async (_system, input) => {
+    assert.match(input, /stationary/)
+    calls.push('cruise-llm')
+    return '原地改写稿'
+  }
+  const controls = registerTourControls({ uiBridge: { on: (key, fn) => { handlers[key] = fn }, broadcast() {} }, tour: { isRunning: false }, tts: services.manualTts, stationaryTts: services.stationaryTts, stationaryLlm: services.llm, logger: { log() {}, error() {} } })
   await handlers.onTestSpeech('manual')
   assert.deepEqual(calls, ['transit'])
+  handlers.onStartStationarySpeech({ text: 'stationary', loop: false })
+  await controls.stationary.finished
+  assert.deepEqual(calls, ['transit', 'cruise-llm', 'cruise'])
 })
 
 test('blank independent profiles cannot borrow credentials from process.env', async t => {

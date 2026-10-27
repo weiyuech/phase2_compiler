@@ -20,17 +20,23 @@ class ArchiveTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.source = self.root / 'source'
         self.source.mkdir()
-        self.report = {'status': 'passed', 'checks': [{'name': n, 'status': 'passed'} for n in sorted(archive.CHECKS)]}
-        self.installer = self.source / 'Setup.1.0.2-test.8.exe'
+        self.write_fixture()
+
+    def write_fixture(self, tag=TAG, report=None, manifest_report=None):
+        for path in self.source.iterdir():
+            path.unlink()
+        self.report = report or {'status': 'passed', 'checks': [
+            {'name': n, 'status': 'passed'} for n in sorted(archive.required_checks(tag))]}
+        self.installer = self.source / f'Setup.{tag[1:]}.exe'
         self.installer.write_bytes(b'synthetic installer, no native code')
         (self.source / 'packaged-runtime.json').write_text(json.dumps(self.report))
-        manifest = {'tag': TAG, 'version': TAG[1:], 'commit': COMMIT, 'platform': {'os': 'win32', 'arch': 'x64'},
-                    'nativeChecks': self.report, 'artifacts': [
+        manifest = {'tag': tag, 'version': tag[1:], 'commit': COMMIT, 'platform': {'os': 'win32', 'arch': 'x64'},
+                    'nativeChecks': manifest_report or self.report, 'artifacts': [
                         {'name': p.name, 'bytes': p.stat().st_size, 'sha256': archive.digest(p)}
                         for p in [self.installer, self.source / 'packaged-runtime.json']]}
         (self.source / 'build-info.json').write_text(json.dumps(manifest))
         (self.source / 'SHA256SUMS.txt').write_text(''.join(archive.digest(p) + '  ' + p.name + '\n' for p in sorted(self.source.iterdir())))
-        self.release = {'tag_name': TAG, 'target_commitish': COMMIT, 'draft': True, 'prerelease': True,
+        self.release = {'tag_name': tag, 'target_commitish': COMMIT, 'draft': True, 'prerelease': True,
                         'assets': [{'id': i, 'name': p.name, 'state': 'uploaded', 'size': p.stat().st_size,
                                     'digest': 'sha256:' + archive.digest(p), 'download_count': 0}
                                    for i, p in enumerate(sorted(self.source.iterdir()))]}
@@ -78,6 +84,38 @@ class ArchiveTest(unittest.TestCase):
         self.assertEqual(archive.asset_identity(changed), archive.asset_identity(self.release))
         changed['assets'][0]['digest'] = 'different'
         self.assertNotEqual(archive.asset_identity(changed), archive.asset_identity(self.release))
+
+    def test_native_check_requirements_are_bound_to_release_version(self):
+        for tag in ['v1.0.2-test.8', 'v1.0.99-test.999', 'v1.1.0-test.6']:
+            with self.subTest(tag=tag):
+                self.assertEqual(archive.required_checks(tag), archive.LEGACY_CHECKS)
+                self.write_fixture(tag)
+                archive.validate_files(self.source, self.release, tag, COMMIT)
+        for tag in ['v1.1.0-test.7', 'v1.1.0-test.10', 'v1.1.1-test.0', 'v2.0.0-test.0']:
+            with self.subTest(tag=tag):
+                self.assertEqual(archive.required_checks(tag), archive.CHECKS)
+                self.write_fixture(tag)
+                archive.validate_files(self.source, self.release, tag, COMMIT)
+        with self.assertRaises(ValueError):
+            archive.required_checks('main')
+
+    def test_new_release_requires_passed_cadence_in_both_reports(self):
+        tag = 'v1.1.0-test.7'
+        self.write_fixture(tag)
+        passed = copy.deepcopy(self.report)
+        missing = copy.deepcopy(passed)
+        missing['checks'] = [c for c in missing['checks'] if c['name'] != 'audio-send-cadence']
+        failed = copy.deepcopy(passed)
+        next(c for c in failed['checks'] if c['name'] == 'audio-send-cadence')['status'] = 'failed'
+        duplicate = copy.deepcopy(passed)
+        next(c for c in duplicate['checks'] if c['name'] == 'audio-send-cadence')['name'] = 'runtime'
+        for label, invalid in [('missing', missing), ('failed', failed), ('duplicate', duplicate)]:
+            for location in ['raw', 'manifest']:
+                with self.subTest(invalid=label, location=location):
+                    self.write_fixture(tag, report=invalid if location == 'raw' else passed,
+                                       manifest_report=invalid if location == 'manifest' else passed)
+                    with self.assertRaisesRegex(ValueError, 'native checks|Native checks'):
+                        archive.validate_files(self.source, self.release, tag, COMMIT)
 
 
 if __name__ == '__main__':

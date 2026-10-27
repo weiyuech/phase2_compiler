@@ -47,6 +47,19 @@ jobs:
           node --test --test-concurrency=4 @tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Verify real NSIS process handoff before packaging
+        timeout-minutes: 3
+        run: node robot-ui/scripts/installer-host-smoke.mjs
+
+      - name: Preserve installer host diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-host-verification
+          path: release/installer-host-smoke/
+          if-no-files-found: ignore
+
       - name: Build and Package Electron App
         # Explicit x64 target: use Windows native dependencies from this runner.
         run: |
@@ -61,6 +74,9 @@ jobs:
 
       - name: Verify packaged clean defaults and resource allowlist
         run: node robot-ui/scripts/prepare-package-seed.mjs --verify release/win-unpacked/resources/backend
+
+      - name: Verify customer package contains no personal release metadata
+        run: node robot-ui/scripts/verify-packaged-privacy.mjs --resources-root release/win-unpacked/resources
 
       - name: Verify packaged Electron audio and OCR runtime
         timeout-minutes: 5
@@ -264,6 +280,25 @@ jobs:
       - name: Verify three machine workspaces, split view and concurrent OCR
         timeout-minutes: 5
         run: node robot-ui/scripts/machine-shell-smoke.mjs --executable release/win-unpacked/robot-live-ui.exe --shots release/machine-shell-preview
+
+      - name: Verify packaged upgrade, tray reinstall and three robot audio streams
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          $version = (Get-Content robot-ui/package.json -Raw | ConvertFrom-Json).version
+          node robot-ui/scripts/machine-upgrade-smoke.mjs --installer "release/Setup.$version.exe" --output release/machine-upgrade-smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content release/machine-upgrade-smoke/machine-upgrade-smoke.json -Raw | ConvertFrom-Json
+          if ($report.status -ne 'passed' -or -not $report.installerVerified) { throw 'Packaged upgrade or installer handoff did not pass' }
+
+      - name: Preserve upgrade verification diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: machine-upgrade-verification
+          path: release/machine-upgrade-smoke/
+          if-no-files-found: ignore
 
       - name: Upload Build Artifacts
         continue-on-error: true

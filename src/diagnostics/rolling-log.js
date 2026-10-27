@@ -3,7 +3,7 @@ import { join } from 'node:path'
 
 export const HISTORY_BYTES = 1024 * 1024
 export const SEGMENT_BYTES = HISTORY_BYTES / 2
-const LOG_NAMES = new Set(['backend.log', 'audio-diagnostics.log'])
+const LOG_NAMES = new Set(['backend.log', 'audio-diagnostics.log', 'robot-diagnostics.log', 'robot-incidents.log'])
 
 function paths(directory, name) {
   if (!directory || !LOG_NAMES.has(name)) throw new TypeError('Invalid diagnostics log target')

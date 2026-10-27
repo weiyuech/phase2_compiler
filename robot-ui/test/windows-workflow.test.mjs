@@ -17,3 +17,16 @@ test('Windows native gate waits for the exact GUI process and requires its finis
   assert.match(nativeStep, /finally[\s\S]*Remove-Item Env:ELECTRON_RUN_AS_NODE/)
   assert.match(nativeStep, /timeout-minutes: 5/)
 })
+
+test('Windows delivery requires packaged PCM and real installer upgrade verification', () => {
+  const start = workflow.indexOf('      - name: Verify packaged upgrade, tray reinstall and three robot audio streams')
+  const finish = workflow.indexOf('      - name:', start + 10)
+  assert.ok(start > end && finish > start)
+  const step = workflow.slice(start, finish)
+  assert.match(step, /machine-upgrade-smoke\.mjs --installer/)
+  assert.match(step, /Setup\.\$version\.exe/)
+  assert.match(step, /\$LASTEXITCODE -ne 0/)
+  assert.match(step, /\$report\.status -ne 'passed' -or -not \$report\.installerVerified/)
+  assert.doesNotMatch(step, /continue-on-error|if: always/)
+  assert.ok(workflow.indexOf('      - name: Deliver exact test tag') > finish)
+})

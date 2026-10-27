@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('api', {
   // LLM Prompt
   readLlmPrompt:  ()     => ipcRenderer.invoke('read-llm-prompt'),
   writeLlmPrompt: (text) => ipcRenderer.invoke('write-llm-prompt', text),
+  readStationaryPrompt: () => ipcRenderer.invoke('read-stationary-prompt'),
+  writeStationaryPrompt: (text, stylePrompt, customEnabled) => ipcRenderer.invoke('write-stationary-prompt', text, stylePrompt, customEnabled),
   readBarragePromptName:  ()     => ipcRenderer.invoke('read-barrage-prompt-name'),
   writeBarragePromptName: (text) => ipcRenderer.invoke('write-barrage-prompt-name', text),
   readBarragePromptGeneral:  ()     => ipcRenderer.invoke('read-barrage-prompt-general'),

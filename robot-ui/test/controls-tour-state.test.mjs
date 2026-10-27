@@ -54,15 +54,47 @@ function fixture(t, socket = new FakeSocket()) {
 }
 
 const tourState = (overrides = {}) => ({ running: false, paused: false, repeatCount: 1, currentIteration: 0, ...overrides })
+const stationaryState = (overrides = {}) => ({ state: 'idle', active: false, loop: false, iteration: 0, message: '', manualActive: false, ...overrides })
+const initialQueries = ['GET_TOUR_STATE', 'GET_STATIONARY_SPEECH_STATE', 'GET_BARRAGE_CONFIG']
+function syncIdle(socket) {
+  socket.reply('TOUR_STATE', tourState())
+  socket.reply('STATIONARY_SPEECH_STATE', stationaryState())
+}
+
+test('rewrite view follows rounds and reconnect snapshots; viewing never sends a playback command', async t => {
+  const h = fixture(t)
+  syncIdle(h.socket)
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState({ active: true, state: 'playing', loop: true, iteration: 2,
+    originalText: '固定原文', rewrittenText: '第二轮的改写稿', rewrittenIteration: 2 }))
+  assert.equal(h.state.stationaryText.value, '固定原文')
+  assert.equal(h.state.stationaryRewrittenText.value, '第二轮的改写稿')
+  const sent = h.socket.sent.length
+  h.state.stationaryView.value = 'rewritten'
+  await Vue.nextTick()
+  h.state.stationaryView.value = 'original'
+  await Vue.nextTick()
+  assert.equal(h.socket.sent.length, sent)
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState({ active: true, state: 'preparing', loop: true, iteration: 3,
+    originalText: '固定原文', rewrittenText: '第二轮的改写稿', rewrittenIteration: 2 }))
+  assert.equal(h.state.stationaryRewrittenIteration.value, 2)
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState({ state: 'completed', iteration: 3,
+    originalText: '固定原文', rewrittenText: '第三轮的改写稿', rewrittenIteration: 3 }))
+  assert.equal(h.state.stationaryRewrittenText.value, '第三轮的改写稿')
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState())
+  assert.equal(h.state.stationaryRewrittenText.value, '')
+  assert.equal(h.state.stationaryText.value, '固定原文', 'backend restart must not clear the original draft')
+})
 
 test('page entry requests a tour snapshot and withholds manual testing until it arrives', t => {
   const h = fixture(t)
-  assert.deepEqual(h.socket.sent.map(message => message.type), ['GET_TOUR_STATE', 'GET_BARRAGE_CONFIG'])
+  assert.deepEqual(h.socket.sent.map(message => message.type), initialQueries)
   h.state.testText.value = 'Test sentence.'
   assert.equal(h.state.canTestSpeech.value, false)
   h.state.sendTestSpeech()
-  assert.equal(h.socket.sent.length, 2)
+  assert.equal(h.socket.sent.length, 3)
   h.socket.reply('TOUR_STATE', tourState())
+  assert.equal(h.state.canTestSpeech.value, false, 'stationary/manual snapshot is also required')
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState())
   assert.equal(h.state.canTestSpeech.value, true)
   h.state.sendTestSpeech()
   assert.deepEqual(h.socket.sent.at(-1), { type: 'TEST_SPEECH', data: { text: 'Test sentence.' } })
@@ -89,7 +121,7 @@ for (const paused of [false, true]) {
 test('existing live tour events still update controls and re-enable testing only after stop/finish', t => {
   const h = fixture(t)
   h.state.testText.value = 'Test.'
-  h.socket.reply('TOUR_STATE', tourState())
+  syncIdle(h.socket)
   h.socket.reply('TOUR_STARTED', { repeatCount: 3 })
   assert.equal(h.state.canTestSpeech.value, false)
   assert.equal(h.state.currentIteration.value, 1)
@@ -110,7 +142,7 @@ test('existing live tour events still update controls and re-enable testing only
 test('reconnect clears stale eligibility, requests fresh state, and detaches the old socket', async t => {
   const h = fixture(t)
   h.state.testText.value = 'Test.'
-  h.socket.reply('TOUR_STATE', tourState())
+  syncIdle(h.socket)
   assert.equal(h.state.canTestSpeech.value, true)
   h.socket.close()
   assert.equal(h.state.canTestSpeech.value, false)
@@ -121,7 +153,7 @@ test('reconnect clears stale eligibility, requests fresh state, and detaches the
   replacement.open()
   assert.equal(h.state.wsConnected.value, true)
   assert.equal(h.state.canTestSpeech.value, false)
-  assert.deepEqual(replacement.sent.map(message => message.type), ['GET_TOUR_STATE', 'GET_BARRAGE_CONFIG'])
+  assert.deepEqual(replacement.sent.map(message => message.type), initialQueries)
   h.socket.reply('TOUR_STATE', tourState())
   assert.equal(h.state.tourStateKnown.value, false)
   replacement.reply('TOUR_STATE', tourState({ running: true, paused: true }))
@@ -138,7 +170,7 @@ test('an abandoned connecting socket cannot request state after page replacement
   await h.replaceSocket(replacement)
   old.open()
   assert.deepEqual(old.sent, [])
-  assert.deepEqual(replacement.sent.map(message => message.type), ['GET_TOUR_STATE', 'GET_BARRAGE_CONFIG'])
+  assert.deepEqual(replacement.sent.map(message => message.type), initialQueries)
 })
 
 test('manual-test button is bound to its safety predicate with the exact active-tour explanation', () => {
@@ -180,10 +212,222 @@ test('lost initial state response is retried, then unlocks the populated test bu
   t.mock.timers.tick(2000)
   assert.equal(h.socket.sent.filter(m => m.type === 'GET_TOUR_STATE').length, 2)
   h.socket.reply('TOUR_STATE', tourState())
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState())
   assert.equal(h.state.canTestSpeech.value, true)
   t.mock.timers.tick(4000)
   assert.equal(h.socket.sent.filter(m => m.type === 'GET_TOUR_STATE').length, 2)
   h.socket.reply('TEST_SPEECH_STATUS', { state: 'failed', message: '测试播报失败: TTS 未配置' })
   assert.match(h.state.testSpeechStatus.value, /TTS 未配置/)
   assert.equal(h.state.testText.value, '测试播报')
+})
+
+test('stationary card binds raw text, explicit loop option, backend status, and start/stop guards', () => {
+  assert.match(descriptor.template.content, /aria-label="原地播报"/)
+  assert.match(descriptor.template.content, /v-model="stationaryText"/)
+  assert.match(descriptor.template.content, /v-model="stationaryLoop"/)
+  assert.match(descriptor.template.content, /:disabled="!canStartStationary" @click="startStationary"/)
+  assert.match(descriptor.template.content, /:disabled="!canStopStationary" @click="stopStationary"/)
+  assert.match(descriptor.template.content, /:disabled="!canStartTour" @click="startTour"/)
+  assert.match(descriptor.template.content, /系统设置 → 巡游讲解/)
+  assert.match(descriptor.template.content, /使用“系统设置 → 巡游讲解”的 LLM 与音色，先改写再播报/)
+})
+
+for (const loop of [false, true]) {
+  test(`stationary start sends the original text with loop=${loop} only on explicit click`, t => {
+    const h = fixture(t)
+    assert.equal(h.state.stationaryLoop.value, false, 'each fresh card defaults to one playback')
+    h.state.stationaryText.value = '  第一行。\n第二行，保留原文！  '
+    h.state.stationaryLoop.value = loop
+    assert.equal(h.state.canStartStationary.value, false)
+    h.state.startStationary()
+    assert.equal(h.socket.sent.length, 3)
+    syncIdle(h.socket)
+    assert.equal(h.state.canStartStationary.value, true)
+    assert.equal(h.state.stationaryActive.value, false)
+    h.state.startStationary()
+    assert.deepEqual(h.socket.sent.at(-1), { type: 'START_STATIONARY_SPEECH', data: { text: '第一行。\n第二行，保留原文！', loop } })
+    assert.equal(h.state.stationaryCommandPending.value, true)
+    assert.equal(h.state.stationaryActive.value, false, 'sent command does not invent a running state')
+    assert.equal(h.state.stationaryState.value, 'idle')
+    assert.equal(h.state.canStartStationary.value, false)
+    assert.equal(h.state.canStartTour.value, false)
+    h.state.testText.value = '手动测试'
+    assert.equal(h.state.canTestSpeech.value, false)
+    h.state.startStationary()
+    assert.equal(h.socket.sent.filter(message => message.type === 'START_STATIONARY_SPEECH').length, 1)
+    h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState({ state: 'preparing', active: true, loop, iteration: 1, message: '正在准备' }))
+    assert.equal(h.state.stationaryCommandPending.value, false)
+    assert.equal(h.state.stationaryActive.value, true)
+    assert.equal(h.state.stationaryStatusLabel.value, '准备中')
+    assert.equal(h.state.stationaryMessage.value, '正在准备')
+    assert.equal(h.state.canStopStationary.value, true)
+  })
+}
+
+test('stationary lifecycle remains backend-owned through stop and preserves the text draft', t => {
+  const h = fixture(t)
+  h.state.stationaryText.value = '下一轮仍保留的原文'
+  h.state.testText.value = '手动测试'
+  syncIdle(h.socket)
+  for (const [state, label] of [['preparing', '准备中'], ['playing', '播报中'], ['waiting', '等待下一轮']]) {
+    h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState({ state, active: true, loop: true, iteration: 3 }))
+    assert.equal(h.state.stationaryStatusLabel.value, label)
+    assert.equal(h.state.stationaryLoop.value, true)
+    assert.equal(h.state.stationaryIteration.value, 3)
+    assert.equal(h.state.canStartStationary.value, false)
+    assert.equal(h.state.canTestSpeech.value, false)
+    assert.equal(h.state.canStartTour.value, false)
+    const before = h.socket.sent.length
+    h.state.startTour()
+    h.state.sendTestSpeech()
+    assert.equal(h.socket.sent.length, before)
+  }
+  h.state.stopStationary()
+  assert.deepEqual(h.socket.sent.at(-1), { type: 'STOP_STATIONARY_SPEECH', data: {} })
+  assert.equal(h.state.stationaryState.value, 'waiting', 'stop request alone never reports stopped')
+  assert.equal(h.state.stationaryActive.value, true)
+  assert.equal(h.state.canStopStationary.value, false)
+  h.state.stopStationary()
+  assert.equal(h.socket.sent.filter(message => message.type === 'STOP_STATIONARY_SPEECH').length, 1)
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState({ state: 'stopping', active: true, loop: true, iteration: 3 }))
+  assert.equal(h.state.stationaryStatusLabel.value, '停止中')
+  assert.equal(h.state.canStopStationary.value, false)
+  assert.equal(h.state.canStartStationary.value, false)
+  for (const [state, label] of [['cancelled', '已停止'], ['completed', '已完成'], ['failed', '播报失败']]) {
+    h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState({ state, message: `后端 ${state}` }))
+    assert.equal(h.state.stationaryStatusLabel.value, label)
+    assert.equal(h.state.stationaryMessage.value, `后端 ${state}`)
+    assert.equal(h.state.canStartStationary.value, true)
+    assert.equal(h.state.canTestSpeech.value, true)
+    assert.equal(h.state.canStartTour.value, true)
+    assert.equal(h.state.canStopStationary.value, false)
+  }
+  assert.equal(h.state.stationaryText.value, '下一轮仍保留的原文')
+})
+
+test('running and paused tours block stationary starts until a backend stop or finish', t => {
+  const h = fixture(t)
+  h.state.stationaryText.value = '原地播报'
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState())
+  for (const paused of [false, true]) {
+    h.socket.reply('TOUR_STATE', tourState({ running: true, paused }))
+    assert.equal(h.state.canStartStationary.value, false)
+    assert.match(h.state.stationaryDisabledReason.value, /请先停止巡游/)
+    h.state.startStationary()
+  }
+  assert.equal(h.socket.sent.some(message => message.type === 'START_STATIONARY_SPEECH'), false)
+  h.socket.reply('TOUR_STOPPED')
+  assert.equal(h.state.canStartStationary.value, true)
+  h.socket.reply('TOUR_STARTED')
+  assert.equal(h.state.canStartStationary.value, false)
+  h.socket.reply('TOUR_FINISHED')
+  assert.equal(h.state.canStartStationary.value, true)
+})
+
+test('manual command pending and backend playback block stationary/tour starts and duplicate tests', t => {
+  const h = fixture(t)
+  h.state.stationaryText.value = '原地播报'
+  h.state.testText.value = '手动播报'
+  syncIdle(h.socket)
+  h.state.sendTestSpeech()
+  assert.equal(h.state.manualPending.value, true)
+  assert.equal(h.state.canStartStationary.value, false)
+  assert.equal(h.state.canStartTour.value, false)
+  assert.equal(h.state.canTestSpeech.value, false)
+  h.state.sendTestSpeech()
+  assert.equal(h.socket.sent.filter(message => message.type === 'TEST_SPEECH').length, 1)
+  for (const state of ['preparing', 'playing']) {
+    h.socket.reply('TEST_SPEECH_STATUS', { state, message: state })
+    assert.equal(h.state.manualPending.value, false)
+    assert.equal(h.state.manualActive.value, true)
+    assert.equal(h.state.canStartStationary.value, false)
+    assert.equal(h.state.canStartTour.value, false)
+    assert.equal(h.state.canTestSpeech.value, false)
+  }
+  for (const state of ['completed', 'cancelled', 'failed']) {
+    h.socket.reply('TEST_SPEECH_STATUS', { state, message: state })
+    assert.equal(h.state.manualActive.value, false)
+    assert.equal(h.state.canStartStationary.value, true)
+    assert.equal(h.state.canStartTour.value, true)
+    assert.equal(h.state.canTestSpeech.value, true)
+  }
+})
+
+test('unknown stationary states revoke eligibility and retry, including malformed snapshots', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = fixture(t)
+  h.state.stationaryText.value = '原地播报'
+  h.state.testText.value = '手动播报'
+  syncIdle(h.socket)
+  for (const invalid of [{ state: 'new-unknown-state' }, { active: 'false' }, { loop: null }, { manualActive: undefined }]) {
+    h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState(invalid))
+    assert.equal(h.state.stationaryStateKnown.value, false)
+    assert.equal(h.state.canStartStationary.value, false)
+    assert.equal(h.state.canStartTour.value, false)
+    assert.equal(h.state.canTestSpeech.value, false)
+    const before = h.socket.sent.length
+    t.mock.timers.tick(2000)
+    assert.equal(h.socket.sent.length, before + 1)
+    assert.equal(h.socket.sent.at(-1).type, 'GET_STATIONARY_SPEECH_STATE')
+    h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState())
+    assert.equal(h.state.canStartStationary.value, true)
+  }
+})
+
+test('lost snapshots and command confirmations are queried again without replaying the command', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = fixture(t)
+  h.state.stationaryText.value = '原地播报'
+  h.socket.reply('TOUR_STATE', tourState())
+  t.mock.timers.tick(2000)
+  t.mock.timers.tick(2000)
+  assert.equal(h.socket.sent.filter(message => message.type === 'GET_STATIONARY_SPEECH_STATE').length, 3)
+  assert.equal(h.state.canStartStationary.value, false)
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState())
+  h.state.startStationary()
+  t.mock.timers.tick(2000)
+  t.mock.timers.tick(2000)
+  assert.equal(h.socket.sent.filter(message => message.type === 'START_STATIONARY_SPEECH').length, 1)
+  assert.equal(h.socket.sent.filter(message => message.type === 'GET_STATIONARY_SPEECH_STATE').length, 5)
+  assert.equal(h.state.stationaryCommandPending.value, true)
+  h.socket.reply('STATIONARY_SPEECH_STATE', stationaryState({ state: 'playing', active: true, iteration: 1 }))
+  const count = h.socket.sent.length
+  t.mock.timers.tick(6000)
+  assert.equal(h.socket.sent.length, count)
+})
+
+test('reconnect and remount restore ongoing stationary or manual playback without starting/stopping it', async t => {
+  const old = new FakeSocket()
+  const h = fixture(t, old)
+  h.state.stationaryText.value = '保留草稿'
+  h.state.testText.value = '手动测试'
+  syncIdle(old)
+  old.reply('STATIONARY_SPEECH_STATE', stationaryState({ state: 'playing', active: true, loop: true, iteration: 4 }))
+  old.close()
+  assert.equal(h.state.canStartStationary.value, false)
+  assert.equal(h.state.canStopStationary.value, false)
+  const replacement = new FakeSocket()
+  await h.replaceSocket(replacement)
+  assert.deepEqual(replacement.sent.map(message => message.type), initialQueries)
+  old.reply('STATIONARY_SPEECH_STATE', stationaryState())
+  assert.equal(h.state.stationaryStateKnown.value, false)
+  replacement.reply('TOUR_STATE', tourState())
+  replacement.reply('STATIONARY_SPEECH_STATE', stationaryState({ state: 'playing', active: true, loop: true, iteration: 5 }))
+  assert.equal(h.state.canStopStationary.value, true)
+  assert.equal(h.state.stationaryIteration.value, 5)
+  assert.equal(h.state.stationaryText.value, '保留草稿')
+  h.dispose()
+  assert.equal(replacement.listenerCount(), 0)
+  assert.deepEqual(replacement.sent.map(message => message.type), initialQueries, 'unmount never stops live playback')
+  const remounted = fixture(t, replacement)
+  assert.equal(remounted.state.stationaryLoop.value, false, 'new draft does not revive an old loop preference')
+  remounted.state.stationaryText.value = '新草稿'
+  remounted.state.testText.value = '新测试'
+  replacement.reply('TOUR_STATE', tourState())
+  replacement.reply('STATIONARY_SPEECH_STATE', stationaryState({ manualActive: true }))
+  assert.equal(remounted.state.manualActive.value, true)
+  assert.equal(remounted.state.canStartStationary.value, false)
+  assert.equal(remounted.state.canStartTour.value, false)
+  assert.equal(remounted.state.canTestSpeech.value, false)
+  assert.deepEqual(replacement.sent.map(message => message.type), [...initialQueries, ...initialQueries])
 })

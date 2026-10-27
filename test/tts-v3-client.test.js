@@ -51,7 +51,10 @@ async function createServer() {
   return {
     server,
     url: `ws://127.0.0.1:${address.port}`,
-    close: () => new Promise(resolve => server.close(resolve)),
+    close: () => new Promise(resolve => {
+      for (const socket of server.clients) socket.terminate()
+      server.close(resolve)
+    }),
   }
 }
 
@@ -286,4 +289,58 @@ test('TTS engine aborts V3 callbacks when the playback stream cannot start', asy
   assert.equal(aborted, true)
   assert.equal(callbackError, null)
   engine.destroy()
+})
+
+test('V3 cancellation terminates provider connection and ignores already queued late frames', { timeout: 5000 }, async t => {
+  const mock = await createServer()
+  t.after(() => mock.close())
+  let closed
+  const peerClosed = new Promise(resolve => { closed = resolve })
+  mock.server.once('connection', socket => {
+    socket.once('close', closed)
+    socket.once('message', () => {
+      socket.send(buildServerEventFrame(V3_EVENTS.TTS_RESPONSE, Buffer.from([1]), { messageType: 0x0b }))
+      socket.send(buildServerEventFrame(V3_EVENTS.TTS_RESPONSE, Buffer.from([2]), { messageType: 0x0b }))
+      socket.send(buildServerEventFrame(V3_EVENTS.SESSION_FINISHED, { status_code: 20000000 }))
+    })
+  })
+  const client = new VolcengineTTSWSClient({ TTS_WS_URL: mock.url, TTS_TIMEOUT_MS: 1000, TTS_MAX_TIMEOUT_MS: 2000 })
+  const chunks = []
+  let finished = 0, errors = 0, call
+  call = client.synthesizeStream('取消后的音频不可继续回调', chunk => {
+    chunks.push(chunk)
+    call.abort()
+  }, () => { finished++ }, () => { errors++ })
+  await peerClosed
+  assert.deepEqual(Buffer.concat(chunks), Buffer.from([1]))
+  assert.equal(finished, 0)
+  assert.equal(errors, 0, 'cancelled provider close must not report a second terminal callback')
+  assert.equal(mock.server.clients.size, 0)
+  assert.doesNotThrow(() => call.abort(), 'repeated cancellation is harmless')
+})
+
+test('V3 consumer exception reports once and disposes provider before late audio or completion', { timeout: 5000 }, async t => {
+  const mock = await createServer()
+  t.after(() => mock.close())
+  let closed
+  const peerClosed = new Promise(resolve => { closed = resolve })
+  mock.server.once('connection', socket => {
+    socket.once('close', closed)
+    socket.once('message', () => {
+      socket.send(buildServerEventFrame(V3_EVENTS.TTS_RESPONSE, Buffer.from([1]), { messageType: 0x0b }))
+      socket.send(buildServerEventFrame(V3_EVENTS.TTS_RESPONSE, Buffer.from([2]), { messageType: 0x0b }))
+      socket.send(buildServerEventFrame(V3_EVENTS.SESSION_FINISHED, { status_code: 20000000 }))
+    })
+  })
+  const client = new VolcengineTTSWSClient({ TTS_WS_URL: mock.url, TTS_TIMEOUT_MS: 1000, TTS_MAX_TIMEOUT_MS: 2000 })
+  const failure = new Error('audio consumer rejected chunk')
+  const errors = []
+  let chunks = 0, finished = 0
+  client.synthesizeStream('消费失败必须清理连接', () => { chunks++; throw failure },
+    () => { finished++ }, error => { errors.push(error) })
+  await peerClosed
+  assert.equal(chunks, 1)
+  assert.equal(finished, 0)
+  assert.deepEqual(errors, [failure])
+  assert.equal(mock.server.clients.size, 0)
 })

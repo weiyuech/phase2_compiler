@@ -42,3 +42,4 @@ robot-ui/build/vc_redist.*.exe*
 
 # Local UI verification captures
 output/machine-shell-preview/
+output/machine-upgrade-smoke/

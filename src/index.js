@@ -24,6 +24,8 @@ import { AudioOutputRouter }           from './tts/audio-output-router.js'
 import { applyAudioOutputConfig }      from './tts/audio-output-config.js'
 import { SpeechCoordinator }           from './tts/speech-coordinator.js'
 import { AudioDiagnostics }            from './diagnostics/audio-diagnostics.js'
+import { RobotDiagnostics }            from './diagnostics/robot-diagnostics.js'
+import { registerDiagnosticsFlush }    from './diagnostics/flush.js'
 import { startBackendLogCapture }      from './diagnostics/backend-log.js'
 import { TransitAudioManager }         from './transit/manager.js'
 import { RobotListener }               from './robot/listener.js'
@@ -42,6 +44,9 @@ import { safeJoin }                    from './safe-path.js'
 const diagnosticsDirectory = process.env.DIAGNOSTICS_DIR || process.env.USER_DATA_DIR || join(process.cwd(), 'data')
 const backendLogCapture = startBackendLogCapture({ directory: diagnosticsDirectory })
 const audioDiagnostics = new AudioDiagnostics({ directory: diagnosticsDirectory })
+const robotDiagnostics = new RobotDiagnostics({ directory: diagnosticsDirectory })
+
+registerDiagnosticsFlush(process.parentPort, [audioDiagnostics, robotDiagnostics, backendLogCapture])
 
 const kb = await createKnowledgeBaseProvider({
   KB_FLATFILE_DIR: join(DATA_DIR, 'flatfiles'),
@@ -57,11 +62,12 @@ await barrageProvider.initialize()
 const healthy = await kb.healthCheck()
 if (!healthy) process.exit(1)
 
-const robot = new RobotListener(
-  process.env.ROBOT_URL
+const robot = new RobotListener({
+  ...(process.env.ROBOT_URL
     ? { url: process.env.ROBOT_URL }
-    : { port: parseInt(process.env.ROBOT_PORT || '8765') }
-)
+    : { port: parseInt(process.env.ROBOT_PORT || '8765') }),
+  diagnostics: robotDiagnostics,
+})
 
 const audioOutput = new AudioOutputRouter({
   robot,
@@ -71,7 +77,7 @@ const audioOutput = new AudioOutputRouter({
 audioDiagnostics.event('runtime', { ...audioOutput.getConfig(), connected: robot.isConnected() })
 
 const speechCoordinator = new SpeechCoordinator({ diagnostics: audioDiagnostics })
-const { llm, tts, barrageLlm, barrageTts, transitLlm, transitTts, manualTts } = createSpeechServices({
+const { llm, tts, barrageLlm, barrageTts, transitLlm, transitTts, manualTts, stationaryTts } = createSpeechServices({
   audioOutput, coordinator: speechCoordinator, diagnostics: audioDiagnostics,
 })
 await Promise.all([llm.init(), barrageLlm.init(), transitLlm.init()])
@@ -136,10 +142,13 @@ const phase2 = initPhase2({
   onBarrageSpeechEnd: updateCruisingDucking,
 })
 
+const tourControls = registerTourControls({ uiBridge, tour, tts: manualTts, stationaryTts, stationaryLlm: llm })
+
 // ── State snapshot for late-joining UI clients ────────────────────────────────
 
 uiBridge.on('onNewClient', (sendTo) => {
   sendTo('TOUR_STATE', getTourState(tour))
+  sendTo('STATIONARY_SPEECH_STATE', tourControls.snapshot())
   sendTo('AUDIO_DIAGNOSTICS', { snapshot: audioDiagnostics.snapshot() })
   sendTo('TRANSIT_CONFIG', transitAudio.getConfig())
   sendTo('AUDIO_OUTPUT_CONFIG', {
@@ -158,7 +167,6 @@ uiBridge.on('onNewClient', (sendTo) => {
 
 // ── UI Bridge commands ────────────────────────────────────────────────────────
 
-registerTourControls({ uiBridge, tour, tts: manualTts })
 uiBridge.on('onPause', () => speechCoordinator.setPauseReason('operator', ['cruise', 'transit', 'barrage'], true))
 uiBridge.on('onResume', () => speechCoordinator.setPauseReason('operator', [], false))
 uiBridge.on('onDuckStart', () => {
@@ -250,6 +258,7 @@ uiBridge.on('onSelectMap', async (mapName) => {
 })
 
 uiBridge.on('onStartTour', (payload) => {
+  if (!tourControls.canStartTour()) return
   // Payload is either {repeatCount:N} from new UI, or undefined from legacy clients
   const repeatCount = (payload && typeof payload === 'object') ? payload.repeatCount : payload
   cruise.start(repeatCount)
@@ -264,6 +273,7 @@ uiBridge.on('onResumeTour', () => {
 })
 
 uiBridge.on('onStopTour', () => {
+  if (!tour.isRunning && !tour.isPaused) return
   audioDiagnostics.event('stop', { source: 'point', reason: 'stop' })
   cruise.stop()
 })
@@ -640,6 +650,7 @@ uiBridge.on('onSetAudioOutputConfig', (config) => {
       // Never leave a previous destination playing after the user switches.
       // Volume-only changes are applied by the router without cancelling speech.
       destinationChanged = true
+      tourControls.stationary.stop('音频输出已更改，原地播报已停止')
       audioOutputGeneration++
       speechCoordinator.cancelAll()
       tts.stop()
@@ -682,6 +693,29 @@ tour.on('current-removed', ({ nextIndex }) => {
 })
 
 // ── Robot events ──────────────────────────────────────────────────────────────
+
+robot.on('audio-flow', (flow = {}) => {
+  const eventType = { waiting: 'waiting', recovered: 'resume', reset: 'error' }[flow.state]
+  if (!eventType) return
+  audioDiagnostics.event(eventType, {
+    destination: 'robot', reason: 'backpressure', direction: flow.direction,
+    bufferedBytes: flow.bufferedBytes, waitMs: flow.waitMs,
+    highWaterBytes: flow.highWaterBytes, lowWaterBytes: flow.lowWaterBytes,
+    hardLimitBytes: flow.hardLimitBytes, errorCode: flow.errorCode,
+    connectionGeneration: flow.connectionGeneration ?? robot.connectionGeneration,
+  })
+  const messages = {
+    waiting: '机器人音频发送拥堵，已暂缓后续发送，正在等待缓冲下降。',
+    recovered: '机器人音频发送缓冲已下降，发送已恢复。',
+    reset: `机器人音频发送持续拥堵，已放弃旧连接。${flow.direction === 'client'
+      ? '将在 5 秒后尝试重新连接。' : '正在等待机器人重新连接。'}连接恢复后，播放需重新开始。`,
+  }
+  const message = messages[flow.state]
+  // Persist transitions even when the renderer is closed; packet-level events
+  // remain aggregated by the diagnostics recorder instead of flooding the UI.
+  console.log(`[音频发送] ${message}`)
+  uiBridge.broadcast('AUDIO_FLOW_STATUS', { state: flow.state, message })
+})
 
 robot.on('connected', () => {
   audioDiagnostics.event('connected', { destination: audioOutput.getConfig().destination, connected: true, connectionGeneration: robot.connectionGeneration })
@@ -762,6 +796,7 @@ async function playPoint(item, point, context = {}) {
 }
 
 function invalidateRobotSpeech() {
+  tourControls.stationary.stop('机器人连接已更改，原地播报已停止')
   audioOutputGeneration++
   speechCoordinator.cancelAll()
   tts.stop()
@@ -777,6 +812,7 @@ let shuttingDown = false
 async function shutdown() {
   if (shuttingDown) return
   shuttingDown = true
+  tourControls.stationary.stop()
   phase2.barrageManager?.stop?.()
   speechCoordinator.cancelAll()
   cruise.stop()
@@ -787,7 +823,7 @@ async function shutdown() {
   const audioCleanup = audioOutput.destroy()
   robot.stop()
   await Promise.race([
-    Promise.allSettled([audioCleanup, audioDiagnostics.destroy(), backendLogCapture?.destroy?.(), phase2.destroy?.()]),
+    Promise.allSettled([audioCleanup, audioDiagnostics.destroy(), robotDiagnostics.destroy(), backendLogCapture?.destroy?.(), phase2.destroy?.()]),
     new Promise(resolve => setTimeout(resolve, 1000)),
   ])
   // stopTunnel().finally(() => process.exit(0))

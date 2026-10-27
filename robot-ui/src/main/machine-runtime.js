@@ -6,7 +6,10 @@ import { RollingLog } from '../../../src/diagnostics/rolling-log.js'
 import { createDiagnosticsReport } from '../../../src/diagnostics/report.js'
 import { seedMachineProfile, backendEnvironment } from '../../../src/packaging/machine-profile.js'
 import { DEFAULT_OCR_JUDGE_PROMPT, resolveOcrJudgePrompt } from '../../../src/phase2/ocr/judge-prompt.js'
+import { readStationaryPrompt, readStationaryOptions, writeStationaryPrompt } from '../../../src/llm/stationary-prompt-store.js'
 import { speechProfileKeys, speechProfileMigration, selectSpeechProfileChanges } from '../../../src/config/speech-profiles.js'
+import { createBackendRestarter } from './backend-restart.mjs'
+import { flushBackendDiagnostics } from './diagnostics-flush.mjs'
 
 
 // One closure per machine: settings, backend, IPC and OCR selection never share state.
@@ -32,6 +35,7 @@ function buildPath() {
 }
 const BANNED_WORDS_PATH = join(CONFIG_DIR, 'banned-words.txt')
 const LLM_PROMPT_PATH   = join(CONFIG_DIR, 'llm-system-prompt.txt')
+const STATIONARY_PROMPT_PATH = join(CONFIG_DIR, 'stationary-prompt.txt')
 const BARRAGE_PROMPT_NAME_PATH = join(CONFIG_DIR, 'barrage-prompt-name.txt')
 const BARRAGE_PROMPT_GENERAL_PATH = join(CONFIG_DIR, 'barrage-prompt-general.txt')
 const BARRAGE_PROMPT_JUDGE_PATH = join(CONFIG_DIR, 'barrage-prompt-judge.txt')
@@ -158,8 +162,6 @@ function verifyPassword(pwd, hash, salt) {
 let _backendProcess = null
 const _win = { webContents: view.webContents, isDestroyed: () => view.webContents.isDestroyed() }
 let _disposed = false
-let _restartTimer = null
-let _restartRequested = false
 // Backend failure may precede renderer readiness; retain it for the first status query.
 let _lastBackendExit = null
 // 后端实际监听的端口。首选 3001，被占用时后端会改用系统分配的空闲端口，
@@ -256,6 +258,7 @@ function startBackend() {
 function startBackendSafe() {
   try {
     startBackend()
+    return { ok: true }
   } catch (err) {
     _lastBackendExit = {
       code: null,
@@ -265,17 +268,24 @@ function startBackendSafe() {
     try {
       if (_win && !_win.isDestroyed()) _win.webContents.send('backend-exit', _lastBackendExit)
     } catch {}
+    return { ok: false, error: `启动后端进程失败：${err?.message || err}` }
   }
 }
 
 // ─── IPC: Restart backend ─────────────────────────────────────────────────────
 // 保存密钥/运行参数后调用，让后端重新读取 .env 使配置立即生效
+const backendRestarter = createBackendRestarter({
+  getBackend: () => _backendProcess,
+  startBackend: startBackendSafe,
+  isClosing: () => _disposed,
+})
 
 // ─── IPC: 诊断日志导出 ────────────────────────────────────────────────────────
 // 目的：让非技术用户能一键把排障需要的信息存成一个文件发给开发者，
 // 而不是让对方去 %APPDATA% 里翻目录。后端崩了也能用（全在主进程里跑）。
 
 async function buildDiagnosticsReport(includeBackendLogs = false) {
+  const diagnosticsFlush = await flushBackendDiagnostics(_backendProcess)
   // A failed backend cannot answer a flush request. Persisted audio history is
   // still exportable; never wait indefinitely on a live or crashed process.
   if (_backendLog) await Promise.race([_backendLog.flush(), new Promise(resolve => setTimeout(resolve, 500))])
@@ -284,7 +294,7 @@ async function buildDiagnosticsReport(includeBackendLogs = false) {
     metadata: {
       appVersion: app.getVersion(), electronVersion: process.versions.electron,
       nodeVersion: process.versions.node, platform: process.platform, arch: process.arch,
-      packaged: app.isPackaged,
+      packaged: app.isPackaged, machineId: profile.id, diagnosticsFlush,
       backendStatus: _backendProcess ? 'running' : (_lastBackendExit ? 'exited' : 'not-running'),
       backendEntryExists: existsSync(join(PROJECT_ROOT, 'src/index.js')),
       dependenciesExist: existsSync(join(PROJECT_ROOT, 'node_modules')),
@@ -336,23 +346,7 @@ ipcMain.handle('get-backend-status', () => {
 // 每个页面只查询所属后台的端口，启动和重启时均不猜测其他实例的端口。
 ipcMain.handle('get-ui-port', () => _uiPort)
 
-ipcMain.handle('restart-backend', () => {
-  if (_disposed) return { ok: false, error: '工作区已关闭' }
-  if (_restartRequested) return { ok: true }
-  _restartRequested = true
-  const restart = () => {
-    if (_disposed) return
-    _restartTimer = setTimeout(() => {
-      _restartRequested = false
-      startBackendSafe()
-    }, 250)
-  }
-  if (_backendProcess) {
-    _backendProcess.once('exit', restart)
-    _backendProcess.kill()
-  } else restart()
-  return { ok: true }
-})
+ipcMain.handle('restart-backend', () => backendRestarter.request())
 
 // ─── IPC: Barrage Overlay ─────────────────────────────────────────────────────
 
@@ -673,6 +667,18 @@ ipcMain.handle('read-barrage-prompt-name', () => {
   } catch (e) { return { ok: false, error: e.message, text: '' } }
 })
 
+ipcMain.handle('read-stationary-prompt', () => {
+  try { return { ok: true, text: readStationaryPrompt(STATIONARY_PROMPT_PATH), ...readStationaryOptions(STATIONARY_PROMPT_PATH) } }
+  catch (e) { return { ok: false, error: e.message } }
+})
+
+ipcMain.handle('write-stationary-prompt', (_, text, stylePrompt, customEnabled) => {
+  try {
+    writeStationaryPrompt(text, STATIONARY_PROMPT_PATH, stylePrompt, customEnabled)
+    return { ok: true }
+  } catch (e) { return { ok: false, error: e.message } }
+})
+
 ipcMain.handle('write-barrage-prompt-name', (_, text) => {
   try {
     writeFileSync(BARRAGE_PROMPT_NAME_PATH, text, 'utf-8')
@@ -855,9 +861,11 @@ return {
   },
   dispose() {
     _disposed = true
-    clearTimeout(_restartTimer)
+    backendRestarter.dispose()
     _overlayWin?.close()
-    _backendProcess?.kill()
+    try { _backendProcess?.kill() } catch (error) {
+      appendLog(`[backend] shutdown failed: ${error?.message || error}\n`)
+    }
     return _backendLog?.flush()
   },
 }

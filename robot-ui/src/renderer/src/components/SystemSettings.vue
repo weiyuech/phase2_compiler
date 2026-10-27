@@ -69,6 +69,25 @@
 
           <div>
             <div class="prompt-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <span class="section-sub-title" style="color: var(--text); font-size: 13px; font-weight: 600;">原地播报改写提示词</span>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="font-size: 12px; color: var(--text-dim)">自定义</span>
+                <el-switch v-model="customStationaryEnabled" size="small" aria-label="自定义原地播报提示词" @change="handleStationarySwitch" />
+              </div>
+            </div>
+            <el-input v-model="stationaryPromptText" type="textarea" :rows="7" class="prompt-textarea" aria-label="原地播报改写提示词" :disabled="!customStationaryEnabled" />
+            <div class="stationary-style-field" :class="{ inactive: customStationaryEnabled }">
+              <label for="stationary-style-input">补充风格要求（可选）</label>
+              <el-input id="stationary-style-input" v-model="stationaryStylePrompt" type="textarea" :rows="2" :maxlength="1000"
+                placeholder="可留空，例如：搞怪一点，激情一点" aria-label="原地播报补充风格要求" :disabled="customStationaryEnabled" />
+              <p class="panel-note">{{ customStationaryEnabled ? '自定义模式下此项不生效；已填写的风格要求会保留。' : '仅在默认模式生效；留空沿用默认风格，风格变化不改变事实。' }}</p>
+            </div>
+            <p class="panel-note">使用“巡游讲解”的 LLM，每轮依据原始输入重新改写，参考上一版措辞减少重复。关闭自定义可恢复默认；保存后从尚未开始准备的轮次生效。</p>
+            <p class="panel-note">默认提示词约束夸大宣传、虚构事实和绝对化用语；提示词不能替代广告内容审核。</p>
+          </div>
+
+          <div>
+            <div class="prompt-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
               <span class="section-sub-title" style="color: var(--text); font-size: 13px; font-weight: 600;">弹幕 - 精准回答提示词</span>
               <div style="display: flex; align-items: center; gap: 6px;">
                 <span style="font-size: 12px; color: var(--text-dim)">自定义</span>
@@ -194,7 +213,7 @@
         <div class="panel-header">音频输出</div>
         <div class="panel-body">
           <p class="panel-note" style="margin: 0 0 18px">
-            统一控制巡游讲解、弹幕回复、过渡音频和手动播报测试的输出位置。
+            统一控制巡游讲解、原地播报、弹幕回复、过渡音频和手动播报测试的输出位置。
           </p>
 
           <div class="params-grid" style="max-width: 620px">
@@ -248,6 +267,7 @@ import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessageBox, ElMessage }                   from 'element-plus'
 import AudioDiagnostics from './AudioDiagnostics.vue'
 import { DEFAULT_OCR_JUDGE_PROMPT } from '../../../../../src/phase2/ocr/judge-prompt.js'
+import { DEFAULT_STATIONARY_PROMPT } from '../../../../../src/llm/stationary-prompt.js'
 
 const props = defineProps({ wsRef: Object })
 
@@ -263,7 +283,7 @@ const navItems = [
 const activeSection = ref('cruise')
 const speechProfileTitles = { cruise: '巡游讲解', transit: '过渡音频与手动播报', barrage: '弹幕回复' }
 const speechProfileDescriptions = {
-  cruise: '用于机器人到达点位后的讲解：文字改写和语音合成。',
+  cruise: '用于机器人到达点位后的讲解，以及原地播报的文字改写和语音合成。原地播报使用本组 LLM、TTS 密钥与音色，独立提示词在“改写提示词”中设置。',
   transit: '用于过渡音频的文字改写与语音合成，以及手动播报测试的语音合成。过渡文字、音频文件和启用开关在“播报控制 → 过渡音频”设置。',
   barrage: '用于弹幕问题判断、回复生成和回复语音合成。',
 }
@@ -320,6 +340,15 @@ async function saveBannedWords() {
 
 // ── 改写提示词 ─────────────────────────────────────────────────────────────────
 const promptText   = ref('')
+const stationaryPromptText = ref(DEFAULT_STATIONARY_PROMPT)
+const stationaryStylePrompt = ref('')
+const customStationaryEnabled = ref(false)
+const customStationaryText = ref('')
+function handleStationarySwitch(enabled) {
+  if (enabled) stationaryPromptText.value = customStationaryText.value || DEFAULT_STATIONARY_PROMPT
+  else { customStationaryText.value = stationaryPromptText.value; stationaryPromptText.value = DEFAULT_STATIONARY_PROMPT }
+}
+watch(stationaryPromptText, value => { if (customStationaryEnabled.value) customStationaryText.value = value })
 const judgePromptText = ref(DEFAULT_OCR_JUDGE_PROMPT)
 const customJudgeEnabled = ref(false)
 const customJudgeText = ref('')
@@ -377,6 +406,12 @@ async function loadPrompt() {
   if (!window.api) return
   promptLoaded.value = false
   try {
+    const stationary = await window.api.readStationaryPrompt()
+    if (!stationary.ok) throw new Error(stationary.error || '原地播报提示词读取失败')
+    stationaryPromptText.value = stationary.text || DEFAULT_STATIONARY_PROMPT
+    stationaryStylePrompt.value = stationary.stylePrompt || ''
+    customStationaryEnabled.value = typeof stationary.customEnabled === 'boolean' ? stationary.customEnabled : !isDefaultMatch(stationary.text, DEFAULT_STATIONARY_PROMPT)
+    if (customStationaryEnabled.value) customStationaryText.value = stationary.text
     const judge = await window.api.readBarragePromptJudge()
     if (!judge.ok) throw new Error(judge.error || '判断提示词读取失败')
     judgePromptText.value = judge.text || DEFAULT_OCR_JUDGE_PROMPT
@@ -473,6 +508,10 @@ watch(barrageGeneralText, (newVal) => {
 async function savePrompt() {
   if (!window.api) return
   if (!promptLoaded.value) { ElMessage.error('提示词尚未完整加载，请重新进入设置页后再试'); return }
+  if (!stationaryPromptText.value.trim() || stationaryPromptText.value.length > 32000) {
+    ElMessage.error('原地播报提示词不能为空且不能超过 32000 字符'); return
+  }
+  if (stationaryStylePrompt.value.length > 1000) { ElMessage.error('补充风格要求不能超过 1000 字符'); return }
   savingPrompt.value = true
   promptSavedOk.value = false
   try {
@@ -486,6 +525,9 @@ async function savePrompt() {
     
     const resGen = await window.api.writeBarragePromptGeneral(barrageGeneralText.value)
     if (!resGen.ok) throw new Error(resGen.error || '保存失败')
+
+    const stationary = await window.api.writeStationaryPrompt(stationaryPromptText.value, stationaryStylePrompt.value.trim() || null, customStationaryEnabled.value)
+    if (!stationary.ok) throw new Error(stationary.error || '原地播报提示词保存失败')
 
     props.wsRef?.value?.send(JSON.stringify({ type: 'RELOAD_PROMPT' }))
     promptSavedOk.value = true
@@ -580,11 +622,12 @@ async function triggerRestart() {
   if (!window.api?.restartBackend) return
   restartMsg.value = '已保存，后端重启中…'
   try {
-    await window.api.restartBackend()
-    // 给后端约 2s 启动，再更新提示
-    setTimeout(() => { restartMsg.value = '已生效，前端将自动重连' }, 2000)
+    const result = await window.api.restartBackend()
+    if (result?.ok === false) throw new Error(result.error || '无法重启后端')
+    restartMsg.value = '已重启，前端将自动重连'
   } catch (e) {
-    restartMsg.value = '重启失败：' + e.message
+    restartMsg.value = '设置已保存，重启失败：' + e.message
+    ElMessage.error(restartMsg.value)
   }
 }
 
@@ -914,6 +957,10 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: var(--text-dim);
 }
+.stationary-style-field { margin-top: 12px; }
+.stationary-style-field label { display: block; margin-bottom: 8px; font-size: 12px; }
+.stationary-style-field.inactive { color: var(--text-dim); }
+.stationary-style-field.inactive :deep(.el-textarea__inner) { opacity: .5; cursor: not-allowed; }
 .param-hint {
   margin-top: 4px;
   font-size: 11px;

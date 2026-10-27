@@ -5,6 +5,8 @@ import { dirname, join, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import ffmpegStatic from 'ffmpeg-static'
 import { PreparedAudioCache, abortedError } from './prepared-audio-cache.js'
+import { hashAudioBuffer } from './audio-buffer-hash.js'
+import { AUDIO_SEND_POLICY, audioFrameWireDeadline, nextAudioFrameDeadline, scheduleAudioFrame } from '../robot/audio-send-policy.js'
 
 const RATE = 16000
 const BYTES_PER_MS = RATE * 2 / 1000
@@ -170,7 +172,9 @@ export class PreparedAudioOutputRouter {
   async prepareBuffer(buffer, { signal, cacheKey = '' } = {}) {
     if (!Buffer.isBuffer(buffer) || !buffer.length) throw new Error('MP3 音频数据为空')
     if (buffer.length > MAX_INPUT_BYTES) throw new Error('MP3 输入超过64MiB限制')
-    return this._prepare(async () => ({ key: hash(`mp3:${cacheKey}:${hash(buffer)}:s16le:16000:mono`), buffer }), signal)
+    return this._prepare(async preparationSignal => ({
+      key: hash(`mp3:${cacheKey}:${await hashAudioBuffer(buffer, preparationSignal)}:s16le:16000:mono`), buffer,
+    }), signal)
   }
   async _prepare(sourceFactory, externalSignal) {
     this._assertReady()
@@ -185,7 +189,8 @@ export class PreparedAudioOutputRouter {
     const startedAt = this._now()
     job.done = (async () => {
       if (controller.signal.aborted) throw abortedError()
-      const source = await sourceFactory()
+      const source = await sourceFactory(controller.signal)
+      if (controller.signal.aborted) throw abortedError()
       this._assertReady(generation)
       const entry = await this._cache.prepare(source.key, write => this._decode(source, write, controller.signal), { signal: controller.signal })
       if (controller.signal.aborted || generation !== this.generation || this._destroyed) {
@@ -285,6 +290,7 @@ export class PreparedAudioOutputRouter {
     if (this._active !== session) throw new Error('音频会话不再拥有机器人发送通道')
     this._assertReady(session.generation)
     const adjusted = this._applyRobotGain(chunk)
+    const pcmMetrics = this.diagnostics ? session._measurePcm(adjusted.buffer) : null
     const diagnosticFields = { ...fields, robotVolumePercent: this._config.robotVolumePercent,
       clippedSamples: adjusted.clippedSamples }
     const sentAt = this._now()
@@ -304,12 +310,20 @@ export class PreparedAudioOutputRouter {
       this._lastPacket = { sessionId: session.id, connectionGeneration: session.connectionGeneration,
         sentAt, notBefore: sentAt + chunk.length / BYTES_PER_MS }
     }
-    return diagnosticFields
+    // PCM is counted only at scheduled_send; socket completion is a second
+    // observation of the same frame, not another audio sample.
+    return { ...diagnosticFields, ...pcmMetrics }
   }
   _boundaryPacket(session) {
     const packet = this._lastPacket
     if (!packet || packet.connectionGeneration !== session.connectionGeneration) return null
     return session._needsWireBoundary || packet.sessionId !== session.id ? packet : null
+  }
+  _wireDeadline(session) {
+    const packet = this._lastPacket
+    if (!packet || packet.connectionGeneration !== session.connectionGeneration) return 0
+    const boundary = session._needsWireBoundary || packet.sessionId !== session.id || session._offset === session.entry.byteLength
+    return audioFrameWireDeadline(packet.sentAt, packet.notBefore - packet.sentAt, boundary)
   }
   playFile(owner, filePath) { this._assertReady(); return new LegacyPreparationSession(this, owner, filePath) }
   startMp3Stream(owner) { this._assertReady(); return new LegacyPreparationSession(this, owner, null) }
@@ -358,8 +372,13 @@ class PreparedPcmSession {
     this._activated = false
     this._startNotified = false
     this._needsWireBoundary = true
+    this._resetPacing = false
     this._boundaryWaitLogged = false
     this._tailRemaining = 0
+    this._pcmSamples = 0
+    this._pcmNonzeroSamples = 0
+    this._pcmPeak = 0
+    this._pcmSumSquares = 0
     this.promise = new Promise((resolve, reject) => { this._resolve = resolve; this._reject = reject })
     this.ready = new Promise((resolve, reject) => { this._readyResolve = resolve; this._readyReject = reject })
     this.ready.catch(() => {})
@@ -369,6 +388,23 @@ class PreparedPcmSession {
   _metadata(fields = {}) {
     return { sessionId: this.id, utteranceId: this.opts.utteranceId,
       source: this.opts.source || (this.opts.role === 'cruise' ? 'point' : this.opts.role), ...fields }
+  }
+  _measurePcm(buffer) {
+    // Bounded to one frame (normally 320 samples), without retaining its audio.
+    // Measure after gain so diagnostics can distinguish mute from audible data.
+    let pcmPeak = 0, pcmSumSquares = 0, pcmNonzeroSamples = 0
+    const pcmSamples = buffer.length / 2
+    for (let offset = 0; offset < buffer.length; offset += 2) {
+      const sample = buffer.readInt16LE(offset)
+      if (sample !== 0) pcmNonzeroSamples++
+      pcmPeak = Math.max(pcmPeak, Math.abs(sample))
+      pcmSumSquares += sample * sample
+    }
+    this._pcmSamples += pcmSamples
+    this._pcmNonzeroSamples += pcmNonzeroSamples
+    this._pcmPeak = Math.max(this._pcmPeak, pcmPeak)
+    this._pcmSumSquares += pcmSumSquares
+    return { pcmPeak, pcmSumSquares, pcmSamples, pcmNonzeroSamples }
   }
   async initialize() {
     try {
@@ -408,8 +444,13 @@ class PreparedPcmSession {
   _schedule() {
     if (!this.active || this.paused || !this._readerReady || this._timer !== null) return
     const now = this.router._now()
-    if (!this._nextAt || now - this._nextAt > 200) this._nextAt = now
-    this._timer = this.router._schedule(() => this._tick(), Math.max(0, this._nextAt - now))
+    if (!this._nextAt) this._nextAt = now
+    // An incoming speaker must first claim/pause the old sender. _tick still
+    // enforces the wire boundary before notifying start or consuming PCM.
+    const wireDeadline = this._activated ? this.router._wireDeadline(this) : 0
+    this._timer = scheduleAudioFrame(() => this._tick(), {
+      deadline: this._nextAt, wireDeadline, now, schedule: this.router._schedule,
+    })
   }
   _tick() {
     this._timer = null
@@ -438,6 +479,24 @@ class PreparedPcmSession {
           return
         }
       }
+      const wireDeadline = this.router._wireDeadline(this)
+      if (this.router._now() < Math.max(this._nextAt, wireDeadline)) {
+        // Physical spacing must not overwrite the nominal phase. Doing so
+        // turns each late Windows wake into permanent cumulative slowdown.
+        this._schedule()
+        return
+      }
+      const flow = this.router.robot.getAudioSendState?.({
+        generation: this.connectionGeneration, drain: this._offset === this.entry.byteLength,
+      })
+      if (flow && !flow.writable) {
+        // Keep the unread PCM and sequence in place. The transport owns one
+        // bounded watchdog across pauses, sentence switches and user retries.
+        this._nextAt = this.router._now() + flow.retryAfterMs
+        this._resetPacing = true
+        this._schedule()
+        return
+      }
       if (!this._activated) {
         if (!this._startNotified) {
           if (this.opts.onAudioStart?.() === false) { this.stop(); return }
@@ -459,30 +518,31 @@ class PreparedPcmSession {
       }
       const now = this.router._now()
       const latenessMs = Math.max(0, now - this._nextAt)
-      // Rebase BEFORE adding this frame's duration. Rebasing only in the next
-      // scheduling call would immediately send a second frame after a stall.
-      // Start hooks can themselves take time. Anchor the new/resumed speaker's
-      // first deadline to its actual send, not to the time before those hooks.
-      if (this._needsWireBoundary || boundary || latenessMs > 200) this._nextAt = now
+      const resetPhase = this._needsWireBoundary || Boolean(boundary) || this._resetPacing
+      const priorPacket = this.router._lastPacket
+      const continuous = !resetPhase && this._lastAt !== null
+        && priorPacket?.sessionId === this.id && priorPacket.connectionGeneration === this.connectionGeneration
       const seq = this.sequenceState.nextSeq
       const fields = this._metadata({ seq, bytes: size, gapMs: this._lastAt === null ? null : now - this._lastAt,
-        latenessMs, generation: this.generation })
+        latenessMs, generation: this.generation,
+        pacingCorrectionMs: continuous ? Math.max(0, priorPacket.notBefore - now) : 0,
+        pacingRebaseMs: !resetPhase && latenessMs > AUDIO_SEND_POLICY.maxRecoverableLatenessMs ? latenessMs : 0 })
       const sentFields = this.router._sendFrame(this, chunk, seq, fields)
       if (!this.active) return
       if (boundary) this.router.diagnostics?.event?.('handoff', this._metadata({ reason: 'boundary', gapMs: now - boundary.sentAt }))
       this._needsWireBoundary = false
+      this._resetPacing = false
       this._boundaryWaitLogged = false
       this.sequenceState.nextSeq++
       this._offset += size
       this._lastAt = now
       this.router.diagnostics?.packet?.({ ...sentFields, stage: 'scheduled_send' })
       const durationMs = size / BYTES_PER_MS
-      // Packet cadence may catch up after a short timer stall, but a sentence
-      // cannot finish before the PCM just sent has had its computed duration.
-      // Also account for several catch-up packets sent in the same turn. This
-      // is a sender estimate, not a robot playback acknowledgment or latency.
+      // Correct ordinary jitter against the nominal phase; the separate wire
+      // guard bounds physical spacing. Recover moderate stalls gradually; a
+      // large stall or transport wait starts a fresh phase without a burst.
       this._estimatedEnd = Math.max(this._estimatedEnd ?? now, now) + durationMs
-      this._nextAt += durationMs
+      this._nextAt = nextAudioFrameDeadline(this._nextAt, now, durationMs, resetPhase)
       if (this._offset === this.entry.byteLength) this._nextAt = this._estimatedEnd
       this._schedule()
     } catch (err) { this.fail(err) }
@@ -514,7 +574,11 @@ class PreparedPcmSession {
   }
   _finish() {
     this.router.diagnostics?.event?.('robot_audio_sent', this._metadata({ bytes: this._offset,
-      elapsedMs: this.router._now() - this._startedAt, playbackAcknowledged: false }))
+      audioDurationMs: this._offset / BYTES_PER_MS,
+      elapsedMs: this.router._now() - this._startedAt, playbackAcknowledged: false,
+      robotVolumePercent: this.router._config.robotVolumePercent,
+      pcmSamples: this._pcmSamples, pcmNonzeroSamples: this._pcmNonzeroSamples,
+      pcmPeak: this._pcmPeak, pcmRms: this._pcmSamples ? Math.sqrt(this._pcmSumSquares / this._pcmSamples) : 0 }))
     this._settle({ ok: true })
   }
 }

@@ -2,6 +2,8 @@ import { DoubaoProvider }  from './providers/doubao.js'
 import { DeepseekProvider } from './providers/deepseek.js'
 import { QwenProvider } from './providers/qwen.js'
 import { BannedWordFilter } from './banned-word-filter.js'
+import { buildStationaryPrompt } from './stationary-prompt.js'
+import { readStationaryPrompt, readStationaryOptions } from './stationary-prompt-store.js'
 
 export class LLMRewriter {
   constructor(config = {}) {
@@ -54,6 +56,22 @@ export class LLMRewriter {
     } finally { clearTimeout(timer) }
   }
 
+  async rewriteStationary(body, { signal, previousText = '', iteration = 1 } = {}) {
+    signal?.throwIfAborted()
+    const { system, user } = buildStationaryPrompt(body, {
+      system: readStationaryPrompt(), ...readStationaryOptions(), previousText, iteration,
+    })
+    const result = await this._tryProviderCustom(this.primary, system, user, { signal })
+      || await this._tryProviderCustom(this.fallback, system, user, { signal })
+    signal?.throwIfAborted()
+    if (!result?.text?.trim()) throw new Error('原地播报改写失败，请检查“巡游讲解”的 LLM 配置；未播放原文')
+    const cleaned = this.filter.clean(result.text, '')
+    if (!cleaned.text.trim() || cleaned.text.includes('[[NO_SPEECH]]')) {
+      throw new Error('原地播报改写未生成可播放内容，请检查输入资料、提示词或违禁词设置')
+    }
+    return { text: cleaned.text, source: 'llm', provider: result.provider }
+  }
+
   async rewriteBarrage(system, user) {
     let result = await this._tryProviderCustom(this.primary, system, user)
 
@@ -77,9 +95,12 @@ export class LLMRewriter {
     return result?.text ?? null
   }
 
-  async _tryProviderCustom(provider, system, user) {
+  async _tryProviderCustom(provider, system, user, { signal } = {}) {
+    signal?.throwIfAborted()
     if (!provider) return null
     const controller = new AbortController()
+    const abort = () => controller.abort(signal.reason)
+    signal?.addEventListener('abort', abort, { once: true })
     const timer = setTimeout(() => controller.abort(new Error('timeout')), this.timeoutMs)
     try {
       // Both custom providers propagate this signal through fetch/body reads.
@@ -88,9 +109,13 @@ export class LLMRewriter {
       const text = await provider.rewriteCustom(system, user, { signal: controller.signal })
       return { text, provider: provider.name }
     } catch (err) {
+      if (signal?.aborted) throw signal.reason
       console.error(`[LLM] Custom rewrite with ${provider.name} failed:`, err.message)
       return null
-    } finally { clearTimeout(timer) }
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+    }
   }
 
 }

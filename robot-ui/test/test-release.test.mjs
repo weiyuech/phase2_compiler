@@ -8,7 +8,7 @@ const commit = 'a'.repeat(40)
 const otherCommit = 'b'.repeat(40)
 const tagObject = 'c'.repeat(40)
 const tag = 'v1.0.2-test.3'
-const checkNames = ['runtime', 'packaged-layout', 'ffmpeg-pcm', 'ffplay', 'windows-pause-resume', 'sharp', 'onnx-models', 'ocr-pipeline', 'packaged-native-bindings']
+const checkNames = ['runtime', 'packaged-layout', 'audio-send-cadence', 'ffmpeg-pcm', 'ffplay', 'windows-pause-resume', 'sharp', 'onnx-models', 'ocr-pipeline', 'packaged-native-bindings']
 const environment = () => ({
   GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'push', GITHUB_REF: `refs/tags/${tag}`,
   GITHUB_SHA: commit, GITHUB_REPOSITORY: 'example/robot', GITHUB_SERVER_URL: 'https://github.com',
@@ -205,6 +205,12 @@ test('native report requires all named passed checks and only exports allowed me
   assert.equal(JSON.stringify(validated).includes('privateDetail'), false)
   report.checks[0].status = 'failed'
   assert.throws(() => validateNativeReport(report), /did not pass/)
+})
+
+test('a native report without the real audio cadence gate cannot qualify a release', () => {
+  const report = nativeReport()
+  report.checks = report.checks.filter(check => check.name !== 'audio-send-cadence')
+  assert.throws(() => validateNativeReport(report), /missing required checks/)
 })
 
 test('failed or incomplete native verification prevents release creation', async () => {

@@ -12,6 +12,53 @@ export function throwIfAborted(signal) {
 // common abbreviations/initials and decimal points before considering a period.
 const ABBREVIATIONS = /(?:\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e)|(?:\b[A-Za-z]\.)+[A-Za-z])\.$/i
 const CLOSERS = /[”’"'」』）)\]】》]/
+const MAX_SENTENCE_CODEPOINTS = 500
+const NUMBER_CHARACTER = /[0-9０-９]/u
+
+function splitsNumber(characters, index) {
+  const left = characters[index - 1], right = characters[index]
+  return (NUMBER_CHARACTER.test(left || '') && /[0-9０-９.,，．]/u.test(right || ''))
+    || (/[.,，．]/u.test(left || '') && NUMBER_CHARACTER.test(right || ''))
+}
+
+function splitLongSentence(sentence) {
+  if (sentence.length <= MAX_SENTENCE_CODEPOINTS) return [sentence]
+  // Count code points rather than UTF-16 units, so a fallback cut never splits
+  // a surrogate pair. Short sentences retain the existing punctuation rules.
+  const characters = Array.from(sentence)
+  const parts = []
+  let start = 0
+  while (characters.length - start > MAX_SENTENCE_CODEPOINTS) {
+    const limit = start + MAX_SENTENCE_CODEPOINTS
+    const minimum = start + Math.floor(MAX_SENTENCE_CODEPOINTS / 2)
+    let end = limit
+    let separatorFound = false
+    for (let boundary = limit; boundary >= minimum; boundary--) {
+      if (/[，,、\s]/u.test(characters[boundary - 1]) && !splitsNumber(characters, boundary)) {
+        end = boundary
+        separatorFound = true
+        break
+      }
+    }
+    if (!separatorFound) {
+      // Keep an ordinary decimal/thousands-separated number together when a
+      // nearby cut is available. An exceptionally long numeric token is still
+      // bounded by the same limit rather than becoming an unbounded TTS unit.
+      while (end > minimum && splitsNumber(characters, end)) end--
+      if (splitsNumber(characters, end)) end = limit
+    }
+    // Keep punctuation and all spoken content. Trim only the new boundaries,
+    // matching the existing sentence-boundary whitespace normalization and
+    // avoiding whitespace-only synthesis requests after a long whitespace run.
+    const part = characters.slice(start, end).join('').trim()
+    if (part) parts.push(part)
+    start = end
+  }
+  const tail = characters.slice(start).join('').trim()
+  if (tail) parts.push(tail)
+  return parts
+}
+
 export function splitSentences(text) {
   const value = String(text || '').trim()
   if (!value) return []
@@ -35,7 +82,7 @@ export function splitSentences(text) {
   }
   const tail = value.slice(start).trim()
   if (tail) sentences.push(tail)
-  return sentences
+  return sentences.flatMap(splitLongSentence)
 }
 
 export function snapshotVoice(client) {
@@ -209,25 +256,32 @@ export class PreparedTextSource {
     }
     const text = this.sentences[index]
     const key = sentenceCacheKey(text, this.client)
-    const unit = { handle: null, scheduled: null, promise: null }
+    const unit = { handle: null, scheduled: null, promise: null, controller: null }
     this.units.set(index, unit)
     const cached = this.cache.acquire(key)
     if (cached) {
       unit.handle = cached
       unit.promise = Promise.resolve({ text, index, key, buffer: cached.buffer })
     } else {
+      // A reusable source can finish a playback early without being destroyed.
+      // Retiring its window must also cancel obsolete synthesis, so those calls
+      // cannot keep the shared provider slots occupied until their timeout.
+      unit.controller = new AbortController()
+      const signal = unit.controller.signal
+      const cancel = () => unit.controller.abort()
+      this.signal.addEventListener('abort', cancel, { once: true })
       const started = performance.now()
       this.diagnostics?.event?.('prepare-start', { source: this.role === 'cruise' ? 'point' : this.role, sessionId: this.sessionId, sentenceIndex: index })
       unit.scheduled = this.scheduler.enqueue(async () => {
-        throwIfAborted(this.signal)
+        throwIfAborted(signal)
         const reusable = this.cache.acquire(key)
         if (reusable) return reusable
-        const buffer = await synthesizeSentence(this.client, text, { signal: this.signal, maxBytes: this.cache.maxBytes })
-        throwIfAborted(this.signal)
+        const buffer = await synthesizeSentence(this.client, text, { signal, maxBytes: this.cache.maxBytes })
+        throwIfAborted(signal)
         return this.cache.insert(key, buffer)
-      }, { signal: this.signal, priority: this.priority(speculative) })
+      }, { signal, priority: this.priority(speculative) })
       unit.promise = unit.scheduled.then(handle => {
-        if (this.signal.aborted || !this.isCurrent() || this.units.get(index) !== unit) {
+        if (signal.aborted || this.signal.aborted || !this.isCurrent() || this.units.get(index) !== unit) {
           handle.release()
           throw abortError()
         }
@@ -235,7 +289,7 @@ export class PreparedTextSource {
         this.diagnostics?.event?.('prepared', { source: this.role === 'cruise' ? 'point' : this.role, sessionId: this.sessionId,
           sentenceIndex: index, synthesisMs: performance.now() - started, bytes: handle.buffer.length })
         return { text, index, key, buffer: handle.buffer }
-      })
+      }).finally(() => this.signal.removeEventListener('abort', cancel))
     }
     unit.promise.catch(() => {}) // Prefetch errors surface when this unit is needed.
     return unit.promise
@@ -250,6 +304,7 @@ export class PreparedTextSource {
   releaseBefore(index) {
     for (const [oldIndex, unit] of this.units) {
       if (oldIndex >= index) continue
+      unit.controller?.abort()
       unit.handle?.release()
       this.units.delete(oldIndex)
     }
@@ -258,7 +313,6 @@ export class PreparedTextSource {
   release() {
     this.controller.abort()
     this._external?.removeEventListener('abort', this._abortExternal)
-    for (const unit of this.units.values()) unit.handle?.release()
-    this.units.clear()
+    this.releaseBefore(this.length)
   }
 }

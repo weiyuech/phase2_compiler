@@ -10,14 +10,24 @@ import tempfile
 import time
 import zipfile
 
-CHECKS = {'runtime', 'packaged-layout', 'ffmpeg-pcm', 'ffplay', 'windows-pause-resume',
-          'sharp', 'onnx-models', 'ocr-pipeline', 'packaged-native-bindings'}
+LEGACY_CHECKS = {'runtime', 'packaged-layout', 'ffmpeg-pcm', 'ffplay', 'windows-pause-resume',
+                 'sharp', 'onnx-models', 'ocr-pipeline', 'packaged-native-bindings'}
+CHECKS = LEGACY_CHECKS | {'audio-send-cadence'}
 ARCHIVE = 'streaming_app.zip'
 
 
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def required_checks(tag):
+    match = re.fullmatch(r'v(\d+)\.(\d+)\.(\d+)-test\.(\d+)', tag)
+    require(match is not None, 'Expected an exact test release tag')
+    # Published older artifacts cannot gain a check retroactively. New releases
+    # must not downgrade to the legacy report just because it still says passed.
+    version = tuple(int(part) for part in match.groups())
+    return CHECKS if version >= (1, 1, 0, 7) else LEGACY_CHECKS
 
 
 def command(*args):
@@ -55,6 +65,7 @@ def validate_release(release, tag, commit):
 
 
 def validate_files(directory, release, tag, commit):
+    expected_checks = required_checks(tag)
     names = [f'Setup.{tag[1:]}.exe', 'build-info.json', 'packaged-runtime.json', 'SHA256SUMS.txt']
     require(sorted(p.name for p in directory.iterdir()) == sorted(names), 'Unexpected downloaded files')
     assets = {a['name']: a for a in release['assets']}
@@ -80,8 +91,8 @@ def validate_files(directory, release, tag, commit):
                 and artifact['bytes'] == (directory / artifact['name']).stat().st_size, 'Build artifact mismatch')
     report = json.loads((directory / 'packaged-runtime.json').read_text())
     for report in [report, manifest['nativeChecks']]:
-        require(report['status'] == 'passed' and len(report['checks']) == len(CHECKS), 'Incomplete native checks')
-        require({c['name'] for c in report['checks']} == CHECKS
+        require(report['status'] == 'passed' and len(report['checks']) == len(expected_checks), 'Incomplete native checks')
+        require({c['name'] for c in report['checks']} == expected_checks
                 and all(c['status'] == 'passed' for c in report['checks']), 'Native checks failed')
     return manifest, names
 

@@ -23,6 +23,106 @@ export const MODEL_FILES = Object.freeze([
   'PP-OCRv6_medium_det.onnx', 'PP-OCRv6_medium_rec.onnx', 'ppocrv6_dict.txt',
 ])
 export const FIXTURE_PATH = fileURLToPath(new URL('./fixtures/runtime-ocr.svg', import.meta.url))
+const AUDIO_CADENCE_FRAME_COUNT = 500
+const AUDIO_CADENCE_FRAME_MS = 20
+const AUDIO_CADENCE_MAX_DRIFT_RATIO = 0.1
+
+export function summarizeAudioSendCadence({ startedAt, finishedAt, sendTimes, deadlineLatenessMs,
+  earlyWakeups = 0, cpuUserMicros = 0, cpuSystemMicros = 0 }) {
+  assert.ok(Number.isFinite(startedAt) && Number.isFinite(finishedAt) && finishedAt > startedAt,
+    'Audio cadence requires a finite, positive measurement interval')
+  assert.equal(sendTimes.length, AUDIO_CADENCE_FRAME_COUNT, 'Audio cadence must measure all 500 frames')
+  assert.equal(deadlineLatenessMs.length, sendTimes.length, 'Audio cadence is missing deadline measurements')
+  assert.ok(sendTimes.every((time, index) => Number.isFinite(time) && time >= startedAt
+    && time <= finishedAt && (!index || time > sendTimes[index - 1])), 'Audio cadence timestamps must increase')
+  assert.ok(deadlineLatenessMs.every(value => Number.isFinite(value) && value >= 0),
+    'Audio cadence must not record a frame before its nominal deadline')
+  const intervals = sendTimes.slice(1).map((time, index) => time - sendTimes[index])
+  const sorted = [...intervals].sort((a, b) => a - b)
+  const percentile = fraction => sorted[Math.ceil(sorted.length * fraction) - 1]
+  const elapsedMs = finishedAt - startedAt
+  const targetElapsedMs = AUDIO_CADENCE_FRAME_COUNT * AUDIO_CADENCE_FRAME_MS
+  const cpuMs = (cpuUserMicros + cpuSystemMicros) / 1000
+  return {
+    measurement: 'real-runtime-timers-without-robot-or-network',
+    frameCount: sendTimes.length, targetFrameMs: AUDIO_CADENCE_FRAME_MS, targetElapsedMs, elapsedMs,
+    driftMs: elapsedMs - targetElapsedMs, driftRatio: (elapsedMs - targetElapsedMs) / targetElapsedMs,
+    averageIntervalMs: (sendTimes.at(-1) - sendTimes[0]) / intervals.length,
+    minIntervalMs: sorted[0], p95IntervalMs: percentile(0.95), p99IntervalMs: percentile(0.99),
+    maxIntervalMs: sorted.at(-1), finalDrainMs: finishedAt - sendTimes.at(-1),
+    maxCumulativeDriftMs: Math.max(...sendTimes.map((time, index) => time - startedAt - index * AUDIO_CADENCE_FRAME_MS)),
+    partialOverrunFrames: deadlineLatenessMs.filter(value => value > 0 && value < AUDIO_CADENCE_FRAME_MS).length,
+    wholeFrameOverruns: deadlineLatenessMs.filter(value => value >= AUDIO_CADENCE_FRAME_MS).length,
+    maxDeadlineLatenessMs: Math.max(...deadlineLatenessMs), earlyWakeups,
+    cpuMs, cpuPercentOfOneCore: cpuMs / elapsedMs * 100,
+  }
+}
+
+export function assertAudioSendCadence(measurement, maxPacingCorrectionMs) {
+  const details = summarizeAudioSendCadence(measurement)
+  try {
+    assert.ok(Number.isFinite(maxPacingCorrectionMs) && maxPacingCorrectionMs >= 0
+      && maxPacingCorrectionMs < AUDIO_CADENCE_FRAME_MS, 'Invalid packaged audio pacing correction')
+    assert.ok(details.minIntervalMs >= AUDIO_CADENCE_FRAME_MS - maxPacingCorrectionMs,
+      'Audio cadence compressed frames below the production wire spacing')
+    assert.ok(details.finalDrainMs >= AUDIO_CADENCE_FRAME_MS, 'Audio cadence shortened the final frame drain')
+    assert.ok(details.elapsedMs >= details.targetElapsedMs, 'Audio cadence ran ahead of the PCM sample clock')
+    assert.ok(details.driftRatio <= AUDIO_CADENCE_MAX_DRIFT_RATIO,
+      `Audio cadence is too slow: ${details.elapsedMs.toFixed(1)} ms for ${details.targetElapsedMs} ms of PCM; average interval ${details.averageIntervalMs.toFixed(2)} ms`)
+  } catch (error) {
+    error.audioCadence = details
+    throw error
+  }
+  return details
+}
+
+export async function checkAudioSendCadence(policy) {
+  const { AUDIO_SEND_POLICY, nextAudioFrameDeadline, audioFrameWireDeadline, scheduleAudioFrame } = policy
+  for (const helper of [nextAudioFrameDeadline, audioFrameWireDeadline, scheduleAudioFrame]) {
+    assert.equal(typeof helper, 'function', 'Packaged audio scheduling helper is missing')
+  }
+  const sendTimes = [], deadlineLatenessMs = []
+  let earlyWakeups = 0, finishedAt
+  const cpuStarted = process.cpuUsage()
+  const startedAt = performance.now()
+  await new Promise((resolvePromise, reject) => {
+    let deadline = startedAt, wireDeadline = 0, timer, terminal = false
+    const finish = error => {
+      if (terminal) return
+      terminal = true
+      clearTimeout(timer)
+      clearTimeout(watchdog)
+      if (error) reject(error)
+      else resolvePromise()
+    }
+    const watchdog = setTimeout(() => finish(new Error('Packaged audio cadence measurement exceeded 30 seconds')), 30000)
+    const arm = () => { timer = scheduleAudioFrame(tick, { deadline, wireDeadline }) }
+    const tick = () => {
+      if (terminal) return
+      try {
+        const sentAt = performance.now()
+        // Match the sender's guard: a timer wakeup is not permission to send
+        // before either the nominal sample clock or the wire-spacing deadline.
+        if (sentAt < Math.max(deadline, wireDeadline)) { earlyWakeups++; arm(); return }
+        if (sendTimes.length === AUDIO_CADENCE_FRAME_COUNT) {
+          finishedAt = sentAt
+          finish()
+          return
+        }
+        sendTimes.push(sentAt)
+        deadlineLatenessMs.push(sentAt - deadline)
+        deadline = nextAudioFrameDeadline(deadline, sentAt, AUDIO_CADENCE_FRAME_MS)
+        wireDeadline = audioFrameWireDeadline(sentAt, AUDIO_CADENCE_FRAME_MS,
+          sendTimes.length === AUDIO_CADENCE_FRAME_COUNT)
+        arm()
+      } catch (error) { finish(error) }
+    }
+    try { arm() } catch (error) { finish(error) }
+  })
+  const cpu = process.cpuUsage(cpuStarted)
+  return assertAudioSendCadence({ startedAt, finishedAt, sendTimes, deadlineLatenessMs, earlyWakeups,
+    cpuUserMicros: cpu.user, cpuSystemMicros: cpu.system }, AUDIO_SEND_POLICY?.maxPacingCorrectionMs)
+}
 
 export function parseArguments(argv) {
   const options = { localPreflight: false }
@@ -204,7 +304,8 @@ export async function verifyPackagedRuntime({ backendRoot, localPreflight = fals
       await snapshot()
       return true
     } catch (error) {
-      report.checks.push({ name, status: 'failed', durationMs: performance.now() - started, error: cleanError(error) })
+      report.checks.push({ name, status: 'failed', durationMs: performance.now() - started, error: cleanError(error),
+        ...(name === 'audio-send-cadence' && error.audioCadence ? { details: error.audioCadence } : {}) })
       await snapshot()
       return false
     }
@@ -240,6 +341,11 @@ export async function verifyPackagedRuntime({ backendRoot, localPreflight = fals
     }
     requireBackend = createRequire(join(root, 'package.json'))
     return { files }
+  })
+  await check('audio-send-cadence', async () => {
+    // Measure the exact packaged production helper before native OCR work. This
+    // exercises real Windows/Electron timers, with no fake or physical receiver.
+    return checkAudioSendCadence(await importPackaged(root, 'src/robot/audio-send-policy.js'))
   })
   await check('ffmpeg-pcm', async () => {
     const resolved = await dependency('ffmpeg-static')
