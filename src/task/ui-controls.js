@@ -12,11 +12,13 @@ export function getTourState(tour) {
 }
 
 /** These UI handlers never take ownership away from a running/paused tour. */
-export function registerTourControls({ uiBridge, tour, tts, stationaryTts, stationaryLlm, logger = console }) {
+export function registerTourControls({ uiBridge, tour, tts, stationaryTts, stationaryLlm, stationaryLibrary, logger = console }) {
   let manualActive = false
   const stationary = new StationarySpeech({
     tts: stationaryTts,
     llm: stationaryLlm,
+    library: stationaryLibrary,
+    onLibraryChange: () => uiBridge.broadcast('STATIONARY_LIBRARY', stationaryLibrary.snapshot()),
     onState: state => {
       publishStationaryState()
       if (state.state === 'failed') {
@@ -28,10 +30,26 @@ export function registerTourControls({ uiBridge, tour, tts, stationaryTts, stati
   const snapshot = () => ({ ...stationary.snapshot(), manualActive })
   const publishStationaryState = () => uiBridge.broadcast('STATIONARY_SPEECH_STATE', snapshot())
   uiBridge.on('onGetStationarySpeechState', reply => reply('STATIONARY_SPEECH_STATE', snapshot()))
+  if (stationaryLibrary) {
+    uiBridge.on('onGetStationaryLibrary', reply => reply('STATIONARY_LIBRARY', stationaryLibrary.snapshot()))
+    uiBridge.on('onUpdateStationaryGroup', (changes, reply) => {
+      const requestId = changes?.requestId
+      try {
+        if (!changes || typeof changes !== 'object') throw new Error('定点资料无效')
+        if (stationary.active && changes.groupId === stationary.snapshot().groupId) throw new Error('请先停止当前定点播放，再编辑资料')
+        const group = changes.groupId !== undefined
+          ? stationaryLibrary.updateGroup(changes.groupId, changes) : stationaryLibrary.createGroup(changes.name)
+        uiBridge.broadcast('STATIONARY_LIBRARY', stationaryLibrary.snapshot())
+        reply('STATIONARY_GROUP_SAVED', { groupId: group.id, requestId })
+      } catch (error) {
+        reply('STATIONARY_GROUP_SAVED', { error: error.message, requestId })
+      }
+    })
+  }
   uiBridge.on('onStartStationarySpeech', payload => {
     try {
-      if (tour.isRunning || tour.isPaused) throw new Error('请先停止巡游，再进行原地播报')
-      if (manualActive) throw new Error('请等待手动播报结束，再进行原地播报')
+      if (tour.isRunning || tour.isPaused) throw new Error('请先停止巡游，再进行定点播放')
+      if (manualActive) throw new Error('请等待手动播报结束，再进行定点播放')
       stationary.start(payload)
     } catch (error) {
       publishStationaryState()
@@ -51,7 +69,7 @@ export function registerTourControls({ uiBridge, tour, tts, stationaryTts, stati
     }
     if (stationary.active || manualActive) {
       publishStationaryState()
-      uiBridge.broadcast('ERROR', { message: stationary.active ? '请先停止原地播报，再进行手动播报测试' : '手动播报正在进行，请等待结束' })
+      uiBridge.broadcast('ERROR', { message: stationary.active ? '请先停止定点播放，再进行手动播报测试' : '手动播报正在进行，请等待结束' })
       return
     }
     const status = (state, message) => {
@@ -84,7 +102,7 @@ export function registerTourControls({ uiBridge, tour, tts, stationaryTts, stati
     stationary,
     snapshot,
     canStartTour() {
-      const message = stationary.active ? '请先停止原地播报，再开始巡游'
+      const message = stationary.active ? '请先停止定点播放，再开始巡游'
         : manualActive ? '请等待手动播报结束，再开始巡游' : ''
       if (message) uiBridge.broadcast('ERROR', { message })
       return !message

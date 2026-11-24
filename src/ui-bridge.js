@@ -32,6 +32,8 @@ const handlers = {
   onStartStationarySpeech: null,
   onStopStationarySpeech: null,
   onGetStationarySpeechState: null,
+  onGetStationaryLibrary: null,
+  onUpdateStationaryGroup: null,
   onGetKbMaps:     null,
   onGetKbList:     null,
   onGetKbPaths:    null,
@@ -223,6 +225,13 @@ function listen(port, isFallback) {
           case 'TEST_SPEECH':
             handlers.onTestSpeech?.(msgData.text)
             break
+          case 'GET_STATIONARY_LIBRARY':
+          case 'UPDATE_STATIONARY_GROUP': {
+            const reply = (type, data) => ws.send(JSON.stringify({ type, data, ts: Date.now() }))
+            if (type === 'GET_STATIONARY_LIBRARY') handlers.onGetStationaryLibrary?.(reply)
+            else handlers.onUpdateStationaryGroup?.(msgData, reply)
+            break
+          }
           case 'START_STATIONARY_SPEECH':
             handlers.onStartStationarySpeech?.(msgData)
             break

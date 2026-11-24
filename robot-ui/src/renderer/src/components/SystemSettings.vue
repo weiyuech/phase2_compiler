@@ -69,17 +69,17 @@
 
           <div>
             <div class="prompt-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-              <span class="section-sub-title" style="color: var(--text); font-size: 13px; font-weight: 600;">原地播报改写提示词</span>
+              <span class="section-sub-title" style="color: var(--text); font-size: 13px; font-weight: 600;">定点播放改写提示词</span>
               <div style="display: flex; align-items: center; gap: 6px;">
                 <span style="font-size: 12px; color: var(--text-dim)">自定义</span>
-                <el-switch v-model="customStationaryEnabled" size="small" aria-label="自定义原地播报提示词" @change="handleStationarySwitch" />
+                <el-switch v-model="customStationaryEnabled" size="small" aria-label="自定义定点播放提示词" @change="handleStationarySwitch" />
               </div>
             </div>
-            <el-input v-model="stationaryPromptText" type="textarea" :rows="7" class="prompt-textarea" aria-label="原地播报改写提示词" :disabled="!customStationaryEnabled" />
+            <el-input v-model="stationaryPromptText" type="textarea" :rows="7" class="prompt-textarea" aria-label="定点播放改写提示词" :disabled="!customStationaryEnabled" />
             <div class="stationary-style-field" :class="{ inactive: customStationaryEnabled }">
               <label for="stationary-style-input">补充风格要求（可选）</label>
               <el-input id="stationary-style-input" v-model="stationaryStylePrompt" type="textarea" :rows="2" :maxlength="1000"
-                placeholder="可留空，例如：搞怪一点，激情一点" aria-label="原地播报补充风格要求" :disabled="customStationaryEnabled" />
+                placeholder="可留空，例如：搞怪一点，激情一点" aria-label="定点播放补充风格要求" :disabled="customStationaryEnabled" />
               <p class="panel-note">{{ customStationaryEnabled ? '自定义模式下此项不生效；已填写的风格要求会保留。' : '仅在默认模式生效；留空沿用默认风格，风格变化不改变事实。' }}</p>
             </div>
             <p class="panel-note">使用“巡游讲解”的 LLM，每轮依据原始输入重新改写，参考上一版措辞减少重复。关闭自定义可恢复默认；保存后从尚未开始准备的轮次生效。</p>
@@ -213,7 +213,7 @@
         <div class="panel-header">音频输出</div>
         <div class="panel-body">
           <p class="panel-note" style="margin: 0 0 18px">
-            统一控制巡游讲解、原地播报、弹幕回复、过渡音频和手动播报测试的输出位置。
+            统一控制巡游讲解、定点播放、弹幕回复、过渡音频和手动播报测试的输出位置。
           </p>
 
           <div class="params-grid" style="max-width: 620px">
@@ -283,7 +283,7 @@ const navItems = [
 const activeSection = ref('cruise')
 const speechProfileTitles = { cruise: '巡游讲解', transit: '过渡音频与手动播报', barrage: '弹幕回复' }
 const speechProfileDescriptions = {
-  cruise: '用于机器人到达点位后的讲解，以及原地播报的文字改写和语音合成。原地播报使用本组 LLM、TTS 密钥与音色，独立提示词在“改写提示词”中设置。',
+  cruise: '用于机器人到达点位后的讲解，以及定点播放的文字改写和语音合成。定点播放使用本组 LLM、TTS 密钥与音色，独立提示词在“改写提示词”中设置。',
   transit: '用于过渡音频的文字改写与语音合成，以及手动播报测试的语音合成。过渡文字、音频文件和启用开关在“播报控制 → 过渡音频”设置。',
   barrage: '用于弹幕问题判断、回复生成和回复语音合成。',
 }
@@ -407,7 +407,7 @@ async function loadPrompt() {
   promptLoaded.value = false
   try {
     const stationary = await window.api.readStationaryPrompt()
-    if (!stationary.ok) throw new Error(stationary.error || '原地播报提示词读取失败')
+    if (!stationary.ok) throw new Error(stationary.error || '定点播放提示词读取失败')
     stationaryPromptText.value = stationary.text || DEFAULT_STATIONARY_PROMPT
     stationaryStylePrompt.value = stationary.stylePrompt || ''
     customStationaryEnabled.value = typeof stationary.customEnabled === 'boolean' ? stationary.customEnabled : !isDefaultMatch(stationary.text, DEFAULT_STATIONARY_PROMPT)
@@ -509,7 +509,7 @@ async function savePrompt() {
   if (!window.api) return
   if (!promptLoaded.value) { ElMessage.error('提示词尚未完整加载，请重新进入设置页后再试'); return }
   if (!stationaryPromptText.value.trim() || stationaryPromptText.value.length > 32000) {
-    ElMessage.error('原地播报提示词不能为空且不能超过 32000 字符'); return
+    ElMessage.error('定点播放提示词不能为空且不能超过 32000 字符'); return
   }
   if (stationaryStylePrompt.value.length > 1000) { ElMessage.error('补充风格要求不能超过 1000 字符'); return }
   savingPrompt.value = true
@@ -527,7 +527,7 @@ async function savePrompt() {
     if (!resGen.ok) throw new Error(resGen.error || '保存失败')
 
     const stationary = await window.api.writeStationaryPrompt(stationaryPromptText.value, stationaryStylePrompt.value.trim() || null, customStationaryEnabled.value)
-    if (!stationary.ok) throw new Error(stationary.error || '原地播报提示词保存失败')
+    if (!stationary.ok) throw new Error(stationary.error || '定点播放提示词保存失败')
 
     props.wsRef?.value?.send(JSON.stringify({ type: 'RELOAD_PROMPT' }))
     promptSavedOk.value = true

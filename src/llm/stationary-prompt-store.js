@@ -21,7 +21,7 @@ export function readStationaryOptions(file = stationaryPromptPath()) {
   try {
     const options = JSON.parse(readFileSync(resolve(dirname(file), 'stationary-options.json'), 'utf8'))
     if (typeof options.customEnabled !== 'boolean' || (options.stylePrompt !== null && typeof options.stylePrompt !== 'string')) {
-      throw new Error('原地播报风格配置格式无效')
+      throw new Error('定点播放风格配置格式无效')
     }
     return options
   } catch (error) {
@@ -36,7 +36,7 @@ export function readStationaryStylePrompt(file = stationaryPromptPath()) {
 
 export function writeStationaryPrompt(text, file = stationaryPromptPath(), stylePrompt, customEnabled) {
   if (typeof text !== 'string' || !text.trim() || text.length > 32000) {
-    throw new Error('原地播报提示词不能为空且不能超过 32000 字符')
+    throw new Error('定点播放提示词不能为空且不能超过 32000 字符')
   }
   if (stylePrompt !== undefined && stylePrompt !== null && (typeof stylePrompt !== 'string' || stylePrompt.length > 1000)) {
     throw new Error('补充风格要求须为文本或留空，且不能超过 1000 字符')

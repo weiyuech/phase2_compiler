@@ -1,4 +1,6 @@
 import { app, BrowserWindow, dialog, utilityProcess, systemPreferences, desktopCapturer, shell } from 'electron'
+import { copyFile } from 'node:fs/promises'
+import { StationaryLibrary } from '../../../src/task/stationary-library.js'
 import { join }                        from 'path'
 import { readFileSync, writeFileSync, existsSync, cpSync, renameSync, rmSync } from 'fs'
 import { scryptSync, randomBytes, timingSafeEqual } from 'crypto'
@@ -595,6 +597,19 @@ ipcMain.handle('select-multiple-mp3-files', async (event) => {
   })
   if (canceled || filePaths.length === 0) return []
   return filePaths
+})
+
+ipcMain.handle('export-stationary-audio', async (event, groupId, recordingId) => {
+  const library = new StationaryLibrary(join(USER_DATA_DIR, 'data', 'stationary-playback'))
+  const source = library.recordingPath(groupId, recordingId)
+  const win = BrowserWindow.fromWebContents(event.sender) || ownerWindow
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    title: '导出定点录音', defaultPath: '定点录音-' + recordingId.slice(0, 8) + '.mp3',
+    filters: [{ name: 'MP3 音频', extensions: ['mp3'] }],
+  })
+  if (canceled || !filePath) return false
+  await copyFile(source, filePath)
+  return true
 })
 
 ipcMain.handle('export-tts-audio', async (event, hash, defaultFilename) => {

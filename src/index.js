@@ -32,6 +32,7 @@ import { RobotListener }               from './robot/listener.js'
 import { TaskManager }                 from './task/manager.js'
 import { CruiseController }            from './task/cruise-controller.js'
 import { createPointNarrator }          from './task/point-narrator.js'
+import { StationaryLibrary } from './task/stationary-library.js'
 import { getTourState, registerTourControls } from './task/ui-controls.js'
 import * as uiBridge                   from './ui-bridge.js'
 import { startTunnel, stopTunnel }     from './tunnel.js'
@@ -142,7 +143,9 @@ const phase2 = initPhase2({
   onBarrageSpeechEnd: updateCruisingDucking,
 })
 
-const tourControls = registerTourControls({ uiBridge, tour, tts: manualTts, stationaryTts, stationaryLlm: llm })
+const tourControls = registerTourControls({ uiBridge, tour, tts: manualTts, stationaryTts, stationaryLlm: llm,
+  stationaryLibrary: new StationaryLibrary(join(DATA_DIR, 'stationary-playback')),
+})
 
 // ── State snapshot for late-joining UI clients ────────────────────────────────
 
@@ -650,7 +653,7 @@ uiBridge.on('onSetAudioOutputConfig', (config) => {
       // Never leave a previous destination playing after the user switches.
       // Volume-only changes are applied by the router without cancelling speech.
       destinationChanged = true
-      tourControls.stationary.stop('音频输出已更改，原地播报已停止')
+      tourControls.stationary.stop('音频输出已更改，定点播放已停止')
       audioOutputGeneration++
       speechCoordinator.cancelAll()
       tts.stop()
@@ -796,7 +799,7 @@ async function playPoint(item, point, context = {}) {
 }
 
 function invalidateRobotSpeech() {
-  tourControls.stationary.stop('机器人连接已更改，原地播报已停止')
+  tourControls.stationary.stop('机器人连接已更改，定点播放已停止')
   audioOutputGeneration++
   speechCoordinator.cancelAll()
   tts.stop()

@@ -43,9 +43,17 @@
     </div>
 
     <div class="controls-grid">
+      <div class="stationary-column">
+        <StationaryPlayback ref="stationaryPanel" :groups="stationaryGroups" :send="send"
+          :active="stationaryActive" :pending="stationaryCommandPending" :connected="wsConnected"
+          :status="stationaryStatusLabel" :iteration="stationaryIteration" :message="stationaryMessage"
+          :blocked="stationaryDisabledReason" :state-group-id="stationaryGroupId" :playing-id="stationaryRecordingId"
+          :rewritten-text="stationaryRewrittenText" :can-stop="canStopStationary"
+          @start="startStationary" @stop="stopStationary" />
       <section class="control-card transit-card" aria-label="过渡音频">
         <TransitAudioSettings :ws-ref="props.wsRef" />
       </section>
+      </div>
 
       <div class="controls-side">
         <section class="control-card barrage-card" aria-label="弹幕识别">
@@ -96,31 +104,7 @@
           </div>
         </section>
 
-        <section class="control-card stationary-card" aria-label="原地播报">
-          <div class="control-heading">
-            <div class="card-title">原地播报</div>
-            <div class="status-pill" :class="stationaryActive ? 'running' : 'dim'" role="status">
-              {{ stationaryStatusLabel }}
-              <span v-if="stationaryActive && stationaryIteration > 0"> · 第 {{ stationaryIteration }} 轮</span>
-            </div>
-          </div>
-          <p class="hint speech-profile-hint">使用“系统设置 → 巡游讲解”的 LLM 与音色，先改写再播报；循环时提前改写下一轮。专用提示词可在“系统设置 → 改写提示词”中调整。</p>
-          <div class="stationary-view-switch" role="group" aria-label="查看原文或改写稿">
-            <button type="button" :aria-pressed="stationaryView === 'original'" @click="stationaryView = 'original'">原文</button>
-            <button type="button" :aria-pressed="stationaryView === 'rewritten'" @click="stationaryView = 'rewritten'">改写稿<span v-if="stationaryRewrittenIteration"> · 第 {{ stationaryRewrittenIteration }} 轮</span></button>
-          </div>
-          <el-input v-if="stationaryView === 'original'" v-model="stationaryText" placeholder="输入原地播报文字…" type="textarea" :rows="4" aria-label="原地播报文字" :readonly="stationaryActive || stationaryCommandPending" />
-          <el-input v-else :model-value="stationaryRewrittenText" placeholder="开始播报后，这里显示每轮生成的改写稿" type="textarea" :rows="4" aria-label="原地播报改写稿" readonly />
-          <p class="hint">切换仅用于查看；始终播报每轮改写稿。{{ stationaryActive ? '运行中的原文保持不变。' : '' }}</p>
-          <p v-if="stationaryView === 'rewritten' && stationaryActive && stationaryIteration > stationaryRewrittenIteration" class="hint">正在生成第 {{ stationaryIteration }} 轮{{ stationaryRewrittenIteration ? '，当前显示上一轮改写稿。' : '改写稿…' }}</p>
-          <div class="btn-row test-actions">
-            <el-checkbox v-model="stationaryLoop" :disabled="stationaryActive || stationaryCommandPending">循环播报</el-checkbox>
-            <el-button type="primary" :disabled="!canStartStationary" @click="startStationary">开始播报</el-button>
-            <el-button type="danger" :disabled="!canStopStationary" @click="stopStationary">停止播报</el-button>
-          </div>
-          <p v-if="stationaryDisabledReason" class="hint" role="status">{{ stationaryDisabledReason }}</p>
-          <p v-if="stationaryMessage" class="hint" role="status">{{ stationaryMessage }}</p>
-        </section>
+
 
         <section class="control-card test-card" aria-label="手动播报测试">
           <div class="control-heading"><div class="card-title">手动播报测试</div></div>
@@ -149,6 +133,7 @@
 <script setup>
 import { ref, computed, watch, onUnmounted, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
+import StationaryPlayback from './StationaryPlayback.vue'
 import TransitAudioSettings from './TransitAudioSettings.vue'
 
 const props = defineProps({ wsRef: Object })
@@ -159,11 +144,11 @@ const testText   = ref('')
 const tourStatus = ref('idle')   // idle | running | paused | finished
 const tourStateKnown = ref(false)
 const tourIsActive = computed(() => tourStatus.value === 'running' || tourStatus.value === 'paused')
-const stationaryText = ref('')
-const stationaryView = ref('original')
+const stationaryPanel = ref(null)
+const stationaryGroups = ref([])
+const stationaryGroupId = ref(null)
+const stationaryRecordingId = ref(null)
 const stationaryRewrittenText = ref('')
-const stationaryRewrittenIteration = ref(0)
-const stationaryLoop = ref(false)
 const stationaryState = ref('idle')
 const stationaryStateKnown = ref(false)
 const stationaryActive = ref(false)
@@ -203,7 +188,7 @@ const testSpeechDisabledReason = computed(() => {
   if (!tourStateKnown.value) return '正在同步巡游状态，暂不能测试播报；将自动重试'
   if (tourIsActive.value) return '请先停止巡游，再进行手动播报测试'
   if (!stationaryStateKnown.value) return '正在同步播报状态，暂不能测试播报；将自动重试'
-  if (stationaryActive.value || stationaryCommandPending.value) return '请先停止原地播报，再进行手动播报测试'
+  if (stationaryActive.value || stationaryCommandPending.value) return '请先停止定点播放，再进行手动播报测试'
   if (manualActive.value || manualPending.value) return '手动播报正在进行，请等待结束'
   if (!testText.value.trim()) return '请先输入测试文本'
   return ''
@@ -212,11 +197,10 @@ const canTestSpeech = computed(() => !testSpeechDisabledReason.value)
 const stationaryDisabledReason = computed(() => {
   if (!wsConnected.value) return '后端未连接，请等待重新连接'
   if (!tourStateKnown.value || !stationaryStateKnown.value) return '正在同步播报状态，将自动重试'
-  if (tourIsActive.value) return '请先停止巡游，再开始原地播报'
+  if (tourIsActive.value) return '请先停止巡游，再开始定点播放'
   if (stationaryCommandPending.value) return '指令已发送，等待后端确认…'
   if (stationaryActive.value) return ''
-  if (manualActive.value || manualPending.value) return '请等待手动播报结束，再开始原地播报'
-  if (!stationaryText.value.trim()) return '请输入播报资料，系统将改写后朗读；默认播报一次'
+  if (manualActive.value || manualPending.value) return '请等待手动播报结束，再开始定点播放'
   return ''
 })
 const canStartStationary = computed(() => !stationaryDisabledReason.value && !stationaryActive.value)
@@ -239,7 +223,7 @@ function send(type, data = {}) {
     ElMessage.error('后端未连接，指令未发送，请等待重新连接')
     return false;
   }
-  console.log('[WebSocket Send]', type, data);
+  console.log('[WebSocket Send]', type);
   socket.send(JSON.stringify({ type, data }));
   return true;
 }
@@ -254,6 +238,12 @@ function handleMessage(raw) {
         manualActive.value = data.state === 'preparing' || data.state === 'playing'
         manualPending.value = false
         break
+      case 'STATIONARY_LIBRARY':
+        if (Array.isArray(data?.groups)) stationaryGroups.value = data.groups
+        break
+      case 'STATIONARY_GROUP_SAVED':
+        stationaryPanel.value?.saved(data)
+        break
       case 'STATIONARY_SPEECH_STATE':
         if (!stationaryStates.has(data?.state) || typeof data.active !== 'boolean'
           || typeof data.loop !== 'boolean' || typeof data.manualActive !== 'boolean') {
@@ -266,9 +256,8 @@ function handleMessage(raw) {
         stationaryIteration.value = Number.isInteger(data.iteration) && data.iteration >= 0 ? data.iteration : 0
         stationaryMessage.value = typeof data.message === 'string' ? data.message : ''
         stationaryRewrittenText.value = typeof data.rewrittenText === 'string' ? data.rewrittenText : ''
-        stationaryRewrittenIteration.value = Number.isInteger(data.rewrittenIteration) && data.rewrittenIteration >= 0 ? data.rewrittenIteration : 0
-        if ((data.active || !stationaryText.value.trim()) && typeof data.originalText === 'string' && data.originalText) stationaryText.value = data.originalText
-        if (data.active) stationaryLoop.value = data.loop
+        stationaryGroupId.value = data.groupId ?? null
+        stationaryRecordingId.value = data.recordingId ?? null
         manualActive.value = data.manualActive
         manualPending.value = false
         stationaryStateKnown.value = true
@@ -371,6 +360,7 @@ function onSocketOpen() {
   manualPending.value = false
   requestTourState()
   requestStationaryState()
+  send('GET_STATIONARY_LIBRARY')
   send('GET_BARRAGE_CONFIG')
   // The backend process does not persist the selected screen rectangle. If it
   // restarted while this renderer/capture survived, restore the active OCR
@@ -457,9 +447,9 @@ function startTour() {
   send('START_TOUR', { repeatCount: n })
 }
 
-function startStationary() {
+function startStationary(payload) {
   if (!canStartStationary.value) return
-  if (send('START_STATIONARY_SPEECH', { text: stationaryText.value.trim(), loop: stationaryLoop.value === true })) {
+  if (send('START_STATIONARY_SPEECH', payload)) {
     stationaryCommandPending.value = true
     awaitSpeechConfirmation()
   }
@@ -590,6 +580,7 @@ const tourStatusClass = computed(() => ({
 }
 .tour-control, .broadcast-control { min-width: 0; padding: 16px 20px; }
 .broadcast-control { border-left: 1px solid var(--border); }
+.stationary-column { display: grid; gap: 14px; min-width: 0; }
 .controls-grid { display: grid; grid-template-columns: var(--control-columns); gap: 14px; align-items: start; }
 .controls-side { display: grid; gap: 14px; min-width: 0; }
 .control-card { min-width: 0; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; }
@@ -608,22 +599,18 @@ const tourStatusClass = computed(() => ({
 .ocr-status { font-size: 11px; color: var(--amber); margin: -4px 0 12px; }
 .ocr-status.ready { color: var(--green); }
 .hint { font-size: 11px; color: var(--text-dim); margin-top: 12px; overflow-wrap: anywhere; }
-.speech-profile-hint { margin: 0 0 12px; line-height: 1.6; }
 .captured-text { color: var(--amber); }
 .card-footer { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
 .log-download { padding: 0; min-height: 24px; height: auto; color: var(--text-dim); }
 .test-actions { margin-top: 12px; }
-.stationary-view-switch { display: flex; gap: 4px; margin: 10px 0 8px; }
-.stationary-view-switch button { border: 1px solid var(--border); border-radius: 6px; background: var(--bg2); color: var(--text-dim); padding: 5px 12px; font: inherit; font-size: 12px; cursor: pointer; }
-.stationary-view-switch button[aria-pressed="true"] { color: var(--text); border-color: var(--accent, #409eff); background: rgba(64, 158, 255, .12); }
-.stationary-view-switch button:focus-visible { outline: 2px solid var(--accent, #409eff); outline-offset: 2px; }
 .status-pill { display: inline-flex; flex-wrap: wrap; font-size: 11px; padding: 2px 9px; border-radius: 20px; }
 .status-pill.running { background: rgba(74,222,128,.12); color: var(--green); }
 .status-pill.paused { background: rgba(245,158,11,.12); color: var(--amber); }
 .status-pill.dim { background: var(--bg3); color: var(--text-dim); }
 .no-ws-banner { margin-top: 14px; background: rgba(245,158,11,.08); border: 1px solid var(--amber-dim); border-radius: 8px; padding: 14px 18px; color: var(--amber); font-size: 13px; }
 @container broadcast-controls (max-width: 760px) {
-  .controls-toolbar, .controls-grid { grid-template-columns: minmax(0, 1fr); }
+  .controls-toolbar, .stationary-column { display: grid; gap: 14px; min-width: 0; }
+.controls-grid { grid-template-columns: minmax(0, 1fr); }
   .broadcast-control { border-left: 0; border-top: 1px solid var(--border); }
 }
 </style>

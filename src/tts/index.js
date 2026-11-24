@@ -312,9 +312,11 @@ export class TTSEngine {
       ...this._sentenceOptions, ...opts, role: this.role, diagnostics: this.diagnostics,
       isCurrent: () => generation === this.audioOutput?.generation,
     })
-    source.prefetch(0)
+    // A future stationary round warms only its first sentence at background
+    // priority. Its normal three-sentence window opens when playback takes over.
+    if (!opts.speculative) source.prefetch(0)
     try {
-      await source.get(0)
+      await source.get(0, { speculative: opts.speculative === true })
       return source
     } catch (error) { source.release(); throw error }
   }
@@ -389,8 +391,8 @@ export class TTSEngine {
     const sequenceState = { nextSeq: 1 }
     const units = new Map()
     let started = false, completed = 0, harvestScheduled = false
-    const harvest = this.harvest && opts.harvest !== false
-      ? new SentenceHarvest(source.text, source.length, sentenceCacheKey(source.text, source.client)) : null
+    const harvest = opts.onRecording || (this.harvest && opts.harvest !== false)
+      ? new SentenceHarvest(source.text, source.length, sentenceCacheKey(source.text, source.client), opts.onRecording) : null
     if (harvest) this._harvests.add(harvest)
     const diag = (type, fields = {}) => this.diagnostics?.event?.(type, {
       source: this.role === 'cruise' ? 'point' : this.role, sessionId: utteranceId, ...fields,
@@ -473,12 +475,15 @@ export class TTSEngine {
         coordination.boundary(remaining && units.get(completed)?.ready === true, { hold: remaining })
         if (remaining) fillWindow(completed)
       }
+      let recording
       if (harvest) {
         harvestScheduled = true
-        harvest.finish().finally(async () => { await harvest.dispose(); this._harvests.delete(harvest) }).catch(() => {})
+        const saved = harvest.finish().finally(async () => { await harvest.dispose(); this._harvests.delete(harvest) })
+        saved.catch(() => {})
+        if (opts.onRecording) recording = saved
       }
       diag('playback-end', { sentenceCount: completed, reason: 'finished' })
-      return { ok: true, utteranceId, completedSentences: completed }
+      return { ok: true, utteranceId, completedSentences: completed, ...(recording && { recording }) }
     } catch (error) {
       return this._operationError(error, operation)
     } finally {
@@ -591,12 +596,13 @@ function abortable(promise, signal) {
 // private spool is bounded and disposed on cancellation or conversion failure.
 let activeHarvests = 0
 class SentenceHarvest {
-  constructor(text, count, hash) {
+  constructor(text, count, hash, onRecording) {
+    this.onRecording = onRecording
     this.text = text
     this.count = count
     this.hash = hash
     this.bytes = 0
-    this.disabled = activeHarvests >= 2
+    this.disabled = !onRecording && activeHarvests >= 2
     this.slot = !this.disabled
     if (this.slot) activeHarvests++
     this.files = []
@@ -608,7 +614,7 @@ class SentenceHarvest {
   append(index, buffer) {
     if (this.disabled) return
     this.bytes += buffer.length
-    if (this.bytes > 16 * 1024 * 1024) { this.disabled = true; return }
+    if (!this.onRecording && this.bytes > 16 * 1024 * 1024) { this.disabled = true; return }
     if (!this.directoryPromise) this.directoryPromise = mkdtemp(path.join(tmpdir(), 'robot-tts-harvest-')).then(dir => (this.directory = dir))
     const pending = this.directoryPromise.then(async dir => {
       const file = path.join(dir, `${index}.mp3`)
@@ -619,9 +625,16 @@ class SentenceHarvest {
   }
   async finish() {
     await Promise.all(this.writes)
-    if (this.disabled || this.files.length !== this.count || this.files.some(file => !file)) return
+    if (this.disabled || this.files.length !== this.count || this.files.some(file => !file)) {
+      if (this.onRecording) throw new Error('未能保存完整轮次录音，请检查磁盘空间')
+      return
+    }
     try {
-      if (this.count === 1) { await savePreparedHarvest(this.text, await readFile(this.files[0]), this.hash); return }
+      const save = async file => {
+        if (this.onRecording) return this.onRecording(file)
+        return savePreparedHarvest(this.text, await readFile(file), this.hash)
+      }
+      if (this.count === 1) return await save(this.files[0])
       const list = path.join(this.directory, 'segments.txt')
       await writeFile(list, this.files.map(file => `file '${file.replace(/'/g, "'\\''")}'`).join('\n'))
       const joined = path.join(this.directory, 'utterance.mp3')
@@ -634,8 +647,12 @@ class SentenceHarvest {
         child.once('close', code => { cleanup(); code === 0 ? resolve() : reject(new Error('TTS utterance merge failed')) })
       })
       const result = await stat(joined)
-      if (!this.disabled && result.size <= 16 * 1024 * 1024) await savePreparedHarvest(this.text, await readFile(joined), this.hash)
-    } catch (error) { console.warn('[TTS Harvester] 合并失败:', error.code || error.name) }
+      if (!this.disabled && (this.onRecording || result.size <= 16 * 1024 * 1024)) await save(joined)
+      else if (this.onRecording) throw new Error('整轮录音保存已取消')
+    } catch (error) {
+      if (this.onRecording) throw error
+      console.warn('[TTS Harvester] 合并失败:', error.code || error.name)
+    }
   }
   async dispose() {
     await Promise.all(this.writes)

@@ -64,10 +64,10 @@ export class LLMRewriter {
     const result = await this._tryProviderCustom(this.primary, system, user, { signal })
       || await this._tryProviderCustom(this.fallback, system, user, { signal })
     signal?.throwIfAborted()
-    if (!result?.text?.trim()) throw new Error('原地播报改写失败，请检查“巡游讲解”的 LLM 配置；未播放原文')
+    if (!result?.text?.trim()) throw new Error('定点播放改写失败，请检查“巡游讲解”的 LLM 配置；未播放原文')
     const cleaned = this.filter.clean(result.text, '')
     if (!cleaned.text.trim() || cleaned.text.includes('[[NO_SPEECH]]')) {
-      throw new Error('原地播报改写未生成可播放内容，请检查输入资料、提示词或违禁词设置')
+      throw new Error('定点播放改写未生成可播放内容，请检查输入资料、提示词或违禁词设置')
     }
     return { text: cleaned.text, source: 'llm', provider: result.provider }
   }

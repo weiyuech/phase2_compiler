@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('api', {
   selectMultipleMp3Files: () => ipcRenderer.invoke('select-multiple-mp3-files'),
   selectDocumentFile: () => ipcRenderer.invoke('select-document-file'),
   downloadBarrageLog: () => ipcRenderer.invoke('download-barrage-log'),
+  exportStationaryAudio: (groupId, recordingId) => ipcRenderer.invoke('export-stationary-audio', groupId, recordingId),
   exportTtsAudio: (hash, defaultFilename) => ipcRenderer.invoke('export-tts-audio', hash, defaultFilename),
 
   // Banned words

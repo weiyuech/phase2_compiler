@@ -204,7 +204,7 @@ test('backend refuses simultaneous tour, manual, duplicate stationary and reject
   assert.deepEqual(h.calls, [])
   assert.equal(h.controls.canStartTour(), false)
   await h.send('START_STATIONARY_SPEECH', { text: 'duplicate' })
-  assert.match(h.socket.messages.at(-1).data.message, /原地播报正在进行/)
+  assert.match(h.socket.messages.at(-1).data.message, /定点播放正在进行/)
   await h.send('STOP_STATIONARY_SPEECH')
   await h.controls.stationary.finished
   assert.equal(h.controls.canStartTour(), true)

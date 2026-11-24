@@ -220,3 +220,16 @@ test('blank cruise credentials fail stationary speech without borrowing configur
   assert.deepEqual(h.localWrites, [{ role: 'transit', buffer: mp3 }])
   assert.equal(h.controls.snapshot().state, 'failed', 'Manual success must not restart the failed stationary loop')
 })
+
+test('completed multi-sentence TTS exports one decodable whole-round MP3, not separate sentence recordings', { timeout: 10000 }, async t => {
+  const h = await fixture(t, { destination: 'local' })
+  const recordings=[]
+  const result=await h.services.stationaryTts.speak('第一句介绍商品。第二句介绍吃法。', { harvest:false, onRecording:async file=>{recordings.push(await readFile(file))} })
+  assert.equal(result.ok,true)
+  await result.recording
+  assert.equal(recordings.length,1)
+  assert.ok(h.calls.length>=2,'fixture exercises sentence stitching')
+  const pcm=convert(['-f','mp3','-i','pipe:0','-vn','-ac','1','-ar','16000','-f','s16le','pipe:1'],recordings[0])
+  assert.ok(pcm.length>expectedPcm.length*1.5,'archive contains both sentences')
+  assert.equal(h.services.stationaryTts._harvests.size,0)
+})

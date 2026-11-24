@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import vm from 'node:vm'
 import { LLMRewriter } from '../src/llm/index.js'
-import { DEFAULT_STATIONARY_PROMPT, LEGACY_STATIONARY_PROMPT } from '../src/llm/stationary-prompt.js'
+import { buildStationaryPrompt, DEFAULT_STATIONARY_PROMPT, LEGACY_STATIONARY_PROMPT } from '../src/llm/stationary-prompt.js'
 import { readStationaryPrompt, readStationaryOptions, readStationaryStylePrompt, writeStationaryPrompt, stationaryPromptPath } from '../src/llm/stationary-prompt-store.js'
 
 function fixture(t, config = {}) {
@@ -21,6 +21,18 @@ function fixture(t, config = {}) {
   return { directory, llm: new LLMRewriter({ LLM_FALLBACK_PROVIDER: 'none', ...config }) }
 }
 
+test('short stationary rounds vary delivery and a previous question always leads into a statement', () => {
+  const structure = (iteration, previousText = '') => {
+    const { user } = buildStationaryPrompt('喜乐', { iteration, previousText })
+    return JSON.parse(user.split('\n')[1]).structure_instruction
+  }
+  assert.match(DEFAULT_STATIONARY_PROMPT, /称呼听众时用“您”或“大家”/)
+  assert.match(structure(1), /陈述句.*不提问/)
+  assert.match(structure(2, '刚才说到喜乐。'), /陈述句.*不提问/)
+  assert.match(structure(3, '刚才说到喜乐。'), /提一个简短的问题/)
+  assert.match(structure(3, '您怎么理解呀？”'), /这次只说一句陈述句，不提问/)
+})
+
 test('stationary uses its own default, reloads custom settings per round and bounds prior phrasing', async t => {
   const { llm } = fixture(t)
   const requests = []
@@ -33,7 +45,7 @@ test('stationary uses its own default, reloads custom settings per round and bou
   assert.equal(requests[0].input.original_text, '原始资料')
   assert.equal(requests[0].input.previous_version_excerpt, '')
   assert.equal(requests[0].input.style_instruction, null)
-  assert.match(requests[0].input.structure_instruction, /欢迎语/)
+  assert.match(requests[0].input.structure_instruction, /用一句/)
   writeStationaryPrompt('自定义原地播报规则')
   await llm.rewriteStationary('原始资料', { iteration: 2, previousText: '旧'.repeat(4000) })
   assert.equal(requests[1].system, '自定义原地播报规则')
@@ -109,9 +121,9 @@ test('nullable style is used only with default prompt; older defaults migrate wi
   assert.equal(readStationaryOptions().customEnabled, true)
   assert.equal(Object.hasOwn(requests.at(-1).input, 'style_instruction'), false, 'explicit custom mode disables the style even before editing the default text')
   writeStationaryPrompt(DEFAULT_STATIONARY_PROMPT, stationaryPromptPath(), '搞怪一点，激情一点', false)
-  await llm.rewriteStationary('原文', { iteration: 2 })
+  await llm.rewriteStationary('原文', { iteration: 2, previousText: '前一次的说法。' })
   assert.equal(requests.at(-1).input.style_instruction, '搞怪一点，激情一点')
-  assert.match(requests.at(-1).input.structure_instruction, /不要以欢迎语开头/)
+  assert.match(requests.at(-1).input.structure_instruction, /上一版已经播过/)
   for (const style of [null, '', '  ']) {
     writeStationaryPrompt(DEFAULT_STATIONARY_PROMPT, stationaryPromptPath(), style)
     await llm.rewriteStationary('原文')

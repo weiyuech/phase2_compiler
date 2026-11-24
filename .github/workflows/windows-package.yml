@@ -305,6 +305,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: release-windows
+          retention-days: 1
           path: |
             release/*.exe
             release/packaged-runtime.json

@@ -1,0 +1,10 @@
+name: Desktop EXE preview (24h)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    uses: ./.github/workflows/windows-package.yml
+    permissions:
+      contents: read

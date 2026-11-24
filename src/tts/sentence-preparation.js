@@ -59,14 +59,14 @@ function splitLongSentence(sentence) {
   return parts
 }
 
-export function splitSentences(text) {
+export function splitSentences(text, { splitOnSemicolons = true } = {}) {
   const value = String(text || '').trim()
   if (!value) return []
   const sentences = []
   let start = 0
   for (let index = 0; index < value.length; index++) {
     const char = value[index]
-    if (!'。！？!?；;.'.includes(char)) continue
+    if (!'。！？!?.'.includes(char) && !(splitOnSemicolons && '；;'.includes(char))) continue
     if (char === '.') {
       if (/\d/.test(value[index - 1] || '') && /\d/.test(value[index + 1] || '')) continue
       if (/[A-Za-z0-9]/.test(value[index + 1] || '')) continue // host names/initials
