@@ -1,5 +1,7 @@
 name: Desktop EXE preview (24h)
 on:
+  push:
+    branches: [codex/desktop-stationary-test9]
   workflow_dispatch:
 permissions:
   contents: read
