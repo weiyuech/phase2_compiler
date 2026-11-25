@@ -108,22 +108,25 @@ test('broadcast group uses its red pause/resume button without a separate runnin
   assert.match(pause.loc.source, /暂停播报/)
 })
 
-test('lower workspace places transit beside barrage, stationary, and manual speech cards', () => {
+test('lower workspace groups named stationary playback with transit, beside barrage and manual speech', () => {
   const grid = uniqueControl('controls-grid').node
   const transitCard = uniqueControl('transit-card')
   const side = uniqueControl('controls-side')
-  assert.equal(transitCard.ancestors.at(-1), grid, 'transit is a direct grid child')
+  const stationaryColumn = controlNodes.find(({ node }) => hasClass(node, 'stationary-column'))
+  assert.ok(stationaryColumn, 'stationary playback and transit share the left column')
+  assert.equal(stationaryColumn.ancestors.at(-1), grid, 'stationary column is a direct grid child')
+  assert.equal(transitCard.ancestors.at(-1), stationaryColumn.node, 'transit follows stationary playback in its column')
   assert.ok(hasClass(transitCard.node, 'control-card'))
   assert.equal(side.ancestors.at(-1), grid, 'right stack is a direct grid child')
-  assert.ok(grid.children.indexOf(transitCard.node) < grid.children.indexOf(side.node), 'transit precedes the right stack')
+  assert.ok(grid.children.indexOf(stationaryColumn.node) < grid.children.indexOf(side.node), 'stationary column precedes the right stack')
+  const stationary = stationaryColumn.node.children.find(node => node.tag === 'StationaryPlayback')
+  assert.ok(stationary, 'one stationary playback panel is mounted before transit')
   const sideCards = side.node.children.filter(node => hasClass(node, 'control-card'))
-  assert.equal(sideCards.length, 3)
+  assert.equal(sideCards.length, 2)
   assert.ok(hasClass(sideCards[0], 'barrage-card'))
-  assert.ok(hasClass(sideCards[1], 'stationary-card'))
-  assert.ok(hasClass(sideCards[2], 'test-card'))
+  assert.ok(hasClass(sideCards[1], 'test-card'))
   assert.ok(hasTitle(sideCards[0], '弹幕识别'))
-  assert.ok(hasTitle(sideCards[1], '原地播报'))
-  assert.ok(hasTitle(sideCards[2], '手动播报测试'))
+  assert.ok(hasTitle(sideCards[1], '手动播报测试'))
 })
 
 test('transition audio remains always mounted with one shared form and socket binding', () => {

@@ -143,7 +143,7 @@ test('optional style loads, survives mode switches and saves null when blank', a
   await h.state.savePrompt()
   assert.equal(h.writes.at(-1).stylePrompt, null)
   assert.equal(h.writes.at(-1).customEnabled, false)
-  assert.match(descriptor.template.content, /aria-label="原地播报补充风格要求" :disabled="customStationaryEnabled"/)
+  assert.match(descriptor.template.content, /aria-label="定点播放补充风格要求" :disabled="customStationaryEnabled"/)
 })
 
 test('explicit custom mode survives reload even if its text still matches the default', async t => {

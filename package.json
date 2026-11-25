@@ -25,5 +25,10 @@
   },
   "overrides": {
     "adm-zip": "0.6.0"
+  },
+  "allowScripts": {
+    "ffmpeg-static": true,
+    "ntsuspend": true,
+    "onnxruntime-node": true
   }
 }
